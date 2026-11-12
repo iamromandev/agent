@@ -1,0 +1,105 @@
+# Runs what the pre-commit hooks run, on the assumption that nobody ran them:
+# a hook is a local courtesy that any clone can skip.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [dev]
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  api:
+    name: api — lint, types, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: api
+    steps:
+      - uses: actions/checkout@v5
+
+      # Keyed on the pyproject, not on the lockfile: ``**/*.lock`` is gitignored,
+      # so ``uv sync`` resolves afresh here. ``requires-python = "==3.15.0"``
+      # still pins the interpreter.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: api/pyproject.toml
+
+      - name: Install dependencies
+        run: uv sync
+
+      # ``check-ci`` rather than ``check``: ``ruff check --fix`` exits 0 once it
+      # has fixed what it found, so it would pass a branch that does not lint.
+      - name: Lint and type-check
+        run: make check-ci
+
+      # ``Settings`` is built at import time and its fields have no defaults, so
+      # a clean checkout needs these throwaway values. Nothing connects to them.
+      - name: Tests
+        run: make test
+        env:
+          ENV: local
+          DEBUG: "false"
+          LOG_FORMAT: text
+          DB_ENGINE: tortoise.backends.asyncpg
+          DB_HOST: localhost
+          DB_PORT: "5432"
+          DB_NAME: ci
+          DB_USER: ci
+          DB_PASSWORD: ci
+
+  cli:
+    name: cli — lint, types, tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: cli/pyproject.toml
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: Lint and type-check
+        run: make check-ci
+
+      - name: Tests
+        run: make test
+
+  ui:
+    name: ui — formatting, types, tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      # No --frozen-lockfile: ``ui/bun.lock`` is gitignored. Direct dependencies
+      # are exactly pinned in package.json; their transitives are not.
+      - name: Install dependencies
+        run: bun install --cwd ui
+
+      - name: Formatting
+        run: bun run --cwd ui web:format.check
+
+      - name: Types
+        run: bun run --cwd ui web:check
+
+      - name: Tests
+        run: bun run --cwd ui web:test

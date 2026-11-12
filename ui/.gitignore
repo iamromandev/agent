@@ -1,0 +1,12 @@
+# core
+.idea
+
+# project
+node_modules
+dist
+bun.lock
+
+# caches
+.eslintcache
+.cache
+*.tsbuildinfo

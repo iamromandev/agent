@@ -1,0 +1,33 @@
+[project]
+name = "agent-api"
+version = "0.0.1"
+description = "Agent API"
+requires-python = "==3.15.0"
+dependencies = [
+    ### core ###
+    "toml==0.10.2",
+    "loguru==0.7.3",
+    "fastapi[all]==0.143.0",
+    "python-ulid[pydantic]==4.0.1",
+    ### db ###
+    "tortoise-orm[asyncpg, accel]==1.1.8",
+    ### others ###
+    "httpx==0.28.1",
+]
+
+[dependency-groups]
+dev = [
+    "pre-commit==4.7.0",
+    "ruff==0.17.0",
+    "ty==0.0.86",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[tool.tortoise]
+tortoise_orm = "src.data.db.DB_CONFIG"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_default_fixture_loop_scope = "function"

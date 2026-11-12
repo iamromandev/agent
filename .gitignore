@@ -1,0 +1,11 @@
+### core ###
+.idea
+.vscode
+.ds_store
+.DS_Store
+.claude
+.superpowers
+.worktrees
+
+### project ###
+docs/conf/*

@@ -1,0 +1,12 @@
+### allow ###
+!.env.example
+
+### cache ###
+__pycache__
+.pytest_cache
+.ruff_cache
+.venv
+
+### generated ###
+**/*.lock
+**/*.pyc

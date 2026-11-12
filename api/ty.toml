@@ -1,0 +1,23 @@
+# ty's rules live here, next to ruff.toml. ty reads this file instead of [tool.ty] in pyproject.toml.
+
+# Tortoise's ``Field`` is a typed descriptor: ``fields.CharField(...)`` returns a
+# ``CharField[str]`` while ``__get__`` yields ``str`` on instance access. The
+# models annotate the value type because that documents the column, which ty
+# reads as assigning a descriptor to a ``str``. Tortoise also generates the
+# ``<relation>_id`` attributes at runtime, and ty 0.0.86 rejects every nested
+# ``class Meta`` as an override of the base class's.
+[[overrides]]
+include = ["src/data/db/model/**", "src/core/base.py"]
+
+[overrides.rules]
+invalid-assignment = "ignore"
+unresolved-attribute = "ignore"
+invalid-attribute-override = "ignore"
+
+# Tortoise writes these migrations; both complaints come from its own stubs.
+[[overrides]]
+include = ["src/data/db/migration/**"]
+
+[overrides.rules]
+invalid-attribute-override = "ignore"
+invalid-argument-type = "ignore"

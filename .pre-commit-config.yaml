@@ -1,0 +1,79 @@
+# Runs the checks this repo already runs, at the moment they are cheapest to
+# fix. Nothing here is a new opinion: every hook mirrors something in
+# ``make -C api check``, ``make -C cli check`` or ``bun run --cwd ui web:check``.
+#
+# Install once:
+#     uv run --directory api pre-commit install
+#
+# ``pre-commit`` has been a dev dependency since before there was a config for
+# it to read.
+
+default_install_hook_types: [pre-commit]
+fail_fast: false
+
+repos:
+  # ── Python ───────────────────────────────────────────────────────────────
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    # Pinned to the ruff in api/pyproject.toml. A hook that lints with a
+    # different version than ``make check`` is a hook that argues with CI.
+    rev: v0.17.0
+    hooks:
+      # ``ruff check`` only.
+      #
+      # ``ruff-format`` is deliberately absent, and must stay absent: since
+      # 0.15 it rewrites ``except (A, B):`` into invalid Python. ``make -C api
+      # check`` runs the linter alone for exactly this reason, and a hook that
+      # quietly ran the formatter would reintroduce the bug on every commit,
+      # in files nobody was looking at.
+      - id: ruff-check
+        args: [--fix]
+        files: ^(api|cli)/.*\.py$
+
+  - repo: local
+    hooks:
+      - id: ty
+        name: ty (api type check)
+        # The project's own command, so the hook and the Makefile cannot
+        # disagree. ty checks the whole project rather than single files, so
+        # filenames are not passed — ``files`` only decides *whether* it runs.
+        entry: uv run --directory api ty check
+        language: system
+        pass_filenames: false
+        files: ^api/.*\.py$
+        types: [python]
+
+      - id: ty-cli
+        name: ty (cli type check)
+        entry: uv run --directory cli ty check
+        language: system
+        pass_filenames: false
+        files: ^cli/.*\.py$
+        types: [python]
+
+      # ── Front end ────────────────────────────────────────────────────────
+      - id: prettier
+        name: prettier (ui)
+        #
+        # The project's own script, run from ``ui/apps/web``, rather than the
+        # binary invoked from the repository root.
+        #
+        # Two things resolve relative to the working directory and neither can
+        # be made to from here: the prettier binary itself (root has no
+        # ``node_modules/.bin``, so ``bunx`` would fetch a different version
+        # from the registry than the one pinned), and ``plugins`` in
+        # ``.prettierrc.json`` — the tailwind plugin fails outright with
+        # "Cannot find package" when prettier runs from the root.
+        #
+        # So it delegates, and cannot drift from what ``bun run --cwd ui
+        # web:format`` does, because it is the same command.
+        #
+        # --check, never --write: a hook that reformats behind you produces
+        # exactly the surprise this config was added to stop.
+        #
+        # Checks the whole UI tree rather than the staged files, which is what
+        # ``pass_filenames: false`` means here. It costs about a second and it
+        # is what the format check is for.
+        entry: bun run --cwd ui/apps/web format.check
+        language: system
+        pass_filenames: false
+        files: ^ui/apps/web/.*\.(ts|tsx|js|jsx|css|json|html)$
