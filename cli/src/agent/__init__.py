@@ -1,5 +1,6 @@
 from .events import AgentEvent as AgentEvent
 from .events import AssistantText as AssistantText
+from .events import Compacting as Compacting
 from .events import EventSink as EventSink
 from .events import Notice as Notice
 from .events import ToolFinished as ToolFinished

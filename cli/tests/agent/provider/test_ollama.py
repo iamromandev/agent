@@ -75,6 +75,14 @@ async def test_recorded_text_stream_yields_deltas_in_order(fixture_path: Callabl
     assert sum(isinstance(e, Done) for e in events) == 1
 
 
+async def test_a_cached_done_chunk_reports_the_full_prompt_size(fixture_path: Callable[[str], Path]) -> None:
+    """AC16: prompt_eval_count (2029) already includes the cached tokens (2028); they are not added again."""
+    body = fixture_path("ollama/done_cached.ndjson").read_bytes()
+    events = await _events(_provider(_serving(body)))
+
+    assert events == [Done(prompt_tokens=2029, completion_tokens=3)]
+
+
 async def test_missing_id_gets_a_generated_one() -> None:
     body = _ndjson(
         {"message": {"content": "ok"}, "done": False},

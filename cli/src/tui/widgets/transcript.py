@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Literal, cast
 
 from rich.syntax import Syntax
@@ -11,8 +12,10 @@ from textual.content import Content
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
+from src.agent.session import TranscriptItem
 from src.agent.tools.base import Preview, ToolResult
 
+REPLAY_BATCH = 500  # entries mounted at once when a saved conversation is redrawn
 ICONS = {"info": "ℹ", "warn": "⚠", "error": "✗"}  # noqa: RUF001 - the info sign is the intended glyph
 
 
@@ -27,9 +30,9 @@ class UserEntry(Static):
 class AssistantEntry(Markdown):
     DEFAULT_CSS = "AssistantEntry { margin: 0 1; }"
 
-    def __init__(self) -> None:
-        super().__init__(open_links=False)  # model text must not open the browser by itself
-        self.text = ""
+    def __init__(self, text: str = "") -> None:
+        super().__init__(text, open_links=False)  # model text must not open the browser by itself
+        self.text = text
         self._stream: MarkdownStream | None = None
 
     async def write(self, delta: str) -> None:
@@ -63,10 +66,12 @@ def _literal(text: str) -> str:
 class ToolEntry(Collapsible):
     """One tool call: `label · summary`, with the output (and the applied diff) inside."""
 
-    def __init__(self, label: str) -> None:
-        super().__init__(title=_literal(label), collapsed=True)
+    def __init__(self, label: str, summary: str | None = None) -> None:
+        """`summary` given: a finished call that is only shown (a replayed one), with nothing inside."""
+        shown = label if not summary else f"{label} · {summary}"
+        super().__init__(title=_literal(shown), collapsed=True)
         self.label = label
-        self.finished = False
+        self.finished = summary is not None
         self.detail = ""
 
     async def finish(self, result: ToolResult | None, preview: Preview | None, applied: bool, note: str = "") -> None:
@@ -131,6 +136,28 @@ class Transcript(VerticalScroll):
     ) -> None:
         await self.end_assistant()
         await self._add(NoticeEntry(level, text, icon))
+
+    async def replay(self, items: Sequence[TranscriptItem]) -> None:
+        """Redraw a saved conversation. Tool entries come back collapsed, with their summary and no diff.
+
+        The entries are mounted in batches: one at a time, a session of a few thousand messages takes
+        far too long to draw.
+        """
+        await self.end_assistant()
+        entries: list[Static | Markdown | Collapsible] = []
+        for item in items:
+            match item.kind:
+                case "user":
+                    entries.append(UserEntry(item.text))
+                case "assistant":
+                    entries.append(AssistantEntry(item.text))
+                case "tool":
+                    entries.append(ToolEntry(item.text, item.summary))
+                case "notice":
+                    entries.append(NoticeEntry("info", item.text))
+        for start in range(0, len(entries), REPLAY_BATCH):
+            await self.mount_all(entries[start : start + REPLAY_BATCH])
+        self.scroll_end(animate=False)
 
     async def clear_all(self) -> None:
         await self.end_assistant()

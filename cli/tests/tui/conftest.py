@@ -1,17 +1,27 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
 from src.agent import Agent
 from src.agent.approval import Approver
-from src.agent.provider.base import ProviderEvent
+from src.agent.provider.base import Message, ProviderEvent
+from src.agent.session import (
+    FileRecorder,
+    Recorder,
+    SessionStore,
+    ToolMeta,
+    sessions_root,
+    workspace_dir,
+)
 from src.agent.tools import default_tools
 from src.agent.tools.base import ToolContext
+from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
 
@@ -37,18 +47,73 @@ def make_app(tmp_path: Path) -> AppFactory:
         max_steps: int = 5,
         workspace: Path | None = None,
         on_close: Callable[[], Awaitable[None]] | None = None,
+        start: StartChoice = NEW,
+        compact_at: float = 0.8,
+        compact_keep_turns: int = 2,
+        tools: bool = True,
     ) -> AgentApp:
+        """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
         provider = ScriptedProvider(
             script or [], delay=delay, model=model, context_window=context_window, check_result=check_result
         )
+        sessions = sessions_root(None)  # AGENT_SESSIONS_DIR: a folder of this test only
+
+        def new_recorder() -> Recorder:
+            return FileRecorder(workspace_dir(sessions, root), root)
 
         def factory(approver: Approver) -> Agent:
-            return Agent(provider, default_tools(), approver, ToolContext(root, 5.0), max_steps)
+            return Agent(
+                provider,
+                default_tools() if tools else [],
+                approver,
+                ToolContext(root, 5.0),
+                max_steps,
+                recorder=new_recorder(),
+                compact_at=compact_at,
+                compact_keep_turns=compact_keep_turns,
+            )
 
-        return AgentApp(factory, provider, root, on_close=on_close)
+        return AgentApp(
+            factory,
+            provider,
+            root,
+            store=SessionStore(sessions, root),
+            start=start,
+            recorder_factory=new_recorder,
+            on_close=on_close,
+        )
 
     return build
+
+
+SavedMessages = Sequence[tuple[Message, ToolMeta | None]]
+
+
+@pytest.fixture
+def save_session(tmp_path: Path) -> Callable[..., Path]:
+    """Write a session file for the test workspace through a real FileRecorder; returns its path.
+
+    `age` is how many seconds ago it was last updated (its mtime), so tests can order sessions.
+    """
+
+    def save(messages: SavedMessages, *, workspace: Path | None = None, age: float = 0.0) -> Path:
+        root = (workspace or tmp_path).resolve()
+        recorder = FileRecorder(workspace_dir(sessions_root(None), root), root)
+        for message, meta in messages:
+            recorder.message(message, meta)
+        recorder.close()
+        assert recorder.path is not None
+        when = time.time() - age
+        os.utime(recorder.path, (when, when))
+        return recorder.path
+
+    return save
+
+
+def chat(user: str, assistant: str) -> list[tuple[Message, ToolMeta | None]]:
+    """One saved exchange."""
+    return [(Message("user", user), None), (Message("assistant", assistant), None)]
 
 
 async def until(pilot: Pilot, condition: Callable[[], bool], timeout: float = 5.0) -> None:
