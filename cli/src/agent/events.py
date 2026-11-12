@@ -38,6 +38,14 @@ class Notice:
 class UsageUpdate:
     used: int
     window: int
+    estimated: bool = False  # True: a guess from text length, not a count from the model; shown with a "~"
+
+
+@dataclass(frozen=True)
+class Compacting:
+    """The slow part of a compaction (the summary request, about 10 s on a local model) starts or ends."""
+
+    active: bool
 
 
 @dataclass(frozen=True)
@@ -45,5 +53,5 @@ class TurnEnded:
     status: Literal["done", "interrupted", "step_limit", "error"]
 
 
-AgentEvent = AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | TurnEnded
+AgentEvent = AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded
 EventSink = Callable[[AgentEvent], None]

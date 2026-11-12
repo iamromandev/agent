@@ -20,6 +20,7 @@ from src.agent.events import (
 from src.agent.loop import Agent, AgentBusy
 from src.agent.mode import Mode
 from src.agent.provider.base import Done, Message, ProviderError, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from src.agent.session import NullRecorder
 from src.agent.tools import default_tools
 from src.agent.tools.base import Prepared, Tool, ToolContext, ToolResult
 from src.agent.tools.text import TOOL_OUTPUT_LIMIT
@@ -201,6 +202,11 @@ async def test_a_done_event_updates_usage(ctx: ToolContext) -> None:
     await agent.run_turn("q", events)
 
     assert events.of(UsageUpdate) == [UsageUpdate(used=823, window=1000)]
+
+
+async def test_usage_updates_are_not_marked_estimated_by_default() -> None:
+    assert UsageUpdate(used=1, window=2).estimated is False
+    assert UsageUpdate(used=1, window=2, estimated=True).estimated is True
 
 
 # --- AC7: step limit -------------------------------------------------------------------------
@@ -545,20 +551,6 @@ async def test_set_mode_changes_the_mode(ctx: ToolContext) -> None:
     assert agent.mode is Mode.PLAN
 
 
-async def test_clear_empties_history_and_keeps_mode_and_grants(ctx: ToolContext) -> None:
-    agent, _, _ = make_agent(ctx, [reply(TextDelta("ok"))])
-    await agent.run_turn("q", Events())
-    agent.set_mode(Mode.PLAN)
-    agent.grants.add("edit", {})
-    assert agent.history
-
-    agent.clear()
-
-    assert agent.history == []
-    assert agent.mode is Mode.PLAN
-    assert agent.grants.covers("edit", {}, Mode.BUILD)
-
-
 # --- AC5 loop part: provider errors ----------------------------------------------------------
 
 
@@ -657,7 +649,7 @@ async def test_run_turn_while_a_turn_runs_raises_busy(ctx: ToolContext) -> None:
         await first
 
 
-async def test_clear_while_a_turn_runs_raises_busy(ctx: ToolContext) -> None:
+async def test_reset_while_a_turn_runs_raises_busy(ctx: ToolContext) -> None:
     approver = BlockingApprover()
     agent, _, _ = make_agent(ctx, [reply(call("bash", command="ls"))])
     agent.approver = approver
@@ -665,7 +657,7 @@ async def test_clear_while_a_turn_runs_raises_busy(ctx: ToolContext) -> None:
     await approver.asked.wait()
 
     with pytest.raises(AgentBusy):
-        agent.clear()
+        agent.reset(recorder=NullRecorder())
 
     assert agent.history  # untouched
     first.cancel()
@@ -683,7 +675,7 @@ async def test_the_agent_is_not_busy_after_a_cancelled_turn(ctx: ToolContext) ->
     with pytest.raises(asyncio.CancelledError):
         await first
 
-    agent.clear()  # no AgentBusy
+    agent.reset(recorder=NullRecorder())  # no AgentBusy
     provider.script.append(reply(TextDelta("fine")))
     await agent.run_turn("two", Events())
 
@@ -697,7 +689,7 @@ async def test_the_agent_is_not_busy_after_a_finished_turn(ctx: ToolContext) -> 
     await agent.run_turn("two", Events())
 
     assert len(provider.requests) == 2
-    agent.clear()
+    agent.reset(recorder=NullRecorder())
 
 
 # --- N4: a surprise never escapes run_turn ---------------------------------------------------

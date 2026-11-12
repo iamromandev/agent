@@ -44,6 +44,8 @@ class ToolCallEvent:
 
 @dataclass(frozen=True)
 class Done:
+    # prompt_tokens is the full size of the prompt that was sent, cached tokens included: a backend
+    # that reports the cached part separately must add it. completion_tokens is the reply's size.
     prompt_tokens: int
     completion_tokens: int
 

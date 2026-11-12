@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncGenerator, Callable, Sequence
+import contextlib
+from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
 
 from src.agent.approval import ApprovalRequest, Choice, Decision
 from src.agent.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
+from src.agent.session import SessionWriteError, ToolMeta
 
 
 @dataclass
@@ -96,3 +98,70 @@ class BlockingApprover:
         self.asked.set()
         await self.release.wait()
         return self.answer
+
+
+@dataclass(frozen=True)
+class RecordedCompaction:
+    history: list[Message]
+    tool_meta: dict[str, ToolMeta]
+    pruned: int
+    summarized: int
+    before: int
+    after: int
+
+
+class MemoryRecorder:
+    """A Recorder that keeps what it was given, and can be told to fail.
+
+    Like FileRecorder, a failed call keeps its record queued: the next successful call writes the
+    queued records first, in order, so `messages` never has a gap. `close()` makes one last attempt
+    to write what is queued and never raises.
+    """
+
+    def __init__(self, fail: int = 0, error: Exception | None = None) -> None:
+        self.messages: list[tuple[Message, ToolMeta | None]] = []
+        self.compactions: list[RecordedCompaction] = []
+        self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction] = []  # both kinds, in write order
+        self.fail = fail  # the next `fail` calls raise
+        self.error = error  # what they raise (default: SessionWriteError)
+        self.calls = 0
+        self.closed = 0
+        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction] = []
+
+    def _write(self) -> None:
+        """One write attempt for everything queued: all of it, or (when told to fail) none."""
+        self.calls += 1
+        if self.fail > 0:
+            self.fail -= 1
+            raise self.error or SessionWriteError("disk full")
+        for record in self._queued:
+            if isinstance(record, RecordedCompaction):
+                self.compactions.append(record)
+            else:
+                self.messages.append(record)
+        self.records.extend(self._queued)
+        self._queued.clear()
+
+    def message(self, message: Message, meta: ToolMeta | None) -> None:
+        self._queued.append((message, meta))
+        self._write()
+
+    def compaction(
+        self,
+        history: Sequence[Message],
+        tool_meta: Mapping[str, ToolMeta],
+        pruned: int,
+        summarized: int,
+        before: int,
+        after: int,
+    ) -> None:
+        self._queued.append(
+            RecordedCompaction([copy(m) for m in history], dict(tool_meta), pruned, summarized, before, after)
+        )
+        self._write()
+
+    def close(self) -> None:
+        self.closed += 1
+        if self._queued:
+            with contextlib.suppress(Exception):
+                self._write()

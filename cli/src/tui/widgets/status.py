@@ -35,9 +35,11 @@ class StatusBar(Static):
     pending_mode: reactive[bool] = reactive(False)  # a toggle that applies from the next request
     model: reactive[str] = reactive("")
     used: reactive[int] = reactive(0)
+    estimated: reactive[bool] = reactive(False)  # `used` is a guess (resumed or compacted), shown with a "~"
     window: reactive[int] = reactive(0)
     workspace: reactive[str] = reactive("")
     busy: reactive[bool] = reactive(False)
+    compacting: reactive[bool] = reactive(False)  # a summary is being written: slow, and Esc cancels it
     error: reactive[str | None] = reactive(None)
 
     line: str = ""
@@ -50,8 +52,10 @@ class StatusBar(Static):
 
     def _redraw(self) -> None:
         mode = self.mode.value.upper() + (" (next request)" if self.pending_mode else "")
-        parts = [mode, self.model, f"ctx {self.used} / {self.window}", self.workspace]
-        if self.busy:
+        parts = [mode, self.model, f"ctx {'~' if self.estimated else ''}{self.used} / {self.window}", self.workspace]
+        if self.compacting:
+            parts.append("◐ compacting…")
+        elif self.busy:
             parts.append("● working")
         if self.error:
             parts.append(f"✗ {self.error}")
@@ -64,4 +68,4 @@ class StatusBar(Static):
         self._redraw()
 
     watch_mode = watch_pending_mode = watch_model = watch_used = _watch_all
-    watch_window = watch_workspace = watch_busy = watch_error = _watch_all
+    watch_window = watch_workspace = watch_busy = watch_error = watch_estimated = watch_compacting = _watch_all

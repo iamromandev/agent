@@ -23,6 +23,16 @@ class Settings(BaseSettings):
     ]
     max_steps: Annotated[int, Field(default=25, gt=0, description="Maximum model calls in one turn")]
 
+    sessions_dir: Annotated[
+        str | None, Field(default=None, description="Where saved sessions live; unset means the XDG data folder")
+    ]
+    compact_at: Annotated[
+        float, Field(default=0.8, gt=0, le=1, description="Fraction of num_ctx at which the history is compacted")
+    ]
+    compact_keep_turns: Annotated[
+        int, Field(default=2, ge=1, description="Most recent user turns that compaction keeps verbatim")
+    ]
+
 
 @lru_cache
 def get_settings() -> Settings:
