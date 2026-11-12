@@ -14,6 +14,7 @@ Agent: placeholder project (purpose TBD) — FastAPI API (Python 3.15) + Typer C
 | `bun run --cwd ui web:format` / `web:format.check` | Prettier write / check. |
 | `make api-up` / `make api-migrate` | Start Postgres + API containers / run migrations in the container. |
 | `make cli-run ARGS="health check"` | Run the CLI. |
+| `make cli-run` (bare `agent`) | Open the terminal coding agent (Textual TUI); needs Ollama at `AGENT_OLLAMA_URL`. Its workspace is the directory it runs in: `cli/` for `make cli-run` and `cd cli && uv run agent`. For another folder run `uv run --project <repo>/cli agent` from it (`--project` keeps the cwd; `--directory` changes it). |
 | `uv run --directory api pre-commit install` | Install hooks once; mirrors CI (`ruff check`, `ty`, `prettier --check`). |
 
 - Prefer `make api-up` over raw `docker compose up`: the compose project name is pinned to `agent`.
@@ -33,7 +34,7 @@ Agent: placeholder project (purpose TBD) — FastAPI API (Python 3.15) + Typer C
 - Services are provided by `get_<name>_service` factories in `src/service/__init__.py`; repos by `get_<name>_database_repo` in `src/data/repo/__init__.py`, with interfaces in `<domain>/interface/` and implementations in `<domain>/<name>_db.py`.
 - Every response is an envelope: `Success.ok(data=...).to_resp()` (`src/core/success.py`) or a raised `Error` (`src/core/error.py`), rendered by `init_global_errors`.
 - Models subclass `IdBase` → `LinkBase` → `Base` in `src/core/base.py`; repos subclass `BaseRepo`; services `BaseService`; schemas `BaseSchema`.
-- The CLI keeps the same shape: commands in `cli/src/command/`, and only `cli/src/client/` makes HTTP calls.
+- The CLI keeps the same shape: commands in `cli/src/command/`, and only `cli/src/client/` makes HTTP calls (`api.py` for the API, `ollama.py` for Ollama). Bare `agent` opens the coding agent: `cli/src/agent/` is the UI-free core (loop, tools, provider contract; no `textual`/`httpx` imports, enforced by `cli/tests/test_boundaries.py`) and `cli/src/tui/` is the Textual app on top of it.
 
 ## Database
 
