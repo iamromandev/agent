@@ -4,11 +4,19 @@ from pathlib import Path
 
 import pytest
 import src.tui
+import typer.rich_utils
 from src.main import app
 from src.tui import StartChoice
 from typer.testing import CliRunner
 
 runner = CliRunner()
+
+
+@pytest.fixture(autouse=True)
+def plain_output(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Typer forces colour at import when GITHUB_ACTIONS/FORCE_COLOR is set, which splits the
+    text the tests look for with ANSI codes; render plain so the tests read the same everywhere."""
+    monkeypatch.setattr(typer.rich_utils, "FORCE_TERMINAL", False)
 
 
 @pytest.fixture
