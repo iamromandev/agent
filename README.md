@@ -71,6 +71,8 @@ cd cli
 cp .env.example .env   # optional: AGENT_API_URL defaults to http://localhost:8000
 uv sync
 uv run agent health check
+uv run agent           # coding agent TUI; its workspace is the current directory, here `cli/` (needs a local Ollama; see cli/.env.example)
+# for another folder, run from it: uv run --project /path/to/agent/cli agent  (--project keeps the cwd, --directory changes it; `.env` is read from the cwd, so set AGENT_* in the environment there)
 ```
 
 ## UI
