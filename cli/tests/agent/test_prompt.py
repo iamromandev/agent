@@ -6,8 +6,9 @@ import os
 from datetime import date
 from pathlib import Path
 
+from src.agent.instructions import AGENTS_MD_LIMIT
 from src.agent.mode import Mode
-from src.agent.prompt import AGENTS_MD_LIMIT, build_system_prompt
+from src.agent.prompt import build_init_prompt, build_system_prompt
 
 TODAY = date(2026, 11, 12)
 
@@ -119,3 +120,69 @@ def test_the_cut_at_the_limit_drops_only_the_partial_character(tmp_path: Path) -
     prompt = _prompt(tmp_path)
     assert prompt.count("é") == AGENTS_MD_LIMIT // 2
     assert "\ufffd" not in prompt
+
+
+def test_a_single_small_agents_md_gives_exactly_todays_prompt(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Use tabs\n")
+    expected = (
+        "You are a coding agent running in the user's terminal. You help with software tasks "
+        "in the workspace by reading, searching and, when allowed, changing files and running commands."
+        f"\n\nWorkspace: {tmp_path}\nMode: build\nOS: Darwin\nDate: 2026-11-12"
+        "\n\nUse the tools to look before you answer. Read a file before you edit it. "
+        "Prefer edit over write for existing files, and keep edits small. "
+        "Use glob and grep to find files instead of guessing paths. "
+        "Tool calls may be denied by the user; if one is, follow their note and do not retry it unchanged. "
+        "Be concise."
+        "\n\n## AGENTS.md\nUse tabs\n"
+    )
+    assert _prompt(tmp_path) == expected
+
+
+def test_passed_instructions_are_appended_instead_of_loading(tmp_path: Path) -> None:
+    from src.agent.instructions import Instructions
+
+    (tmp_path / "AGENTS.md").write_text("from disk")
+    prompt = build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Darwin", Instructions("## X\nhi", (), 10))
+    assert prompt.endswith("\n\n## X\nhi")
+    assert "from disk" not in prompt
+
+
+# --- build_init_prompt (R12) -----------------------------------------------------------------
+
+
+def test_init_prompt_names_the_workspace_and_covers_each_r12_point(tmp_path: Path) -> None:
+    prompt = build_init_prompt(tmp_path, False, [])
+
+    assert f"AGENTS.md at the top of the workspace ({tmp_path})" in prompt
+    for needle in ("README", "manifests", "makefile", "CI config", "glob"):
+        assert needle in prompt  # look at the project first
+    assert "what the project is" in prompt
+    assert "build, test, lint and run" in prompt
+    assert "conventions that file names do not show" in prompt
+    assert "only what you found in the files" in prompt
+    assert "60 lines" in prompt
+
+
+def test_init_prompt_creates_with_write_when_there_is_no_file(tmp_path: Path) -> None:
+    prompt = build_init_prompt(tmp_path, False, [])
+
+    assert "no AGENTS.md here yet: create it with write" in prompt
+    assert "improve it with edit" not in prompt
+
+
+def test_init_prompt_improves_with_edit_when_the_file_exists(tmp_path: Path) -> None:
+    prompt = build_init_prompt(tmp_path, True, [])
+
+    assert "already exists: read it, then improve it with edit" in prompt
+    assert "create it with write" not in prompt
+
+
+def test_init_prompt_names_the_parents_only_when_there_are_some(tmp_path: Path) -> None:
+    assert "already loaded" not in build_init_prompt(tmp_path, False, [])
+
+    prompt = build_init_prompt(tmp_path, False, ["AGENTS.md", "api/AGENTS.md"])
+
+    assert prompt.splitlines()[-1] == (
+        "5. The instructions in AGENTS.md, api/AGENTS.md are already loaded: do not repeat them; "
+        "cover only what is specific to this folder."
+    )

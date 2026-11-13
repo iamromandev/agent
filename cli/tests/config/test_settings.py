@@ -72,3 +72,28 @@ def test_compact_keep_turns_of_zero_is_rejected(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setenv("AGENT_COMPACT_KEEP_TURNS", "0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_instructions_share_defaults_to_a_quarter() -> None:
+    assert Settings(_env_file=None).instructions_share == 0.25
+
+
+def test_instructions_share_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_INSTRUCTIONS_SHARE", "0.1")
+    share = Settings(_env_file=None).instructions_share
+    assert share == 0.1
+    assert int(share * 8192) == 819
+
+
+@pytest.mark.parametrize("value", ["0", "0.6", "abc"])
+def test_instructions_share_outside_the_range_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AGENT_INSTRUCTIONS_SHARE", value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_env_example_lists_the_instructions_share() -> None:
+    from pathlib import Path
+
+    example = (Path(__file__).parents[2] / ".env.example").read_text()
+    assert "AGENT_INSTRUCTIONS_SHARE=0.25" in example.splitlines()

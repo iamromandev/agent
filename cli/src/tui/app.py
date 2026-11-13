@@ -27,8 +27,10 @@ from src.agent import (
     UsageUpdate,
 )
 from src.agent.approval import Approver
+from src.agent.instructions import fingerprint, levels
 from src.agent.loop import close_recorder
 from src.agent.mode import Mode
+from src.agent.prompt import build_init_prompt
 from src.agent.provider.base import Provider
 from src.agent.session import (
     FileRecorder,
@@ -67,7 +69,7 @@ async def _uninterrupted(work: Awaitable[None]) -> None:
 HELP = (
     "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · /new or /clear new session · /sessions switch session · "
-    "/compact shrink the context · /help this help · /quit exit"
+    "/compact shrink the context · /init write AGENTS.md · /help this help · /quit exit"
 )
 
 
@@ -121,8 +123,7 @@ class AgentApp(App[None]):
         status.workspace = display_path(self.workspace)
         status.mode = self.agent.mode
         self.query_one(ChatInput).focus()
-        if self.store is not None and self.start.kind != "new":
-            self._switching = True  # claimed before any worker runs: the start worker releases it
+        self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
 
@@ -141,30 +142,46 @@ class AgentApp(App[None]):
         return False
 
     async def _start(self) -> None:
+        try:  # the switch claimed in `on_mount` is held until the announcement is done: no turn can overlap it
+            await self._open_start_session()
+            await self._announce_instructions()
+        finally:
+            self._switching = False
+
+    async def _announce_instructions(self) -> None:
+        """Show which AGENTS.md files are in effect; never raises. The caller holds the switch claim."""
+        try:
+            notice = await asyncio.to_thread(self.agent.instructions_notice)
+            if notice is not None:
+                await self.query_one(Transcript).add_notice(notice.level, notice.text)
+        except Exception as exc:  # a failure here must not take the app down
+            self.agent.forget_instructions_notice()  # not shown: the next turn announces it again
+            with contextlib.suppress(Exception):
+                await self.query_one(Transcript).add_notice("error", f"Could not read AGENTS.md: {exc}")
+
+    async def _open_start_session(self) -> None:
         """Begin as the command line asked: the latest session, one by id prefix, or a new one."""
         store, kind = self.store, self.start.kind
         if store is None or kind == "new":
             return
-        try:  # `on_mount` claimed the switch; it ends here on every path
-            if kind == "pick":
-                await self._pick_session()
-                return
-            transcript = self.query_one(Transcript)
-            info: SessionInfo | None = None
-            try:
-                if kind == "continue":
-                    info = await asyncio.to_thread(store.latest)
-                    if info is None:
-                        await transcript.add_notice("info", "No previous session for this folder")
-                else:
-                    info = await asyncio.to_thread(store.find, self.start.session_id or "")
-            except SessionError as exc:
-                await transcript.add_notice("error", str(exc))
-            if info is not None:
-                await self._show_session(info)  # redraws the transcript, so the warning comes after it
-            await self._warn_skipped(store)
-        finally:
-            self._switching = False
+        # `on_mount` claimed the switch; `_start` releases it
+        if kind == "pick":
+            await self._pick_session()
+            return
+        transcript = self.query_one(Transcript)
+        info: SessionInfo | None = None
+        try:
+            if kind == "continue":
+                info = await asyncio.to_thread(store.latest)
+                if info is None:
+                    await transcript.add_notice("info", "No previous session for this folder")
+            else:
+                info = await asyncio.to_thread(store.find, self.start.session_id or "")
+        except SessionError as exc:
+            await transcript.add_notice("error", str(exc))
+        if info is not None:
+            await self._show_session(info)  # redraws the transcript, so the warning comes after it
+        await self._warn_skipped(store)
 
     async def _warn_skipped(self, store: SessionStore) -> None:
         if store.skipped:
@@ -201,20 +218,24 @@ class AgentApp(App[None]):
     async def _pick_session(self) -> None:
         """List this folder's sessions in a picker (a worker: it waits for the screen), then switch to the choice.
 
-        The caller has claimed the switch (`_begin_switch`, or `on_mount` for the start); it ends here.
+        The caller has claimed the switch (`_begin_switch`, or `on_mount` for the start) and releases it.
         """
         store, transcript = self.store, self.query_one(Transcript)
+        if store is None:
+            return
+        infos = await asyncio.to_thread(store.list)
+        await self._warn_skipped(store)
+        if not infos:
+            await transcript.add_notice("info", "No saved sessions for this folder")
+            return
+        chosen = await self.push_screen_wait(SessionPicker(infos))
+        if chosen is not None:
+            await self._show_session(next(info for info in infos if info.id == chosen))
+
+    async def _sessions_command(self) -> None:
+        """The `/sessions` worker: pick and switch, then release the claim `_begin_switch` took."""
         try:
-            if store is None:
-                return
-            infos = await asyncio.to_thread(store.list)
-            await self._warn_skipped(store)
-            if not infos:
-                await transcript.add_notice("info", "No saved sessions for this folder")
-                return
-            chosen = await self.push_screen_wait(SessionPicker(infos))
-            if chosen is not None:
-                await self._show_session(next(info for info in infos if info.id == chosen))
+            await self._pick_session()
         finally:
             self._switching = False
 
@@ -245,6 +266,8 @@ class AgentApp(App[None]):
         await transcript.clear_all()
         await transcript.replay(loaded.items)
         await transcript.add_notice("info", f'Resumed "{info.title}" ({info.message_count} messages)')
+        self.agent.forget_instructions_notice()  # the transcript was redrawn: show the notice in it
+        await self._announce_instructions()
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
         self._shutting_down = True  # from here on the widgets are going away: stop applying agent events
@@ -320,12 +343,16 @@ class AgentApp(App[None]):
             hint = "press Esc to interrupt" if self._turn_active else "a session is loading"
             await self.query_one(Transcript).add_notice("warn", f"busy — {hint}")
             return
+        self._begin_turn(text, text)
+
+    def _begin_turn(self, text: str, draft: str, init: bool = False) -> None:
+        """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
         self._turn_active = True
-        self._draft = text
+        self._draft = draft
         self.query_one(StatusBar).busy = True
         self._turn_entered = False
         # A partial, not a coroutine: cancelled before it first runs, nothing is left un-awaited.
-        self.run_worker(functools.partial(self._turn, event.text), group="turn")
+        self.run_worker(functools.partial(self._turn, text, init), group="turn")
 
     async def _command(self, command: str) -> None:
         transcript = self.query_one(Transcript)
@@ -339,7 +366,7 @@ class AgentApp(App[None]):
                 if not self._begin_switch():
                     await self._refuse_switch()
                     return
-                self.run_worker(self._pick_session, group="sessions")
+                self.run_worker(self._sessions_command, group="sessions")
             case "/new" | "/clear":  # the old session's file stays as it is; the next message starts a new one
                 try:
                     # Refused while a turn runs or a session loads: the history belongs to them until they end.
@@ -349,13 +376,39 @@ class AgentApp(App[None]):
                 except AgentBusy:
                     await transcript.add_notice("warn", self._busy_text(name))
                     return
-                await self._close_old(old)
-                await transcript.clear_all()
-                status = self.query_one(StatusBar)
-                status.used = 0
-                status.estimated = False
-                status.mode = self.agent.mode
-                status.pending_mode = False
+                self._switching = True  # no message is accepted until the notice is back in the new transcript
+                try:
+                    await self._close_old(old)
+                    await transcript.clear_all()
+                    status = self.query_one(StatusBar)
+                    status.used = 0
+                    status.estimated = False
+                    status.mode = self.agent.mode
+                    status.pending_mode = False
+                    self.agent.forget_instructions_notice()
+                    await self._announce_instructions()
+                finally:
+                    self._switching = False
+            case "/init":
+                if self._turn_active or self._switching:
+                    await transcript.add_notice("warn", self._busy_text("/init"))
+                    return
+                if self.agent.mode is Mode.PLAN:
+                    await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
+                    return
+                try:
+                    prompt = await asyncio.to_thread(self._init_prompt)
+                except Exception as error:
+                    await transcript.add_notice("error", f"Could not start /init: {error}")
+                    return
+                # Keys and messages were handled while the prompt was built: check again, with no await before the start.
+                if self._turn_active or self._switching:
+                    await transcript.add_notice("warn", self._busy_text("/init"))
+                    return
+                if self.agent.mode is Mode.PLAN:
+                    await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
+                    return
+                self._begin_turn(prompt, draft="/init", init=True)
             case "/compact":
                 if self._turn_active or self._switching:
                     await transcript.add_notice("warn", self._busy_text("/compact"))
@@ -368,20 +421,36 @@ class AgentApp(App[None]):
             case _:
                 await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
 
-    async def _turn(self, text: str) -> None:
+    def _init_prompt(self) -> str:
+        """The `/init` message: the file's state and the parent files already loaded (reads the disk)."""
+        own = levels(self.workspace)[-1][0]
+        parents = [f.label for f in self.agent.instructions().files if f.label != own and f.state != "omitted"]
+        return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents)
+
+    async def _turn(self, text: str, init: bool = False) -> None:
         self._turn_entered = True
         transcript = self.query_one(Transcript)
         status = self.query_one(StatusBar)
+        agents_md = self.workspace / "AGENTS.md"
+        before: tuple[int, int] | None = None
+        sent = False
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
                 return
             self._draft = None  # from here the message is part of the conversation
+            sent = True
+            before = fingerprint(agents_md)
             await transcript.add_user(text)
             self._finished_since_toggle = False
             status.pending_mode = False
             await self._run_with_events(lambda emit: self.agent.run_turn(text, emit))
         finally:
-            self._end_turn()
+            try:
+                if init and sent and not self._shutting_down and fingerprint(agents_md) == before:
+                    with contextlib.suppress(NoMatches):
+                        await transcript.add_notice("info", "/init finished without changing AGENTS.md")
+            finally:
+                self._end_turn()
 
     async def _compact(self) -> None:
         self._turn_entered = True
