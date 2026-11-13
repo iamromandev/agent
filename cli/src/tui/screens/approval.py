@@ -15,6 +15,16 @@ from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from src.agent.approval import ApprovalRequest, Choice, Decision
+from src.tui.styles import TOOL_NAME, diff_theme
+
+
+def _title(what: str) -> Text:
+    """`Allow <tool> <rest>?` with the tool name bold; `what` is shown as written."""
+    name, space, rest = what.partition(" ")
+    text = Text("Allow ")
+    text.append(name, TOOL_NAME)
+    text.append(f"{space}{rest}?")
+    return text
 
 
 class ApprovalScreen(ModalScreen[Decision | None]):
@@ -45,9 +55,14 @@ class ApprovalScreen(ModalScreen[Decision | None]):
     def compose(self) -> ComposeResult:
         request, preview = self.request, self.request.preview
         with Vertical():
-            yield Label(Text(f"Allow {preview.title if preview else request.label}?"), id="title")
+            yield Label(_title(preview.title if preview else request.label), id="title")
             if preview is not None:
-                body = Syntax(preview.body, "diff", word_wrap=True) if preview.kind == "diff" else Text(preview.body)
+                theme = diff_theme(self.app.current_theme.dark)
+                body = (
+                    Syntax(preview.body, "diff", theme=theme, word_wrap=True)
+                    if preview.kind == "diff"
+                    else Text(preview.body)
+                )
                 yield Static(body, id="preview")
             options = [Option("Allow once", id="once")]
             if request.allow_always:

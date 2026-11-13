@@ -7,8 +7,9 @@ from typing import Any
 import pytest
 from src.agent import UsageUpdate
 from src.agent.session import TranscriptItem
+from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
-from src.tui.widgets.transcript import ICONS, AssistantEntry, NoticeEntry, ToolEntry, Transcript, UserEntry
+from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, Transcript, UserEntry
 from textual.widgets._collapsible import CollapsibleTitle
 
 from tests.tui.conftest import AppFactory

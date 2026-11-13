@@ -13,7 +13,7 @@ from typing import Any, ClassVar
 import pytest
 from src.agent.approval import Choice, Decision
 from src.agent.compaction import CHARS_PER_TOKEN, Reported, estimate_tokens, message_tokens
-from src.agent.events import AgentEvent, AssistantText, Notice, ToolStarted, TurnEnded, UsageUpdate
+from src.agent.events import AgentEvent, AssistantText, Notice, ToolFinished, ToolStarted, TurnEnded, UsageUpdate
 from src.agent.loop import INTERRUPTED, NOT_COMPLETED, PARTIAL_MARK, SKIPPED, Agent, AgentBusy, close_recorder
 from src.agent.mode import Mode
 from src.agent.provider.base import (
@@ -362,6 +362,18 @@ class ExplodingExecute(Tool):
 
     async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
         raise RuntimeError("disk on fire")
+
+
+class Colorful(Tool):
+    """Returns plain output with a colored display copy, like bash does."""
+
+    name: ClassVar[str] = "colorful"
+    description: ClassVar[str] = "Colored output."
+    parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {"n": {"type": "integer"}}, "required": []}
+
+    async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
+        n = int(args.get("n", 5))
+        return ToolResult("x" * n, summary="ok", display="\x1b[32m" + "x" * n + "\x1b[0m")
 
 
 class BrokenLabel(Tool):
@@ -945,3 +957,38 @@ async def test_estimate_falls_back_to_a_guess_after_a_reset(ctx: ToolContext) ->
     specs = [t.spec() for t in agent.tools_for(agent.mode)]
     expected = message_tokens(agent._system(agent.mode)) + message_tokens(Message("user", "short")) + spec_tokens(specs)
     assert agent.estimate() == expected
+
+
+# --- colored display copy: the model and the session file only get the plain text ------------
+
+
+async def test_the_recorded_tool_message_is_plain_while_the_event_carries_the_color(ctx: ToolContext) -> None:
+    agent, _, recorder = make_agent(
+        ctx,
+        [reply(call("bash", command=r"printf '\033[32mok\033[0m'")), reply(TextDelta("done"))],
+        approver=RecordingApprover([Decision(Choice.ONCE)]),
+    )
+    events = Events()
+
+    await agent.run_turn("go", events)
+
+    (tool_message,) = [m for m in recorded(recorder) if m.role == "tool"]
+    assert tool_message.content == "ok\nexit 0"
+    assert "\x1b" not in "".join(m.content for m in agent.history)
+    (finished,) = events.of(ToolFinished)
+    assert finished.result.display == "\x1b[32mok\x1b[0m\nexit 0"
+
+
+async def test_both_copies_are_cut_at_the_same_visible_length(ctx: ToolContext) -> None:
+    agent, _, recorder = make_agent(
+        ctx, [reply(call("colorful", n=40_000)), reply(TextDelta("done"))], extra_tools=[Colorful()]
+    )
+    events = Events()
+
+    await agent.run_turn("go", events)
+
+    (finished,) = events.of(ToolFinished)
+    assert finished.result.output == "x" * 30_000 + "\n[10000 characters truncated]"
+    assert finished.result.display == "\x1b[32m" + "x" * 30_000 + "\x1b[0m\n[10000 characters truncated]"
+    (tool_message,) = [m for m in recorded(recorder) if m.role == "tool"]
+    assert tool_message.content == finished.result.output

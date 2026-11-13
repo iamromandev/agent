@@ -15,9 +15,9 @@ from textual.widgets.markdown import MarkdownStream
 
 from src.agent.session import TranscriptItem
 from src.agent.tools.base import Preview, ToolResult
+from src.tui.styles import Outcome, ansi_output, diff_theme, notice_text, tool_title
 
 REPLAY_BATCH = 500  # entries mounted at once when a saved conversation is redrawn
-ICONS = {"info": "ℹ", "warn": "⚠", "error": "✗"}  # noqa: RUF001 - the info sign is the intended glyph
 
 
 class UserEntry(Static):
@@ -50,19 +50,19 @@ class AssistantEntry(Markdown):
 
 
 class NoticeEntry(Static):
-    DEFAULT_CSS = "NoticeEntry { padding: 0 1; color: $text-muted; }"
+    DEFAULT_CSS = "NoticeEntry { padding: 0 1; }"
 
     def __init__(self, level: Literal["info", "warn", "error"], text: str, icon: str | None = None) -> None:
-        shown = f"{icon or ICONS[level]} {text}"
-        super().__init__(Text(shown))
-        self.text = shown
+        rendered = notice_text(level, text, icon)
+        super().__init__(rendered)
+        self.text = rendered.plain
 
 
-def _literal(text: str) -> str:
-    """`text` as a title Textual shows as written. Collapsible parses a `str` title as markup, and
+def _title(text: Text) -> str:
+    """A title Textual shows as written. Collapsible parses a `str` title as markup, and
     `markup.escape` is not safe for every input (`[$var]`, backslashes); a `Content` is never parsed.
     Collapsible accepts it at runtime although its hint says `str`."""
-    return cast("str", Content(text))
+    return cast("str", Content.from_rich_text(text))
 
 
 class ToolEntry(Collapsible):
@@ -70,8 +70,7 @@ class ToolEntry(Collapsible):
 
     def __init__(self, label: str, summary: str | None = None) -> None:
         """`summary` given: a finished call that is only shown (a replayed one), with nothing inside."""
-        shown = label if not summary else f"{label} · {summary}"
-        super().__init__(title=_literal(shown), collapsed=True)
+        super().__init__(title=_title(tool_title(label, summary or "", None)), collapsed=True)
         self.label = label
         self.finished = summary is not None
         self.detail = ""
@@ -79,15 +78,17 @@ class ToolEntry(Collapsible):
     async def finish(self, result: ToolResult | None, preview: Preview | None, applied: bool, note: str = "") -> None:
         self.finished = True
         summary = note or (result.summary if result else "")
-        self.title = _literal(f"{self.label} · {summary}" if summary else self.label)
+        outcome: Outcome = "ended" if note or result is None else ("error" if result.is_error else "ok")
+        self.title = _title(tool_title(self.label, summary, outcome))
         parts: list[Text | Syntax] = []
         details: list[str] = []
         if result is not None and applied and preview is not None and preview.kind in ("diff", "content"):
-            parts.append(Syntax(preview.body, "diff" if preview.kind == "diff" else "text", word_wrap=True))
+            theme = diff_theme(self.app.current_theme.dark)
+            parts.append(Syntax(preview.body, "diff" if preview.kind == "diff" else "text", theme=theme, word_wrap=True))
             details.append(preview.body)
             self.collapsed = False
         if result is not None and result.output:
-            parts.append(Text(result.output))
+            parts.append(ansi_output(result.display) if result.display is not None else Text(result.output))
             details.append(result.output)
         self.detail = "\n".join(details)
         contents = self.query_one(Collapsible.Contents)

@@ -12,8 +12,9 @@ from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui import StartChoice
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.sessions import SessionPicker, relative
+from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
-from src.tui.widgets.transcript import ICONS, AssistantEntry, NoticeEntry, UserEntry
+from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, UserEntry
 from textual.widgets import OptionList
 
 from tests.fakes import Gate
@@ -208,8 +209,8 @@ async def test_a_long_title_is_cut_in_the_list(make_app: AppFactory, save_sessio
         await _open_picker(app, pilot)
         (option,) = _options(app)
 
-        assert option.startswith("a" * 40 + "  ")
-        assert "a" * 41 not in option
+        assert option.startswith("a" * 39 + "…  ")
+        assert "a" * 40 not in option
 
 
 async def test_switching_resets_always_grants_and_the_next_edit_asks_again(
@@ -282,3 +283,21 @@ def timezone_of(hours: int):
     from datetime import timezone
 
     return timezone(timedelta(hours=hours))
+
+
+def test_rows_align_title_time_and_count_in_fixed_columns() -> None:
+    from datetime import UTC, datetime
+
+    from src.agent.session import SessionInfo
+    from src.tui.screens.sessions import TITLE_WIDTH, describe
+
+    now = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)
+
+    def info(title: str, count: int) -> SessionInfo:
+        return SessionInfo("x", Path("x"), title, now, now - timedelta(hours=2), count)
+
+    short, long, many = describe(info("Fix", 5), now), describe(info("x" * 80, 5), now), describe(info("Fix", 123), now)
+    assert len(short.plain) == len(long.plain) == len(many.plain)
+    assert short.plain.endswith("  " + "  5")
+    assert many.plain.endswith("123")
+    assert long.plain[: TITLE_WIDTH] == "x" * (TITLE_WIDTH - 1) + "…"

@@ -13,9 +13,10 @@ from src.agent.session import FileRecorder, SessionError, SessionStore, SessionW
 from src.agent.session.paths import workspace_dir
 from src.tui import StartChoice
 from src.tui.screens.approval import ApprovalScreen
+from src.tui.styles import ICONS
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
-from src.tui.widgets.transcript import ICONS, AssistantEntry, NoticeEntry, ToolEntry, UserEntry
+from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, UserEntry
 
 from tests.tui.conftest import AppFactory, chat, scripted, settled, type_and_send, until
 

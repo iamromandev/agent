@@ -33,6 +33,7 @@ class ToolResult:
     output: str  # what the model sees
     is_error: bool = False
     summary: str = ""  # short transcript text: "31 lines", "exit 0", "refused: outside workspace"
+    display: str | None = None  # display-only copy (may contain ANSI SGR); never sent to the model or saved
 
 
 @dataclass(frozen=True)

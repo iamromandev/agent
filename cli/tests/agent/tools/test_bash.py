@@ -9,7 +9,8 @@ from pathlib import Path
 
 import pytest
 from src.agent.tools.base import Prepared, ToolContext, ToolResult
-from src.agent.tools.shell import BashTool
+from src.agent.tools.shell import BashTool, _Capture
+from src.agent.tools.text import strip_ansi
 
 
 @pytest.fixture(autouse=True)
@@ -116,10 +117,42 @@ async def test_colored_output_comes_back_without_ansi_escapes(workspace: Path) -
     assert "\x1b" not in result.output
 
 
-async def test_no_color_is_set_for_the_command(workspace: Path) -> None:
-    result = await _run("echo $NO_COLOR", _ctx(workspace))
+async def test_the_command_is_asked_for_color_and_not_told_to_avoid_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NO_COLOR", "1")  # even when the parent has it set
+    result = await _run('printf "%s:%s:%s" "${NO_COLOR-unset}" "$FORCE_COLOR" "$CLICOLOR_FORCE"', _ctx(workspace))
 
-    assert result.output.splitlines()[0] == "1"
+    assert result.output.splitlines()[0] == "unset:1:1"
+
+
+async def test_the_model_gets_plain_text_and_the_screen_gets_the_colors(workspace: Path) -> None:
+    result = await _run(r"printf '\033[32mok\033[0m'", _ctx(workspace))
+
+    assert result.output == "ok\nexit 0"
+    assert result.display == "\x1b[32mok\x1b[0m\nexit 0"
+
+
+async def test_output_without_color_has_no_display_copy(workspace: Path) -> None:
+    result = await _run("echo plain", _ctx(workspace))
+
+    assert result.output == "plain\nexit 0"
+    assert result.display is None
+
+
+async def test_cursor_movement_is_not_kept_in_the_display_copy(workspace: Path) -> None:
+    result = await _run(r"printf '\033[2K\033[1A\033[32mok\033[0m'", _ctx(workspace))
+
+    assert result.display == "\x1b[32mok\x1b[0m\nexit 0"
+    assert "\x1b[2K" not in (result.display or "")
+
+
+async def test_a_timeout_keeps_the_colored_partial_output(workspace: Path) -> None:
+    result = await _run(r"printf '\033[31mpartial\033[0m'; sleep 30", _ctx(workspace, timeout=1.0))
+
+    assert result.output.startswith("partial\nCommand timed out")
+    assert result.display is not None
+    assert result.display.startswith("\x1b[31mpartial\x1b[0m\nCommand timed out")
 
 
 async def test_stdin_is_closed_so_cat_returns_at_once(workspace: Path) -> None:
@@ -273,3 +306,88 @@ def test_bash_flags_and_label() -> None:
     assert tool.label({"command": "ls -la"}) == "bash ls -la"
 
 
+def _plain(display: str | None) -> str:
+    assert display is not None
+    return strip_ansi(display)
+
+
+async def test_a_newline_before_a_trailing_reset_does_not_make_the_copies_differ(workspace: Path) -> None:
+    result = await _run(r"printf 'text\n\033[0m'", _ctx(workspace))
+
+    assert result.output == "text\nexit 0"
+    assert _plain(result.display) == result.output
+
+
+async def test_long_colored_output_is_cut_at_the_same_visible_text_in_both_copies(workspace: Path) -> None:
+    command = r"""seq 1 200000 | awk '{printf "\033[32m%s\033[0m\n", $1}'"""
+    result = await _run(command, _ctx(workspace, 30.0))
+
+    assert re.search(r"\[\d+ bytes omitted\]", result.output)
+    assert _plain(result.display) == result.output
+
+
+async def test_colored_output_near_the_cap_keeps_as_much_text_as_plain_output(workspace: Path) -> None:
+    colored = await _run(r'''yes "$(printf '\033[32mabcdefghi\033[0m')" | head -n 5000''', _ctx(workspace))
+    plain = await _run("yes abcdefghi | head -n 5000", _ctx(workspace))
+
+    assert colored.output == plain.output
+    assert _plain(colored.display) == colored.output
+
+
+async def test_the_display_copy_has_no_partial_escape_where_head_and_tail_meet(workspace: Path) -> None:
+    result = await _run(r'''yes "$(printf '\033[38;5;123mabcdefghi\033[0m')" | head -n 20000''', _ctx(workspace))
+
+    display = result.display or ""
+    assert re.search(r"\x1b(?!\[[0-9;:]*m)", display) is None
+    assert re.search(r"\[\d+ bytes omitted\]\n[0-9;]*m", display) is None
+    assert _plain(display) == result.output
+
+
+async def test_an_escape_split_across_chunks_is_still_one_sequence(workspace: Path) -> None:
+    result = await _run(r"printf '\033[3'; sleep 0.2; printf '2mok\033[0m'", _ctx(workspace))
+
+    assert result.output == "ok\nexit 0"
+    assert result.display == "\x1b[32mok\x1b[0m\nexit 0"
+
+
+def _captured(*chunks: bytes) -> _Capture:
+    capture = _Capture()
+    for chunk in chunks:
+        capture.feed(chunk)
+    return capture
+
+
+@pytest.mark.parametrize("run", ["\n" * 20_000 + "x", "\x1b[0m" * 20_000 + "x"])
+def test_a_long_run_of_trailing_newlines_or_styles_is_trimmed_in_linear_time(run: str) -> None:
+    capture = _captured(run.encode())
+    started = time.perf_counter()
+    capture.raw()
+    capture.text()
+    assert time.perf_counter() - started < 0.05
+
+
+def test_trailing_newlines_are_dropped_and_the_trailing_reset_is_kept() -> None:
+    assert _captured(b"a\x1b[32mb\n\n\x1b[0m\n").raw() == "a\x1b[32mb\x1b[0m"
+
+
+def test_oversized_style_tokens_are_dropped_and_do_not_leak_as_text() -> None:
+    big = b"\x1b[" + b"1;" * 5000 + b"m"
+    capture = _captured(b"a" + big + b"b" + big * 100 + b"c")
+    assert capture.raw() == "abc"
+    assert capture.text() == "abc"
+
+
+def test_an_overlong_osc_is_dropped_whole() -> None:
+    assert _captured(b"a\x1b]0;" + b"t" * 5000 + b"\x07b").raw() == "ab"
+
+
+def test_style_tokens_are_bounded_in_bytes() -> None:
+    capture = _captured(*[b"\x1b[1m\x1b[" + b"9" * 500 + b"m"] * 2000)
+    assert len(capture.raw()) <= 2000 * 4 + 10
+
+
+def test_the_display_copy_resets_styles_before_the_omitted_marker() -> None:
+    capture = _captured(b"\x1b[31m" + b"a" * 40_000 + b"\x1b[0m")
+    assert "\x1b[0m\n[" in capture.raw().split("omitted")[0]
+    assert capture.text().startswith("a" * 10_000 + "\n[")
+    assert "\x1b" not in capture.text()
