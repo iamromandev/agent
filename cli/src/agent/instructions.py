@@ -94,7 +94,7 @@ def fingerprint(path: Path) -> tuple[int, int] | None:
     return (info.st_size, info.st_mtime_ns) if stat.S_ISREG(info.st_mode) else None
 
 
-def _read_head(path: Path, limit: int) -> tuple[bytes, int] | None:
+def read_head(path: Path, limit: int) -> tuple[bytes, int] | None:
     """Up to `limit` bytes of a regular file and its size; None for anything else (FIFO, device, directory)."""
     try:
         # O_NONBLOCK so opening a FIFO returns at once; the fstat then rejects it (no TOCTOU).
@@ -123,7 +123,7 @@ class _Read:
 
 def _read(label: str, path: Path) -> _Read | None:
     try:
-        head = _read_head(path, AGENTS_MD_LIMIT + 1)
+        head = read_head(path, AGENTS_MD_LIMIT + 1)
     except OSError:
         return None
     if head is None:

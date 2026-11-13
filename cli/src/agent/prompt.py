@@ -40,8 +40,21 @@ def build_system_prompt(
     return "\n\n".join(parts)
 
 
-def build_init_prompt(workspace: Path, exists: bool, parents: Sequence[str]) -> str:
-    """The built-in user message of `/init`: only the branch that applies is stated."""
+_LOOK_FIRST = (
+    "1. Look first: read the README, the manifests (pyproject.toml, package.json, …), the makefile and the CI config, "
+    "and list the top-level layout with glob."
+)
+_FROM_FACTS = (
+    "1. The facts below were read from the project's files. Use them for every command, "
+    "and read the README for what the project is. Do not write a command that is not in the facts."
+)
+
+
+def build_init_prompt(workspace: Path, exists: bool, parents: Sequence[str], facts: str = "") -> str:
+    """The built-in user message of `/init`: only the branch that applies is stated.
+
+    `facts` is the rendered scan of the project; with it step 1 points at the facts and the block ends the message.
+    """
     step = (
         "2. AGENTS.md already exists: read it, then improve it with edit. Keep what is right; do not rewrite it from scratch."
         if exists
@@ -50,8 +63,7 @@ def build_init_prompt(workspace: Path, exists: bool, parents: Sequence[str]) -> 
     lines = [
         f"Write the project instructions for coding agents in AGENTS.md at the top of the workspace ({workspace}).",
         "",
-        "1. Look first: read the README, the manifests (pyproject.toml, package.json, …), the makefile and the CI config, "
-        "and list the top-level layout with glob.",
+        _FROM_FACTS if facts else _LOOK_FIRST,
         step,
         "3. Cover what the project is, the commands to build, test, lint and run it, "
         "and the layout and conventions that file names do not show.",
@@ -62,4 +74,5 @@ def build_init_prompt(workspace: Path, exists: bool, parents: Sequence[str]) -> 
             f"5. The instructions in {', '.join(parents)} are already loaded: do not repeat them; "
             "cover only what is specific to this folder."
         )
-    return "\n".join(lines)
+    text = "\n".join(lines)
+    return f"{text}\n\n{facts}" if facts else text

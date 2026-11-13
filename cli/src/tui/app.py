@@ -27,6 +27,8 @@ from src.agent import (
     UsageUpdate,
 )
 from src.agent.approval import Approver
+from src.agent.compaction import CHARS_PER_TOKEN
+from src.agent.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.agent.instructions import fingerprint, levels
 from src.agent.loop import close_recorder
 from src.agent.mode import Mode
@@ -425,7 +427,8 @@ class AgentApp(App[None]):
         """The `/init` message: the file's state and the parent files already loaded (reads the disk)."""
         own = levels(self.workspace)[-1][0]
         parents = [f.label for f in self.agent.instructions().files if f.label != own and f.state != "omitted"]
-        return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents)
+        block = render_facts(scan(self.workspace), int(FACTS_SHARE * self.provider.context_window) * CHARS_PER_TOKEN)
+        return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents, facts=block)
 
     async def _turn(self, text: str, init: bool = False) -> None:
         self._turn_entered = True
@@ -446,11 +449,26 @@ class AgentApp(App[None]):
             await self._run_with_events(lambda emit: self.agent.run_turn(text, emit))
         finally:
             try:
-                if init and sent and not self._shutting_down and fingerprint(agents_md) == before:
-                    with contextlib.suppress(NoMatches):
-                        await transcript.add_notice("info", "/init finished without changing AGENTS.md")
+                if init and sent and not self._shutting_down:
+                    if fingerprint(agents_md) == before:
+                        with contextlib.suppress(NoMatches):
+                            await transcript.add_notice("info", "/init finished without changing AGENTS.md")
+                    else:
+                        await self._check_init()
             finally:
                 self._end_turn()
+
+    async def _check_init(self) -> None:
+        """After an `/init` turn that changed AGENTS.md: warn about commands the scan did not find. Never raises."""
+        try:
+            notice = await asyncio.to_thread(init_check, self.workspace)
+            if notice is not None:
+                await self.query_one(Transcript).add_notice(*notice)
+        except NoMatches:
+            pass
+        except Exception as error:
+            with contextlib.suppress(Exception):
+                await self.query_one(Transcript).add_notice("error", f"/init check failed: {error}")
 
     async def _compact(self) -> None:
         self._turn_entered = True
