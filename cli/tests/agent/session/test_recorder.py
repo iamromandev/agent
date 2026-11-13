@@ -394,6 +394,29 @@ def test_a_failed_compaction_write_stays_queued_before_later_messages(
     assert [r["type"] for r in lines(recorder.path)] == ["session", "title", "message", "compaction", "message"]
 
 
+def test_undo_records_how_much_history_is_kept(recorder: FileRecorder) -> None:
+    recorder.message(Message("user", "q"), None)
+    recorder.undo(4)
+
+    assert recorder.path is not None
+    record = lines(recorder.path)[-1]
+    assert list(record) == ["type", "keep", "at"]
+    assert (record["type"], record["keep"]) == ("undo", 4)
+
+
+def test_a_failed_undo_write_stays_queued_before_later_messages(
+    monkeypatch: pytest.MonkeyPatch, recorder: FileRecorder
+) -> None:
+    recorder.message(Message("user", "q"), None)
+    failing_write(monkeypatch, {1})
+    with pytest.raises(SessionWriteError):
+        recorder.undo(0)
+    recorder.message(Message("user", "later"), None)
+
+    assert recorder.path is not None
+    assert [r["type"] for r in lines(recorder.path)] == ["session", "title", "message", "undo", "message"]
+
+
 def test_close_is_idempotent_and_safe_before_any_write(recorder: FileRecorder) -> None:
     recorder.close()
     recorder.close()
@@ -458,6 +481,7 @@ def test_null_recorder_does_no_io(
     null = NullRecorder()
     null.message(Message("user", "a"), None)
     null.compaction([], {}, 0, 0, 0, 0)
+    null.undo(0)
     null.close()
     assert list(tmp_path.iterdir()) == []
 

@@ -124,3 +124,95 @@ async def test_a_link_in_a_reply_is_not_opened_automatically(
         await pilot.pause()
 
     assert opened == []
+
+
+async def test_remove_last_turn_removes_that_turn_and_keeps_notices_added_after_it(make_app: AppFactory) -> None:
+    from src.tui.widgets.transcript import Transcript
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        first = await transcript.add_user("one")
+        await transcript.write_assistant("a1")
+        await transcript.end_assistant()
+        transcript.end_turn(first)
+        second = await transcript.add_user("two")
+        await transcript.write_assistant("a2")
+        await transcript.add_tool("c1", "write x")
+        await transcript.end_assistant()
+        transcript.end_turn(second)
+        await transcript.add_notice("info", "after the turn")
+        await pilot.pause()
+
+        assert await transcript.remove_last_turn() is True
+        await pilot.pause()
+
+        assert [type(e).__name__ for e in app.query("#transcript > *")] == [
+            "UserEntry",
+            "AssistantEntry",
+            "NoticeEntry",
+        ]
+        assert [e.text for e in app.query(UserEntry)] == ["one"]
+        assert transcript.tool("c1") is None
+        # the next streamed text starts a new entry, not one in the removed turn
+        await transcript.write_assistant("fresh")
+        await pilot.pause()
+        assert [e.text for e in app.query(AssistantEntry)] == ["a1", "fresh"]
+        assert await transcript.remove_last_turn() is True  # the first turn is next
+        assert [e.text for e in app.query(UserEntry)] == []
+
+
+async def test_remove_last_turn_with_no_ended_turn_returns_false_and_keeps_the_rest(make_app: AppFactory) -> None:
+    from src.tui.widgets.transcript import Transcript
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        await transcript.add_user("never ended")
+        await transcript.add_notice("info", "hello")
+        await pilot.pause()
+        assert await transcript.remove_last_turn() is False
+        assert len(list(app.query(NoticeEntry))) == 1
+        assert len(list(app.query(UserEntry))) == 1
+
+
+async def test_discarding_an_orphan_user_entry_removes_only_that_entry(make_app: AppFactory) -> None:
+    from src.tui.widgets.transcript import Transcript
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        done = await transcript.add_user("done")
+        transcript.end_turn(done)
+        orphan = await transcript.add_user("orphan")
+        await transcript.add_notice("info", "later notice")
+        await pilot.pause()
+
+        assert await transcript.remove_turn(orphan) is True
+        await pilot.pause()
+
+        assert [e.text for e in app.query(UserEntry)] == ["done"]
+        assert len(list(app.query(NoticeEntry))) == 1
+        # an undo now takes the finished turn, not something else
+        assert await transcript.remove_last_turn() is True
+        assert not list(app.query(UserEntry))
+
+
+async def test_removing_a_turn_with_an_open_tool_entry_drops_it_from_the_tool_map(make_app: AppFactory) -> None:
+    from src.tui.widgets.transcript import Transcript
+
+    app = make_app()
+    async with app.run_test() as pilot:
+        transcript = app.query_one(Transcript)
+        token = await transcript.add_user("go")
+        entry = await transcript.add_tool("open", "bash sleep")
+        assert not entry.finished
+        transcript.end_turn(token)
+        await pilot.pause()
+
+        await transcript.remove_last_turn()
+        await pilot.pause()
+
+        assert transcript.tool("open") is None
+        assert not list(app.query(ToolEntry))
+        await transcript.close_open_tools("ended")  # must not touch the removed entry

@@ -48,7 +48,9 @@ class Recorder(Protocol):
         after: int,
     ) -> None: ...
 
-    # Both raise SessionWriteError on I/O failure.
+    def undo(self, keep: int) -> None: ...
+
+    # All raise SessionWriteError on I/O failure.
 
 
 class NullRecorder:
@@ -66,6 +68,9 @@ class NullRecorder:
         before: int,
         after: int,
     ) -> None:
+        return None
+
+    def undo(self, keep: int) -> None:
         return None
 
     def close(self) -> None:
@@ -171,6 +176,13 @@ class FileRecorder:
                 "at": stamp,
             }
         )
+        self._start(None, stamp)
+        self._pending.append(line)
+        self._flush()
+
+    def undo(self, keep: int) -> None:
+        stamp = _stamp(self._now())
+        line = _encode({"type": "undo", "keep": keep, "at": stamp})
         self._start(None, stamp)
         self._pending.append(line)
         self._flush()

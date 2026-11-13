@@ -6,15 +6,26 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal
+from typing import Any, ClassVar, Literal, Protocol
 
 from src.agent.provider.base import ToolSpec
+
+
+class FileJournal(Protocol):
+    def before(self, path: Path) -> None:
+        """Called in the worker thread, before the first byte of `path` changes."""
+        ...
+
+    def after(self, path: Path) -> None:
+        """Called in the worker thread after the write, also when it failed."""
+        ...
 
 
 @dataclass(frozen=True)
 class ToolContext:
     workspace: Path  # resolved absolute path
     bash_timeout: float
+    journal: FileJournal | None = None  # told about each file write/edit changes
 
 
 @dataclass(frozen=True)

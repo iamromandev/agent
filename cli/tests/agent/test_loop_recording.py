@@ -837,6 +837,7 @@ async def test_reset_tolerates_a_recorder_without_close_or_whose_close_fails(ctx
             before: int,
             after: int,
         ) -> None: ...
+        def undo(self, keep: int) -> None: ...
 
     class BadClose(NoClose):
         def close(self) -> None:
@@ -881,6 +882,8 @@ async def test_close_makes_a_recorder_without_close_a_no_op(ctx: ToolContext) ->
         def message(self, message: Message, meta: ToolMeta | None) -> None: ...
 
         def compaction(self, *args: object) -> None: ...
+
+        def undo(self, keep: int) -> None: ...
 
     Agent(ScriptedProvider([]), default_tools(), RecordingApprover(), ctx, 5, recorder=NoClose()).close()  # ty: ignore[invalid-argument-type]
 

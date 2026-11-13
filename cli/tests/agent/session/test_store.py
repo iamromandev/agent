@@ -911,3 +911,101 @@ def test_load_refuses_a_directory_named_like_a_session(store: SessionStore, root
     (workspace_dir(root, workspace) / f"{LINK_ID}.jsonl").mkdir(parents=True)
     with pytest.raises(SessionError):
         store.load(LINK_ID)
+
+
+# --- undo records ------------------------------------------------------------------------------
+
+
+def undo_record(keep: object) -> dict[str, Any]:
+    return {"type": "undo", "keep": keep, "at": STAMP}
+
+
+def three_turns() -> list[dict[str, Any]]:
+    return [user("one"), assistant("a1"), user("two"), assistant("a2"), user("three"), assistant("a3")]
+
+
+def test_an_undo_record_drops_the_last_turn_from_history_and_items(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [*three_turns(), undo_record(4)])
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.content for m in loaded.history] == ["one", "a1", "two", "a2"]
+    assert [i.text for i in loaded.items] == ["one", "a1", "two", "a2"]
+    assert loaded.skipped_lines == 0
+
+
+def test_a_session_without_undo_records_loads_every_turn(store: SessionStore, root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", three_turns())
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert len(loaded.history) == 6
+    assert len(loaded.items) == 6
+
+
+def test_two_undo_records_in_a_row_drop_two_turns(store: SessionStore, root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [*three_turns(), undo_record(4), undo_record(2)])
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.content for m in loaded.history] == ["one", "a1"]
+    assert [i.text for i in loaded.items] == ["one", "a1"]
+
+
+def test_messages_after_an_undo_continue_from_the_cut(store: SessionStore, root: Path, workspace: Path) -> None:
+    records = [*three_turns(), undo_record(4), user("three again"), assistant("a3b"), undo_record(4)]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.content for m in loaded.history] == ["one", "a1", "two", "a2"]
+
+
+def test_an_undo_drops_tool_messages_and_their_meta_and_items(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    call = ToolCall("c1", "write", {"path": "a"})
+    records = [
+        user("one"),
+        assistant("", [call]),
+        tool("c1", "write", "ok", ToolMeta("write a", "1 line")),
+        assistant("done"),
+        undo_record(0),
+    ]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert loaded.history == []
+    assert loaded.tool_meta == {}
+    assert loaded.items == []
+
+
+def test_an_undo_right_after_a_compaction_counts_from_the_compacted_history(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    kept = [Message("user", "Summary of the earlier conversation:\nstuff"), Message("user", "latest")]
+    records = [
+        user("old"),
+        assistant("old answer"),
+        compaction([embedded(m) for m in kept]),
+        user("after"),
+        assistant("after answer"),
+        undo_record(2),  # the compacted history has two messages: the undone turn is the one after it
+    ]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert loaded.history == kept
+    assert [i.kind for i in loaded.items] == ["user", "assistant", "notice"]
+    assert loaded.skipped_lines == 0
+
+
+@pytest.mark.parametrize("keep", [-1, 7, 1.5, "2", None, True, 0])
+def test_a_bad_undo_record_is_skipped_and_counted(
+    store: SessionStore, root: Path, workspace: Path, keep: object
+) -> None:
+    kept = [Message("user", "Summary:\nstuff"), Message("user", "latest")]
+    records = [user("old"), compaction([embedded(m) for m in kept]), user("after"), undo_record(keep)]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.content for m in loaded.history] == ["Summary:\nstuff", "latest", "after"]
+    assert loaded.skipped_lines == 1
+
+
+def test_an_undo_with_no_keep_is_skipped(store: SessionStore, root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("one"), {"type": "undo", "at": STAMP}])
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert len(loaded.history) == 1
+    assert loaded.skipped_lines == 1

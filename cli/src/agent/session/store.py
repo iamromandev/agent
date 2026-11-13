@@ -173,6 +173,7 @@ class SessionStore:
         history: list[Message] = []
         tool_meta: dict[str, ToolMeta] = {}
         items: list[TranscriptItem] = []
+        marks: dict[int, int] = {0: 0}  # history length -> items length at that point (where an undo can cut)
         skipped = 0
         for line in complete.split(b"\n")[1:]:  # the first line is the header
             if not line.strip():
@@ -186,9 +187,22 @@ class SessionStore:
                     _remember(tool_meta, message, meta)
                     if item := _item(message, meta):
                         items.append(item)
+                    marks[len(history)] = len(items)
                 elif kind == "compaction":
                     history, notice = _compaction(obj, tool_meta)
                     items.append(notice)
+                    marks = {len(history): len(items)}
+                elif kind == "undo":
+                    keep = _size(obj.get("keep"))
+                    if keep is None or keep not in marks:
+                        raise RecordError("bad undo record")
+                    cut = {m.tool_call_id for m in history[keep:] if m.tool_call_id}
+                    del history[keep:]
+                    kept = {m.tool_call_id for m in history if m.tool_call_id}
+                    for call_id in cut - kept:
+                        tool_meta.pop(call_id, None)
+                    del items[marks[keep] :]
+                    marks = {length: size for length, size in marks.items() if length <= keep}
                 elif kind is None:
                     raise RecordError("record without a type")
             except (ValueError, TypeError, AttributeError, RecursionError):  # bad JSON or UTF-8, RecordError

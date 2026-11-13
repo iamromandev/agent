@@ -110,6 +110,11 @@ class RecordedCompaction:
     after: int
 
 
+@dataclass(frozen=True)
+class RecordedUndo:
+    keep: int
+
+
 class MemoryRecorder:
     """A Recorder that keeps what it was given, and can be told to fail.
 
@@ -121,12 +126,13 @@ class MemoryRecorder:
     def __init__(self, fail: int = 0, error: Exception | None = None) -> None:
         self.messages: list[tuple[Message, ToolMeta | None]] = []
         self.compactions: list[RecordedCompaction] = []
-        self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction] = []  # both kinds, in write order
+        self.undos: list[RecordedUndo] = []
+        self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo] = []  # all kinds, in write order
         self.fail = fail  # the next `fail` calls raise
         self.error = error  # what they raise (default: SessionWriteError)
         self.calls = 0
         self.closed = 0
-        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction] = []
+        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo] = []
 
     def _write(self) -> None:
         """One write attempt for everything queued: all of it, or (when told to fail) none."""
@@ -137,6 +143,8 @@ class MemoryRecorder:
         for record in self._queued:
             if isinstance(record, RecordedCompaction):
                 self.compactions.append(record)
+            elif isinstance(record, RecordedUndo):
+                self.undos.append(record)
             else:
                 self.messages.append(record)
         self.records.extend(self._queued)
@@ -158,6 +166,10 @@ class MemoryRecorder:
         self._queued.append(
             RecordedCompaction([copy(m) for m in history], dict(tool_meta), pruned, summarized, before, after)
         )
+        self._write()
+
+    def undo(self, keep: int) -> None:
+        self._queued.append(RecordedUndo(keep))
         self._write()
 
     def close(self) -> None:
