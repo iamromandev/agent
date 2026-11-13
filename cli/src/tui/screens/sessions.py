@@ -16,6 +16,7 @@ from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
 from src.agent.session import SessionInfo
+from src.tui.styles import session_row
 
 TITLE_WIDTH = 40
 RECENT_DAYS = 30
@@ -42,7 +43,7 @@ def relative(moment: datetime, now: datetime | None = None) -> str:
 
 def describe(info: SessionInfo, now: datetime | None = None) -> Text:
     """One row. A `Text`, never markup: titles come from what the user typed."""
-    return Text(f"{info.title:<{TITLE_WIDTH}.{TITLE_WIDTH}}  {relative(info.updated_at, now)}  {info.message_count:>3}")
+    return session_row(info.title, relative(info.updated_at, now), info.message_count, TITLE_WIDTH)
 
 
 class SessionPicker(ModalScreen[str | None]):

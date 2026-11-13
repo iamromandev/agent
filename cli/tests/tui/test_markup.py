@@ -10,7 +10,7 @@ from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.agent.tools.base import Preview, ToolResult
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import NoticeEntry, ToolEntry, Transcript
-from textual.widgets import Label, Static
+from textual.widgets import Collapsible, Label, Static
 from textual.widgets._collapsible import CollapsibleTitle
 
 from tests.tui.conftest import AppFactory, settled, type_and_send, until
@@ -46,8 +46,8 @@ async def test_a_tool_entry_title_shows_the_label_and_summary_literally(make_app
         await entry.finish(ToolResult("out", False, f"saw {text}"), None, False)
         await pilot.pause()
 
-        assert _title(entry) == f"{text} · saw {text}"
-        assert entry.title == f"{text} · saw {text}"
+        assert _title(entry) == f"✓ {text} · saw {text}"
+        assert entry.title == f"✓ {text} · saw {text}"
 
 
 @pytest.mark.parametrize("text", TRICKY)
@@ -86,5 +86,17 @@ async def test_a_model_tool_call_with_brackets_in_its_path_does_not_crash_the_ap
         await until(pilot, lambda: bool(list(app.query(ToolEntry))))
 
         (tool,) = app.query(ToolEntry)
-        assert _title(tool).startswith(f"read {path}")
+        assert _title(tool).startswith(f"✗ read {path} · ")
         assert tool.finished
+
+
+@pytest.mark.parametrize("text", TRICKY)
+async def test_bash_output_with_markup_characters_is_shown_literally(make_app: AppFactory, text: str) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "bash x")
+        await entry.finish(ToolResult(text, False, "exit 0", display=f"\x1b[32m{text}\x1b[0m"), None, False)
+        await pilot.pause()
+
+        (shown,) = entry.query(Collapsible.Contents).first().query(Static)
+        assert _shown(shown) == text

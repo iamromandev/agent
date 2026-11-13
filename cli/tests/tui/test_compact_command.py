@@ -11,8 +11,9 @@ from src.agent.compaction import is_summary
 from src.agent.provider.base import Done, Message, ProviderError, TextDelta, ToolCall
 from src.agent.session import SessionStore, ToolMeta, sessions_root
 from src.tui import StartChoice
+from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
-from src.tui.widgets.transcript import ICONS, NoticeEntry, UserEntry
+from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
 from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, chat, reached, scripted, settled, type_and_send, until

@@ -2,16 +2,24 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
+from typing import Any, Literal, cast
 
 import pytest
+from rich.style import Style
+from rich.text import Text
 from src.agent.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from src.agent.tools.base import ToolResult
 from src.tui.app import AgentApp
+from src.tui.styles import ACCENT, DIM, ERROR, ICONS, NOTICE, OK, TOOL_NAME
 from src.tui.widgets.status import StatusBar
-from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, UserEntry
-from textual.widgets import Markdown
+from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, Transcript, UserEntry
+from textual.content import Content
+from textual.widgets import Collapsible, Markdown, Static
 
 from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, settled, type_and_send, until
+
+Level = Literal["info", "warn", "error"]
 
 
 def _read_call(path: str) -> ToolCallEvent:
@@ -35,7 +43,7 @@ async def test_transcript_shows_user_streamed_text_and_a_tool_entry(make_app: Ap
         assert [e.text for e in app.query(UserEntry)] == ["what is in main?"]
         assert [e.text for e in app.query(AssistantEntry)] == ["Let me look.", "It has **31** lines."]
         (tool,) = app.query(ToolEntry)
-        assert tool.title == "read src/main.py · 31 lines"
+        assert tool.title == "✓ read src/main.py · 31 lines"
         entries = list(app.query("#transcript > *"))
         kinds = [type(e).__name__ for e in entries]
         assert kinds == ["UserEntry", "AssistantEntry", "ToolEntry", "AssistantEntry"]
@@ -216,3 +224,150 @@ async def test_removing_a_turn_with_an_open_tool_entry_drops_it_from_the_tool_ma
         assert transcript.tool("open") is None
         assert not list(app.query(ToolEntry))
         await transcript.close_open_tools("ended")  # must not touch the removed entry
+
+
+async def test_a_successful_edit_title_has_a_green_mark_a_bold_name_and_a_dim_summary(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "edit src/app.py")
+        await entry.finish(ToolResult("ok", False, "1 replaced"), None, False)
+        await pilot.pause()
+
+        title = _title_of(entry)
+        assert title.plain == "✓ edit src/app.py · 1 replaced"
+        styled = {title.plain[s.start : s.end]: s.style for s in title.spans}
+        assert styled["✓"] == _same(OK)
+        assert styled["edit"] == _same(TOOL_NAME)
+        assert styled["src/app.py"] == _same(ACCENT)
+        assert styled["1 replaced"] == _same(DIM)
+
+
+async def test_an_error_result_gets_a_red_cross(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "read nope.txt")
+        await entry.finish(ToolResult("not found", True, "not found"), None, False)
+        await pilot.pause()
+
+        title = _title_of(entry)
+        assert title.plain == "✗ read nope.txt · not found"
+        assert title.spans[0].style == _same(ERROR)
+
+
+async def test_an_interrupted_call_gets_the_dim_ended_mark(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "bash sleep 9")
+        await entry.finish(None, None, False, "interrupted")
+        await pilot.pause()
+
+        title = _title_of(entry)
+        assert title.plain == "⏹ bash sleep 9 · interrupted"
+        assert title.spans[0].style == _same(DIM)
+
+
+async def test_a_replayed_entry_is_styled_without_an_invented_mark() -> None:
+    entry = ToolEntry("edit a.py", "replaced 1 occurrence(s)")
+    title = _title_of(entry)
+    assert title.plain == "edit a.py · replaced 1 occurrence(s)"
+    assert title.spans[0].style == _same(TOOL_NAME)
+
+
+@pytest.mark.parametrize("level", ["info", "warn", "error"])
+async def test_a_notice_is_styled_by_level(make_app: AppFactory, level: str) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await app.query_one(Transcript).add_notice(cast("Level", level), "hello")
+        await pilot.pause()
+        (notice,) = app.query(NoticeEntry)
+        assert notice.text == f"{ICONS[level]} hello"
+        content = notice.visual
+        assert isinstance(content, Content)
+        assert content.plain == f"{ICONS[level]} hello"
+        (span,) = content.spans
+        assert span.style == _same(NOTICE[level])
+
+
+async def test_a_finished_bash_entry_shows_its_output_in_color(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "bash x")
+        await entry.finish(ToolResult("ok\nexit 0", False, "exit 0", display="\x1b[32mok\x1b[0m\nexit 0"), None, False)
+        await pilot.pause()
+
+        (shown,) = entry.query(Collapsible.Contents).first().query(Static)
+        content = shown.visual
+        assert isinstance(content, Content)
+        assert content.plain == "ok\nexit 0"
+        (span,) = content.spans
+        style = cast("Any", span.style)
+        assert (content.plain[span.start : span.end], style.foreground.ansi) == ("ok", 2)
+        assert entry.detail == "ok\nexit 0"  # the plain copy stays the record
+
+
+async def test_output_without_a_display_copy_is_shown_as_plain_text(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "read a")
+        await entry.finish(ToolResult("a\x1b[1b"), None, False)
+        await pilot.pause()
+
+        (shown,) = entry.query(Collapsible.Contents).first().query(Static)
+        assert _plain(shown) == "a\x1b[1b"
+
+
+async def test_markup_looking_text_in_colored_output_is_shown_literally(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "bash x")
+        display = "\x1b[31m[red]x[/red] [$var] [bold]\x1b[0m"
+        await entry.finish(ToolResult("[red]x[/red] [$var] [bold]", False, "exit 0", display=display), None, False)
+        await pilot.pause()
+
+        (shown,) = entry.query(Collapsible.Contents).first().query(Static)
+        assert _plain(shown) == "[red]x[/red] [$var] [bold]"
+
+
+async def test_cursor_movement_leaves_no_raw_escape_in_the_shown_output(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        entry = await app.query_one(Transcript).add_tool("c1", "bash x")
+        result = await _bash_result("printf '\\033[2K\\033[1A\\033[32mok\\033[0m'")
+        await entry.finish(result, None, False)
+        await pilot.pause()
+
+        (shown,) = entry.query(Collapsible.Contents).first().query(Static)
+        assert "\x1b" not in _plain(shown)
+        assert _plain(shown) == "ok\nexit 0"
+
+
+def _title_of(entry: Collapsible) -> Content:
+    title = cast("Any", entry.title)
+    assert isinstance(title, Content)
+    return title
+
+
+def _same(style: Style) -> object:
+    """The Textual style a Rich style turns into when it is shown."""
+    text = Text()
+    text.append("x", style)
+    return Content.from_rich_text(text).spans[0].style
+
+
+def _plain(static: Static) -> str:
+    content = static.visual
+    assert isinstance(content, Content)
+    return content.plain
+
+
+async def _bash_result(command: str) -> ToolResult:
+    import os
+    from pathlib import Path
+
+    from src.agent.tools.base import Prepared, ToolContext
+    from src.agent.tools.shell import BashTool
+
+    os.environ.setdefault("SHELL", "/bin/sh")
+    prepared = await BashTool().prepare({"command": command}, ToolContext(Path.cwd(), 5.0))
+    assert isinstance(prepared, Prepared)
+    return await prepared.execute()

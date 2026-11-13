@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 AGENT_SRC = Path(__file__).parent.parent / "src" / "agent"
-FORBIDDEN = {"textual", "httpx"}
+FORBIDDEN = {"textual", "httpx", "rich"}
 
 
 def _imported_roots(path: Path) -> set[str]:
@@ -23,7 +23,7 @@ def test_the_scan_sees_the_agent_modules() -> None:
     assert len(list(AGENT_SRC.rglob("*.py"))) > 10
 
 
-def test_no_agent_module_imports_textual_or_httpx() -> None:
+def test_no_agent_module_imports_textual_httpx_or_rich() -> None:
     offenders = {
         str(path.relative_to(AGENT_SRC)): sorted(_imported_roots(path) & FORBIDDEN)
         for path in sorted(AGENT_SRC.rglob("*.py"))
@@ -62,3 +62,9 @@ async def test_the_no_network_fixture_blocks_real_requests() -> None:
     async with httpx.AsyncClient() as client:
         with pytest.raises(NetworkAccessError):
             await client.get("http://example.invalid")
+
+
+def test_the_boundary_scan_catches_a_rich_import(tmp_path: Path) -> None:
+    module = tmp_path / "m.py"
+    module.write_text("from rich.text import Text\nimport rich\n")
+    assert _imported_roots(module) & FORBIDDEN == {"rich"}

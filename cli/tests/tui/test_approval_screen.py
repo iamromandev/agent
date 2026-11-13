@@ -6,10 +6,12 @@ import pytest
 from src.agent.mode import Mode
 from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.screens.approval import ApprovalScreen
+from src.tui.styles import diff_theme
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry
 from textual.screen import ModalScreen
-from textual.widgets import Input, OptionList
+from textual.visual import RichVisual
+from textual.widgets import Collapsible, Input, OptionList, Static
 
 from tests.tui.conftest import AppFactory, scripted, settled, type_and_send, until
 
@@ -331,3 +333,49 @@ async def test_an_edit_cancelled_with_escape_shows_no_diff_in_its_tool_entry(
         assert "+new" not in tool.detail
         assert tool.collapsed
         assert (tmp_path / "a.py").read_text() == "old\n"
+
+
+def _record_diff_themes(monkeypatch: pytest.MonkeyPatch, module: str) -> list[bool]:
+    """Wrap the module's `diff_theme` so a test can see which `dark` flag a diff was drawn with."""
+    asked: list[bool] = []
+    real = diff_theme
+
+    def spy(dark: bool) -> str:
+        asked.append(dark)
+        return real(dark)
+
+    monkeypatch.setattr(f"{module}.diff_theme", spy)
+    return asked
+
+
+@pytest.mark.parametrize(("theme", "expected"), [("textual-dark", True), ("textual-light", False)])
+async def test_the_approval_diff_uses_the_theme_matching_the_app_theme(
+    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, theme: str, expected: bool
+) -> None:
+    asked = _record_diff_themes(monkeypatch, "src.tui.screens.approval")
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    async with app.run_test() as pilot:
+        app.theme = theme
+        screen = await _open_dialog(app, pilot)
+        assert isinstance(screen.query_one("#preview", Static).visual, RichVisual)  # the highlighted diff
+        assert asked == [expected]
+
+
+@pytest.mark.parametrize(("theme", "expected"), [("textual-dark", True), ("textual-light", False)])
+async def test_the_transcript_diff_uses_the_theme_matching_the_app_theme(
+    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, theme: str, expected: bool
+) -> None:
+    asked = _record_diff_themes(monkeypatch, "src.tui.widgets.transcript")
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    async with app.run_test() as pilot:
+        app.theme = theme
+        await _open_dialog(app, pilot)
+        await pilot.press("up", "up", "enter")
+        await settled(app)
+        await pilot.pause()
+        (tool,) = app.query(ToolEntry)
+        (diff, *_) = tool.query(Collapsible.Contents).first().query(Static)
+        assert isinstance(diff.visual, RichVisual)
+        assert asked == [expected]

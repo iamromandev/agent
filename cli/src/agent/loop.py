@@ -48,7 +48,7 @@ from src.agent.provider.base import (
 from src.agent.session import NullRecorder, Recorder, ToolMeta
 from src.agent.session.records import compaction_notice
 from src.agent.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
-from src.agent.tools.text import truncate
+from src.agent.tools.text import truncate, truncate_ansi
 from src.agent.undo import (
     NOTHING_TO_UNDO,
     SNAPSHOT_FILE_LIMIT,
@@ -569,6 +569,8 @@ class Agent:
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
             applied = False
         result = dataclasses.replace(result, output=truncate(result.output))
+        if result.display is not None:
+            result = dataclasses.replace(result, display=truncate_ansi(result.display))
         self._record(
             Message("tool", result.output, tool_call_id=call.id, name=call.name), ToolMeta(label, result.summary)
         )

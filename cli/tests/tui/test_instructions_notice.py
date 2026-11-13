@@ -9,7 +9,8 @@ import pytest
 from src.agent.loop import Agent
 from src.agent.provider.base import Done, TextDelta
 from src.tui import StartChoice
-from src.tui.widgets.transcript import ICONS, NoticeEntry
+from src.tui.styles import ICONS
+from src.tui.widgets.transcript import NoticeEntry
 
 from tests.tui.conftest import AppFactory, chat, settled, type_and_send, until
 
