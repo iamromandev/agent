@@ -73,6 +73,7 @@ uv sync
 uv run agent health check
 uv run agent           # coding agent TUI; its workspace is the current directory, here `cli/` (needs a local Ollama; see cli/.env.example)
 uv run agent --continue # resume the latest saved session for this folder (also: --resume [id], /sessions inside the app)
+# /undo steps back one turn of this run: it restores files the turn's write/edit calls changed, deletes ones it created, skips files changed since, and puts the prompt back in the input box (bash effects are not undone)
 # the agent loads every AGENTS.md from the git root down to the launch folder (up to AGENT_INSTRUCTIONS_SHARE of the context window); /init has the model write one from facts scanned (statically) from makefiles, pyproject.toml, package.json and CI, then warns about make and script commands the scan did not find
 # for another folder, run from it: uv run --project /path/to/agent/cli agent  (--project keeps the cwd, --directory changes it; `.env` is read from the cwd, so set AGENT_* in the environment there)
 ```

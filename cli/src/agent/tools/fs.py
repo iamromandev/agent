@@ -122,8 +122,14 @@ class WriteTool(Tool):
 
         async def execute() -> ToolResult:
             def write() -> None:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(data)
+                if ctx.journal is not None:
+                    ctx.journal.before(path)
+                try:
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+                finally:
+                    if ctx.journal is not None:
+                        ctx.journal.after(path)
 
             try:
                 await asyncio.to_thread(write)
@@ -211,7 +217,13 @@ class EditTool(Tool):
             def apply() -> bool:
                 if _read_strict(path) != original:
                     return False
-                path.write_bytes(updated.encode("utf-8"))
+                if ctx.journal is not None:
+                    ctx.journal.before(path)
+                try:
+                    path.write_bytes(updated.encode("utf-8"))
+                finally:
+                    if ctx.journal is not None:
+                        ctx.journal.after(path)
                 return True
 
             try:

@@ -49,6 +49,14 @@ from src.agent.session import NullRecorder, Recorder, ToolMeta
 from src.agent.session.records import compaction_notice
 from src.agent.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
 from src.agent.tools.text import truncate
+from src.agent.undo import (
+    NOTHING_TO_UNDO,
+    SNAPSHOT_FILE_LIMIT,
+    SNAPSHOT_TOTAL_LIMIT,
+    UndoLog,
+    restore_turn,
+    undo_notices,
+)
 
 INTERRUPTED = "Interrupted by user"
 SKIPPED = "Skipped: the turn was interrupted before this call ran"
@@ -97,11 +105,14 @@ class Agent:
         compact_at: float = 0.8,
         compact_keep_turns: int = 2,
         instructions_share: float = 0.25,
+        undo_file_limit: int = SNAPSHOT_FILE_LIMIT,
+        undo_total_limit: int = SNAPSHOT_TOTAL_LIMIT,
     ) -> None:
         self.provider = provider
         self.tools = list(tools)
         self.approver = approver
-        self.ctx = ctx
+        self._undo = UndoLog(ctx.workspace, undo_file_limit, undo_total_limit)
+        self.ctx = dataclasses.replace(ctx, journal=self._undo)
         self.max_steps = max_steps
         if not 0 < compact_at <= 1:
             raise ValueError(f"compact_at must be above 0 and at most 1, got {compact_at}")
@@ -161,6 +172,7 @@ class Agent:
         self._save_error = None
         self._save_failing = False
         self._summary_failed = self._warned_full = False
+        self._undo.clear()
         return old
 
     def close(self) -> None:
@@ -237,6 +249,7 @@ class Agent:
         if self._busy:
             raise AgentBusy("a turn is already running")
         if not self.history:
+            self._undo.clear()
             emit(Notice("info", NOTHING_TO_COMPACT))
             return
         self._busy = True
@@ -301,6 +314,8 @@ class Agent:
                 self._summary_failed = True
                 notices.append(Notice("warn", NOT_SUMMARIZED))
         after = self.estimate()
+        if force or pruned or summarized:
+            self._undo.clear()  # the turns before it are folded or pruned: undoing them would not match the history
         if pruned or summarized:
             self._record_compaction(pruned, summarized, before, after)
             self._flush_save_error(emit)
@@ -342,13 +357,14 @@ class Agent:
     def tools_for(self, mode: Mode) -> list[Tool]:
         return [t for t in self.tools if not (mode is Mode.PLAN and t.mutating)]
 
-    async def run_turn(self, text: str, emit: EventSink) -> None:
+    async def run_turn(self, text: str, emit: EventSink, *, draft: str | None = None) -> None:
         if self._busy:
             raise AgentBusy("a turn is already running")
         if not text.strip():
             return
         self._busy = True
         self._summary_failed = self._warned_full = False  # per turn: one retry of a summary, one warning
+        self._undo.begin(len(self.history), draft if draft is not None else text)
         try:
             self._record(Message("user", text))
             try:
@@ -377,8 +393,55 @@ class Agent:
                 with contextlib.suppress(Exception):
                     emit(TurnEnded("error"))
         finally:
+            self._undo.finish()
             self._busy = False
             self._inflight = None
+
+    async def undo(self, emit: EventSink) -> str | None:
+        """Undo the last turn: restore its files, drop it from the history and the session. Returns its prompt.
+
+        None when there is nothing to undo.
+        """
+        if self._busy:
+            raise AgentBusy("a turn is already running")
+        turn = self._undo.pop()
+        if turn is None:
+            emit(Notice("info", NOTHING_TO_UNDO))
+            return None
+        self._busy = True
+        try:
+            # The restore runs in a thread a cancel cannot stop: let it finish and cut the history
+            # to match what it did, then hand the cancel on.
+            cut_ids = {m.tool_call_id for m in self.history[turn.start :] if m.tool_call_id}
+            task = asyncio.ensure_future(asyncio.to_thread(restore_turn, turn, self.ctx.workspace))
+            cancel: asyncio.CancelledError | None = None
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError as exc:
+                    cancel = cancel or exc
+                except Exception:
+                    break
+            error = task.exception()
+            result = None if error is not None else task.result()
+            del self.history[turn.start :]
+            kept = {m.tool_call_id for m in self.history if m.tool_call_id}
+            for call_id in cut_ids - kept:
+                self.tool_meta.pop(call_id, None)
+            if self._reported is not None and self._reported.history_len > len(self.history):
+                self._reported = None
+            self._save(lambda: self._recorder.undo(turn.start))
+            self._flush_save_error(emit)
+            if cancel is not None:
+                raise cancel
+            if result is None:
+                emit(Notice("error", f"Undo could not restore the files: {error}"))
+                return turn.prompt
+            for notice in undo_notices(result, turn.bash):
+                emit(notice)
+        finally:
+            self._busy = False
+        return turn.prompt
 
     def _answer_unanswered_calls(
         self, in_flight_text: str, skipped_text: str, in_flight_summary: str, skipped_summary: str
@@ -527,6 +590,8 @@ class Agent:
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False
             if decision.choice is Choice.ALWAYS and allow_always:
                 self.grants.add(call.name, call.arguments)
+        if tool.name == "bash":
+            self._undo.note_bash()
         if not tool.mutating:
             result = await prepared.execute()  # cancellable at once; bash kills its process group
             return result, not result.is_error

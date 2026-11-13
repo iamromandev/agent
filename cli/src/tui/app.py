@@ -71,7 +71,7 @@ async def _uninterrupted(work: Awaitable[None]) -> None:
 HELP = (
     "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · /new or /clear new session · /sessions switch session · "
-    "/compact shrink the context · /init write AGENTS.md · /help this help · /quit exit"
+    "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
 
@@ -111,6 +111,7 @@ class AgentApp(App[None]):
         self._turn_entered = False  # the turn worker has run its first line
         self._draft: str | None = None  # the submitted message until the turn really starts sending it
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
+        self._undoing = False  # /undo is running: keys that act on a turn leave it alone
         self._switching = False  # a session is being loaded and drawn: no turn may start meanwhile
 
     def compose(self) -> ComposeResult:
@@ -287,7 +288,7 @@ class AgentApp(App[None]):
         self.agent.set_mode(Mode.PLAN if self.agent.mode is Mode.BUILD else Mode.BUILD)
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
-        if self._turn_active:  # a step already running keeps the mode it started with
+        if self._turn_active and not self._undoing:  # a step already running keeps the mode it started with
             self._finished_since_toggle = False
             status.pending_mode = True
         else:
@@ -311,6 +312,8 @@ class AgentApp(App[None]):
             self.exit()
 
     def interrupt_turn(self) -> None:
+        if self._undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
+            return
         self.workers.cancel_group(self, "turn")
         if self._turn_active and not self._turn_entered:
             # Cancelled before its first line ran: the `finally` in `_turn` never will.
@@ -354,7 +357,7 @@ class AgentApp(App[None]):
         self.query_one(StatusBar).busy = True
         self._turn_entered = False
         # A partial, not a coroutine: cancelled before it first runs, nothing is left un-awaited.
-        self.run_worker(functools.partial(self._turn, text, init), group="turn")
+        self.run_worker(functools.partial(self._turn, text, init, draft), group="turn")
 
     async def _command(self, command: str) -> None:
         transcript = self.query_one(Transcript)
@@ -420,8 +423,40 @@ class AgentApp(App[None]):
                 self.query_one(StatusBar).busy = True
                 # Like a turn: Esc cancels the "turn" group, and the same events reach the transcript.
                 self.run_worker(self._compact, group="turn")
+            case "/undo":
+                await self._undo_command()
             case _:
                 await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
+
+    async def _undo_command(self) -> None:
+        transcript = self.query_one(Transcript)
+        if self._turn_active or self._switching:
+            await transcript.add_notice("warn", self._busy_text("/undo"))
+            return
+        status = self.query_one(StatusBar)
+        self._turn_active = True
+        self._undoing = True
+        status.busy = True
+        events: list[AgentEvent] = []
+        prompt: str | None = None
+        try:
+            prompt = await self.agent.undo(events.append)
+        except AgentBusy:
+            events.append(Notice("warn", self._busy_text("/undo")))
+        except Exception as error:
+            events.append(Notice("error", f"Undo failed: {error}"))
+        finally:
+            self._turn_active = False
+            self._undoing = False
+            status.busy = False
+        if prompt is not None:
+            await transcript.remove_last_turn()
+            self._restore_draft(prompt)
+            status.used = self.agent.estimate()
+            status.estimated = True
+        for event in events:
+            if isinstance(event, Notice):
+                await transcript.add_notice(event.level, event.text)
 
     def _init_prompt(self) -> str:
         """The `/init` message: the file's state and the parent files already loaded (reads the disk)."""
@@ -430,26 +465,42 @@ class AgentApp(App[None]):
         block = render_facts(scan(self.workspace), int(FACTS_SHARE * self.provider.context_window) * CHARS_PER_TOKEN)
         return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents, facts=block)
 
-    async def _turn(self, text: str, init: bool = False) -> None:
+    async def _turn(self, text: str, init: bool = False, draft: str | None = None) -> None:
         self._turn_entered = True
         transcript = self.query_one(Transcript)
         status = self.query_one(StatusBar)
         agents_md = self.workspace / "AGENTS.md"
         before: tuple[int, int] | None = None
         sent = False
+        shown = False  # the user entry was drawn (or was being drawn)
+        started = False  # the agent was handed the message
+
+        async def work(emit: EventSink) -> None:
+            nonlocal started
+            started = True
+            await self.agent.run_turn(text, emit, draft=draft)
+
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
                 return
             self._draft = None  # from here the message is part of the conversation
             sent = True
             before = fingerprint(agents_md)
+            shown = True
             await transcript.add_user(text)
             self._finished_since_toggle = False
             status.pending_mode = False
-            await self._run_with_events(lambda emit: self.agent.run_turn(text, emit))
+            await self._run_with_events(work)
         finally:
             try:
-                if init and sent and not self._shutting_down:
+                if shown and not self._shutting_down:
+                    with contextlib.suppress(Exception):
+                        if started:
+                            transcript.end_turn(transcript.latest_turn)  # what follows is not part of the turn
+                        else:  # Esc landed before the agent got the message: no turn, so no entry, and the text is kept
+                            self._draft = draft if draft is not None else text
+                            await _uninterrupted(self._discard_turn(transcript))
+                if init and sent and started and not self._shutting_down:
                     if fingerprint(agents_md) == before:
                         with contextlib.suppress(NoMatches):
                             await transcript.add_notice("info", "/init finished without changing AGENTS.md")
@@ -457,6 +508,10 @@ class AgentApp(App[None]):
                         await self._check_init()
             finally:
                 self._end_turn()
+
+    @staticmethod
+    async def _discard_turn(transcript: Transcript) -> None:
+        await transcript.remove_turn(transcript.latest_turn)
 
     async def _check_init(self) -> None:
         """After an `/init` turn that changed AGENTS.md: warn about commands the scan did not find. Never raises."""

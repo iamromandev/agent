@@ -9,6 +9,7 @@ from rich.syntax import Syntax
 from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.content import Content
+from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
@@ -25,6 +26,7 @@ class UserEntry(Static):
     def __init__(self, text: str) -> None:
         super().__init__(Text(f"> {text}"))
         self.text = text
+        self.turn: int | None = None  # set by Transcript.add_user
 
 
 class AssistantEntry(Markdown):
@@ -100,9 +102,25 @@ class Transcript(VerticalScroll):
         super().__init__(id=id)
         self._tools: dict[str, ToolEntry] = {}
         self._assistant: AssistantEntry | None = None
+        self._turns = 0
+        self.latest_turn = 0  # token of the newest user entry, set before it is mounted
+        self._last: dict[int, Widget] = {}  # turn token -> the last widget it ended with
+        self._ended: list[int] = []  # tokens of the turns that ended, oldest first
 
-    async def add_user(self, text: str) -> None:
-        await self._add(UserEntry(text))
+    async def add_user(self, text: str) -> int:
+        """Show a user message; returns the token of the turn it starts."""
+        self._turns += 1
+        self.latest_turn = self._turns
+        entry = UserEntry(text)
+        entry.turn = self._turns
+        await self._add(entry)
+        return self._turns
+
+    def end_turn(self, token: int) -> None:
+        """The turn's widgets are all drawn: what is added from here on does not belong to it."""
+        if last := next(iter(reversed(self.children)), None):
+            self._last[token] = last
+            self._ended.append(token)
 
     async def write_assistant(self, delta: str) -> None:
         if self._assistant is None:
@@ -159,9 +177,35 @@ class Transcript(VerticalScroll):
             await self.mount_all(entries[start : start + REPLAY_BATCH])
         self.scroll_end(animate=False)
 
+    async def remove_turn(self, token: int) -> bool:
+        """Remove one turn: its user entry through the last widget it ended with, not what came after.
+
+        A turn that never ended (its message never reached the agent) loses only its user entry.
+        False when the turn is not on screen.
+        """
+        await self.end_assistant()
+        children = list(self.children)
+        start = next((i for i, c in enumerate(children) if isinstance(c, UserEntry) and c.turn == token), None)
+        if start is None:
+            return False
+        last = self._last.pop(token, None)
+        stop = children.index(last) + 1 if last in children else start + 1
+        removed = children[start : max(stop, start + 1)]
+        self._tools = {call_id: tool for call_id, tool in self._tools.items() if tool not in removed}
+        if token in self._ended:
+            self._ended.remove(token)
+        await self.remove_children(removed)
+        return True
+
+    async def remove_last_turn(self) -> bool:
+        """Remove the newest turn that ended. False when there is none."""
+        return bool(self._ended) and await self.remove_turn(self._ended[-1])
+
     async def clear_all(self) -> None:
         await self.end_assistant()
         self._tools.clear()
+        self._last.clear()
+        self._ended.clear()
         await self.remove_children()
 
     async def _add(self, widget: Static | Markdown | Collapsible) -> None:
