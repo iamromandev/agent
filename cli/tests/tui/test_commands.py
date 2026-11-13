@@ -25,7 +25,7 @@ async def test_help_lists_the_keys_and_commands(make_app: AppFactory) -> None:
         await pilot.pause()
         (help_text,) = [n for n in _notices(app) if "Enter" in n]
 
-    for needle in ("ctrl+j", "shift+enter", "Tab", "Esc", "ctrl+c", "/clear", "/new", "/sessions", "/compact", "/help", "/quit"):
+    for needle in ("ctrl+j", "shift+enter", "Tab", "Esc", "ctrl+c", "/clear", "/new", "/sessions", "/compact", "/init", "/help", "/quit"):
         assert needle in help_text
     assert scripted(app).requests == []
 

@@ -51,6 +51,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> None:
             recorder=recorder_factory(),
             compact_at=settings.compact_at,
             compact_keep_turns=settings.compact_keep_turns,
+            instructions_share=settings.instructions_share,
         )
 
     # The client is closed by the app on unmount, inside the loop that owns its connections.

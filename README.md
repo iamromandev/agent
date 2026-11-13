@@ -73,6 +73,7 @@ uv sync
 uv run agent health check
 uv run agent           # coding agent TUI; its workspace is the current directory, here `cli/` (needs a local Ollama; see cli/.env.example)
 uv run agent --continue # resume the latest saved session for this folder (also: --resume [id], /sessions inside the app)
+# the agent loads every AGENTS.md from the git root down to the launch folder (up to AGENT_INSTRUCTIONS_SHARE of the context window); /init writes one
 # for another folder, run from it: uv run --project /path/to/agent/cli agent  (--project keeps the cwd, --directory changes it; `.env` is read from the cwd, so set AGENT_* in the environment there)
 ```
 

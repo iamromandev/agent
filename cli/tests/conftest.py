@@ -42,6 +42,20 @@ class NetworkAccessError(AssertionError):
     """A test tried to use a real network transport."""
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _tmp_is_outside_any_git_repo(tmp_path_factory: pytest.TempPathFactory) -> None:
+    """tmp_path must not sit inside a repo: a real AGENTS.md above it would be read as a parent file."""
+    base = tmp_path_factory.getbasetemp().resolve()
+    for folder in (base, *base.parents):
+        if (folder / ".git").exists():
+            pytest.fail(
+                f"the pytest temp folder {base} is inside a git repo ({folder}): "
+                "set TMPDIR (or --basetemp) to a folder outside any repo, "
+                "or a real AGENTS.md would leak into the instruction tests",
+                pytrace=False,
+            )
+
+
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
     """Fail any real HTTP call. Tests use httpx.MockTransport instead (NFR2)."""

@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     compact_keep_turns: Annotated[
         int, Field(default=2, ge=1, description="Most recent user turns that compaction keeps verbatim")
     ]
+    instructions_share: Annotated[
+        float, Field(default=0.25, gt=0, le=0.5, description="Fraction of num_ctx that AGENTS.md files may use")
+    ]
 
 
 @lru_cache

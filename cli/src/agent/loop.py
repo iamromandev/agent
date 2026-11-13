@@ -33,6 +33,7 @@ from src.agent.events import (
     TurnEnded,
     UsageUpdate,
 )
+from src.agent.instructions import Instructions, load_instructions
 from src.agent.mode import Mode
 from src.agent.prompt import build_system_prompt
 from src.agent.provider.base import (
@@ -95,6 +96,7 @@ class Agent:
         recorder: Recorder | None = None,
         compact_at: float = 0.8,
         compact_keep_turns: int = 2,
+        instructions_share: float = 0.25,
     ) -> None:
         self.provider = provider
         self.tools = list(tools)
@@ -105,6 +107,11 @@ class Agent:
             raise ValueError(f"compact_at must be above 0 and at most 1, got {compact_at}")
         if compact_keep_turns < 1:
             raise ValueError(f"compact_keep_turns must be at least 1, got {compact_keep_turns}")
+        if not 0 < instructions_share <= 0.5:
+            raise ValueError(f"instructions_share must be above 0 and at most 0.5, got {instructions_share}")
+        self.instructions_share = instructions_share
+        self._announced: tuple[tuple[str, str], ...] = ()  # the files and states of the last Instructions notice
+        self._loaded: Instructions | None = None  # what the last request (or notice) read, for `estimate`
         self.compact_at = compact_at
         self.compact_keep_turns = compact_keep_turns
         self.today = today
@@ -163,10 +170,38 @@ class Agent:
     def estimate(self) -> int:
         """Tokens the next request would use: the model's last count plus a guess for what came after."""
         specs = [t.spec() for t in self.tools_for(self.mode)]
-        return estimate_tokens(self._system(self.mode), self.history, self._reported, specs)
+        loaded = self._loaded if self._loaded is not None else self.instructions()
+        return estimate_tokens(self._system(self.mode, loaded), self.history, self._reported, specs)
 
-    def _system(self, mode: Mode) -> Message:
-        return Message("system", build_system_prompt(self.ctx.workspace, mode, self.today(), platform.system()))
+    def instructions(self) -> Instructions:
+        """The AGENTS.md files as they are on disk now, fitted to this model's window; remembered for `estimate`."""
+        budget = int(self.instructions_share * self.provider.context_window)
+        self._loaded = loaded = load_instructions(self.ctx.workspace, budget)
+        return loaded
+
+    def forget_instructions_notice(self) -> None:
+        """The last notice was not delivered (or the transcript was cleared): show the next one even if unchanged."""
+        self._announced = ()
+
+    def instructions_notice(self) -> Notice | None:
+        """The notice for the instructions when they differ from the last one announced; remembers what it saw."""
+        loaded = self.instructions()
+        key, self._announced = self._announced, loaded.key
+        shown = loaded.notice()
+        if shown is None or loaded.key == key:
+            return None
+        return Notice(*shown)
+
+    def _system(self, mode: Mode, instructions: Instructions | None = None) -> Message:
+        """The system message; reads the files fresh (R4) unless the caller passes what it has."""
+        prompt = build_system_prompt(
+            self.ctx.workspace,
+            mode,
+            self.today(),
+            platform.system(),
+            instructions=instructions if instructions is not None else self.instructions(),
+        )
+        return Message("system", prompt)
 
     def _record(self, message: Message, meta: ToolMeta | None = None) -> None:
         """Add to the history and the session record. Synchronous (a cancel can't split the two); never raises."""
@@ -318,6 +353,12 @@ class Agent:
             self._record(Message("user", text))
             try:
                 self._flush_save_error(emit)
+                if (notice := self.instructions_notice()) is not None:
+                    try:
+                        emit(notice)
+                    except BaseException:
+                        self.forget_instructions_notice()  # not delivered: the next turn shows it
+                        raise
                 await self._run_steps(emit)
             except asyncio.CancelledError:
                 # Esc cancels the worker running this coroutine. Leave a history the model can be
