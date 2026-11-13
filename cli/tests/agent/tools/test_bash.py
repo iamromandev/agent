@@ -327,7 +327,7 @@ async def test_long_colored_output_is_cut_at_the_same_visible_text_in_both_copie
 
 
 async def test_colored_output_near_the_cap_keeps_as_much_text_as_plain_output(workspace: Path) -> None:
-    colored = await _run(r"yes $'\033[32mabcdefghi\033[0m' | head -n 5000", _ctx(workspace))
+    colored = await _run(r'''yes "$(printf '\033[32mabcdefghi\033[0m')" | head -n 5000''', _ctx(workspace))
     plain = await _run("yes abcdefghi | head -n 5000", _ctx(workspace))
 
     assert colored.output == plain.output
@@ -335,7 +335,7 @@ async def test_colored_output_near_the_cap_keeps_as_much_text_as_plain_output(wo
 
 
 async def test_the_display_copy_has_no_partial_escape_where_head_and_tail_meet(workspace: Path) -> None:
-    result = await _run(r"yes $'\033[38;5;123mabcdefghi\033[0m' | head -n 20000", _ctx(workspace))
+    result = await _run(r'''yes "$(printf '\033[38;5;123mabcdefghi\033[0m')" | head -n 20000''', _ctx(workspace))
 
     display = result.display or ""
     assert re.search(r"\x1b(?!\[[0-9;:]*m)", display) is None
