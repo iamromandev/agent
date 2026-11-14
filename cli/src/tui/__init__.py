@@ -23,8 +23,10 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
     from src.agent import Agent
     from src.agent.approval import Approver
-    from src.agent.mcp.config import global_config_path, load_file
+    from src.agent.mcp.config import global_config_path
     from src.agent.mcp.hub import McpHub
+    from src.agent.mcp.setup import prepare
+    from src.agent.mcp.trust import TrustStore, trust_store_path
     from src.agent.provider.ollama import OllamaProvider
     from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.agent.terminal.manager import TerminalManager
@@ -45,14 +47,16 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
     try:
         terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
-        loaded = load_file(global_config_path(), "global")
+        # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
+        setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         mcp = McpHub(  # nothing starts yet
             SdkConnector(),
             root,
-            loaded.servers,
+            setup.servers,
             settings.mcp_timeout,
-            loaded.warnings,
+            setup.warnings,
             start_timeout=settings.mcp_start_timeout,
+            untrusted=setup.untrusted,
         )
 
         def recorder_factory() -> Recorder:
@@ -95,6 +99,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             on_close=close,
             terminals=terminals,
             mcp=mcp,
+            mcp_trust=setup.remember,
         )
     except BaseException:
         asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)

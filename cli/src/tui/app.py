@@ -37,6 +37,7 @@ from src.agent.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.agent.instructions import fingerprint, levels
 from src.agent.loop import close_recorder
 from src.agent.mcp.hub import HubEvent, McpHub
+from src.agent.mcp.names import tool_name
 from src.agent.mode import Mode
 from src.agent.prompt import build_init_prompt
 from src.agent.provider.base import Provider
@@ -53,12 +54,14 @@ from src.agent.terminal.manager import TerminalError, TerminalManager
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
+from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import Transcript
 
+DIALOGS = (ApprovalScreen, SessionPicker, McpTrustScreen)  # modal screens: the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -83,7 +86,7 @@ HELP = (
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · /new or /clear new session · "
-    "/sessions switch session · "
+    "/sessions switch session · /mcp MCP servers and their tools · "
     "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
@@ -119,11 +122,13 @@ class AgentApp(App[None]):
         on_close: Callable[[], Awaitable[None]] | None = None,
         terminals: TerminalManager | None = None,
         mcp: McpHub | None = None,
+        mcp_trust: Callable[[], None] | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
         self.terminals = terminals
         self.mcp = mcp
+        self._mcp_trust = mcp_trust  # remembers that the user trusted the project's servers
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -194,7 +199,28 @@ class AgentApp(App[None]):
         if self.mcp is None:
             return
         self.mcp.listen(self._post_mcp_event)
-        self.mcp.start()
+        self.mcp.start()  # never the untrusted ones
+        if self.mcp.untrusted():
+            self.run_worker(self._ask_mcp_trust(), group="mcp-trust")
+
+    async def _ask_mcp_trust(self) -> None:
+        """Ask once whether to start the project's MCP servers; only a yes starts them."""
+        if self.mcp is None:
+            return
+        servers = self.mcp.untrusted()
+        names = ", ".join(s.name for s in servers)
+        self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
+        trusted = await self.push_screen_wait(McpTrustScreen(servers))
+        transcript = self.query_one(Transcript)
+        if not trusted:
+            await transcript.add_notice("info", f"mcp: project servers not trusted, so not started: {names}")
+            return
+        if self._mcp_trust is not None:
+            try:
+                self._mcp_trust()
+            except OSError as exc:  # the servers still start for this run; it will ask again next time
+                await transcript.add_notice("warn", f"mcp: could not remember the trust: {exc}")
+        self.mcp.start([s.name for s in servers])
 
     def _post_mcp_event(self, event: HubEvent) -> None:
         self.post_message(self.McpEvent(event))
@@ -277,6 +303,23 @@ class AgentApp(App[None]):
         hint = "a session is loading" if self._switching and not self._turn_active else f"press Esc to interrupt, then {command}"
         return f"busy — {hint}"
 
+    def _mcp_summary(self) -> str:
+        """`<name> (<source>) <status>[: reason]` per server, the tool names of a ready one indented below it."""
+        states = self.mcp.states() if self.mcp is not None else []
+        if not states:
+            return "No MCP servers configured (global: ~/.config/agent/mcp.json, project: .agent/mcp.json)"
+        lines: list[str] = []
+        for state in states:
+            config = state.config
+            line = f"{config.name} ({config.source}) {state.status}"
+            line = f"{line}: {state.reason}" if state.reason else line
+            if config.overrides_global:
+                line += f" · overrides the global '{config.name}'"
+            lines.append(line)
+            if state.status == "ready":
+                lines.extend(f"  {name}" for name in dict.fromkeys(tool_name(config.name, i.name) for i in state.tools))
+        return "\n".join(lines)
+
     async def _refuse_switch(self) -> None:
         await self.query_one(Transcript).add_notice("warn", self._busy_text("/sessions"))
 
@@ -348,7 +391,7 @@ class AgentApp(App[None]):
             and not event.is_forwarded
             and event.key != "ctrl+c"  # it interrupts: it never approves
             and time.monotonic() < self._keys_ignored_until
-            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen)  # empty on shutdown
+            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen | McpTrustScreen)  # empty on shutdown
         ):
             event.stop()
             return
@@ -480,22 +523,22 @@ class AgentApp(App[None]):
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         stack = self.screen_stack  # empty while shutting down; `self.screen` would raise then
         if action in ("toggle_terminal", "focus_input"):
-            return self.terminals is not None and not any(isinstance(s, ApprovalScreen | SessionPicker) for s in stack)
+            return self.terminals is not None and not any(isinstance(s, DIALOGS) for s in stack)
         if action in ("terminal_tab", "close_terminal_tab"):
             return self._tab_key_applies(action, stack)
         if action in self.TERMINAL_KEYS and stack and isinstance(stack[-1].focused, TerminalView):
             return False  # the key goes on to the terminal
         if action == "interrupt_turn":  # with a dialog open Escape belongs to it (the approval denies, then interrupts)
-            return not (stack and isinstance(stack[-1], ApprovalScreen | SessionPicker))
+            return not (stack and isinstance(stack[-1], DIALOGS))
         if action == "toggle_mode":  # the mode is not changed under a dialog, nor Tab taken from it
-            return not any(isinstance(screen, ApprovalScreen | SessionPicker) for screen in stack)
+            return not any(isinstance(screen, DIALOGS) for screen in stack)
         return True
 
     def _tab_key_applies(self, action: str, stack: list[Any]) -> bool:
         """Ctrl+PageUp/PageDown and Ctrl+W work while the pane is shown. Ctrl+W is also readline's and the
         input's "delete word", so it closes only a tab nobody types into: that of an exited terminal that has
         focus, or any tab while the tab bar has it (not the input, the transcript, a running terminal or nothing)."""
-        if self.terminals is None or not stack or any(isinstance(s, ApprovalScreen | SessionPicker) for s in stack):
+        if self.terminals is None or not stack or any(isinstance(s, DIALOGS) for s in stack):
             return False
         pane = self.query_one(TerminalPane)
         if not pane.display or not pane.tab_count:
@@ -567,6 +610,8 @@ class AgentApp(App[None]):
         match name:
             case "/help":
                 await transcript.add_notice("info", HELP)
+            case "/mcp":
+                await transcript.add_notice("info", self._mcp_summary())
             case "/quit":
                 self.exit()
             case "/sessions":

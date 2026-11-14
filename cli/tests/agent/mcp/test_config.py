@@ -3,7 +3,14 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from src.agent.mcp.config import ServerConfig, global_config_path, load_file
+from src.agent.mcp.config import (
+    LoadedConfig,
+    ServerConfig,
+    global_config_path,
+    load_file,
+    merge,
+    project_config_path,
+)
 
 
 def write(path: Path, content: object) -> Path:
@@ -129,3 +136,52 @@ def test_the_global_path_falls_back_to_the_home_config_folder() -> None:
 
 def test_a_relative_xdg_config_home_is_ignored() -> None:
     assert global_config_path({"XDG_CONFIG_HOME": "rel"}) == Path.home() / ".config" / "agent" / "mcp.json"
+
+
+def test_the_project_path_is_the_agent_folder_of_the_workspace(tmp_path: Path) -> None:
+    assert project_config_path(tmp_path) == tmp_path / ".agent" / "mcp.json"
+
+
+def test_the_exact_bytes_that_were_parsed_are_kept(tmp_path: Path) -> None:
+    path = write(tmp_path / "mcp.json", '{"servers": {"a": {"command": "x"}}}\n')
+    assert load_file(path, "project").raw == path.read_bytes()
+
+
+def test_a_missing_file_has_no_bytes(tmp_path: Path) -> None:
+    assert load_file(tmp_path / "mcp.json", "project").raw is None
+
+
+def test_a_project_server_replaces_a_global_one_with_the_same_name() -> None:
+    global_ = LoadedConfig([ServerConfig("db", "global-db"), ServerConfig("notes", "n")], ["g warning"])
+    project = LoadedConfig([ServerConfig("db", "project-db", source="project")], ["p warning"])
+
+    merged = merge(global_, project)
+
+    assert merged.servers == [
+        ServerConfig("db", "project-db", source="project", overrides_global=True),
+        ServerConfig("notes", "n"),
+    ]
+    assert merged.warnings == ["g warning", "p warning"]
+
+
+def test_servers_with_different_names_are_all_kept_global_first() -> None:
+    global_ = LoadedConfig([ServerConfig("a", "x")], [])
+    project = LoadedConfig([ServerConfig("b", "y", source="project")], [])
+
+    assert [(s.name, s.source) for s in merge(global_, project).servers] == [("a", "global"), ("b", "project")]
+
+
+def test_merge_with_no_project_servers_is_the_global_ones() -> None:
+    global_ = LoadedConfig([ServerConfig("a", "x")], [])
+    assert merge(global_, LoadedConfig([], [])).servers == global_.servers
+
+
+def test_a_project_server_that_replaces_a_global_one_says_so() -> None:
+    global_ = LoadedConfig([ServerConfig("db", "g"), ServerConfig("notes", "n")], [])
+    project = LoadedConfig([ServerConfig("db", "p", source="project"), ServerConfig("web", "w", source="project")], [])
+
+    merged = {s.name: s for s in merge(global_, project).servers}
+
+    assert merged["db"].overrides_global is True
+    assert merged["web"].overrides_global is False
+    assert merged["notes"].overrides_global is False

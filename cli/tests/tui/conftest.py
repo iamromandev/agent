@@ -91,6 +91,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         tools: bool = True,
         terminals: bool | TerminalManager = False,
         mcp: McpHub | None = None,
+        mcp_trust: Callable[[], None] | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -130,6 +131,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             on_close=on_close,
             terminals=manager,
             mcp=mcp,
+            mcp_trust=mcp_trust,
         )
 
     return build
