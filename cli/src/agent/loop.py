@@ -108,9 +108,12 @@ class Agent:
         instructions_share: float = 0.25,
         undo_file_limit: int = SNAPSHOT_FILE_LIMIT,
         undo_total_limit: int = SNAPSHOT_TOTAL_LIMIT,
+        extra_tools: Callable[[], Sequence[Tool]] | None = None,
     ) -> None:
         self.provider = provider
         self.tools = list(tools)
+        self._extra_tools = extra_tools  # asked at every use: tools that come and go while the agent runs (MCP)
+        self._granted_extra: dict[str, Tool] = {}  # "Always" given to an extra tool, to revoke it when that tool is gone
         self.approver = approver
         self._undo = UndoLog(ctx.workspace, undo_file_limit, undo_total_limit)
         self.ctx = dataclasses.replace(ctx, journal=self._undo)
@@ -169,6 +172,7 @@ class Agent:
         self.tool_meta = dict(tool_meta or {})
         self.mode = Mode.BUILD
         self.grants = Grants()
+        self._granted_extra.clear()
         self._reported = None
         self._save_error = None
         self._save_failing = False
@@ -355,8 +359,25 @@ class Agent:
         text = "".join(parts).strip()
         return cap_summary(text, window) if text else None
 
+    def all_tools(self) -> list[Tool]:
+        """The fixed tools plus whatever the extra source offers right now."""
+        extra = list(self._extra_tools()) if self._extra_tools is not None else []
+        self._revoke_gone(extra)
+        return [*self.tools, *extra]
+
+    def _revoke_gone(self, extra: Sequence[Tool]) -> None:
+        """Drop the "Always" of an extra tool that is no longer offered, even if another tool now has its name
+        (two MCP servers whose names clean to the same text): the user approved that tool, not the name."""
+        if not self._granted_extra:
+            return
+        current = {id(t) for t in extra}
+        for name, tool in list(self._granted_extra.items()):
+            if id(tool) not in current:
+                del self._granted_extra[name]
+                self.grants.revoke(name)
+
     def tools_for(self, mode: Mode) -> list[Tool]:
-        return [t for t in self.tools if not (mode is Mode.PLAN and t.mutating)]
+        return [t for t in self.all_tools() if not (mode is Mode.PLAN and t.mutating)]
 
     async def run_turn(self, text: str, emit: EventSink, *, draft: str | None = None) -> None:
         if self._busy:
@@ -462,7 +483,7 @@ class Agent:
 
     def _label_for(self, call: ToolCall) -> str:
         """The label the tool gives the call, or its name when the tool is unknown or cannot label it."""
-        tool = next((t for t in self.tools if t.name == call.name), None)
+        tool = next((t for t in self.all_tools() if t.name == call.name), None)
         if tool is None:
             return call.name
         try:
@@ -543,7 +564,7 @@ class Agent:
         return Message("assistant", "".join(parts), calls), total
 
     async def _run_tool_call(self, call: ToolCall, mode: Mode, emit: EventSink) -> None:
-        tool = next((t for t in self.tools if t.name == call.name), None)
+        tool = next((t for t in self.all_tools() if t.name == call.name), None)
         self._inflight = call.id
         label = tool.label(call.arguments) if tool else call.name
         emit(ToolStarted(call.id, label))
@@ -593,9 +614,11 @@ class Agent:
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False
             if decision.choice is Choice.ALWAYS and allow_always:
                 self.grants.add(call.name, call.arguments, tool.grant_arg)
+                if not any(tool is t for t in self.tools):
+                    self._granted_extra[call.name] = tool
         if tool.name in UNDO_UNTRACKED:
             self._undo.note_bash()
-        if not tool.mutating:
+        if not tool.runs_to_completion():
             result = await prepared.execute()  # cancellable at once; bash kills its process group
             return result, not result.is_error
         # A write or edit runs in a thread that a cancel cannot stop. Let it finish so history

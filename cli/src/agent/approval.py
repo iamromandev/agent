@@ -61,3 +61,8 @@ class Grants:
         value = args.get(key)
         if isinstance(value, str):
             self.exact.add((tool, value))
+
+    def revoke(self, tool: str) -> None:
+        """Forget every grant for `tool`, whatever it was keyed by."""
+        self.tools.discard(tool)
+        self.exact = {(name, value) for name, value in self.exact if name != tool}

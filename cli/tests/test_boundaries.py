@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 AGENT_SRC = Path(__file__).parent.parent / "src" / "agent"
-FORBIDDEN = {"textual", "httpx", "rich", "pyte"}
+FORBIDDEN = {"textual", "httpx", "rich", "pyte", "mcp"}
 
 
 def _imported_roots(path: Path) -> set[str]:
@@ -23,7 +23,7 @@ def test_the_scan_sees_the_agent_modules() -> None:
     assert len(list(AGENT_SRC.rglob("*.py"))) > 10
 
 
-def test_no_agent_module_imports_textual_httpx_rich_or_pyte() -> None:
+def test_no_agent_module_imports_textual_httpx_rich_pyte_or_mcp() -> None:
     offenders = {
         str(path.relative_to(AGENT_SRC)): sorted(_imported_roots(path) & FORBIDDEN)
         for path in sorted(AGENT_SRC.rglob("*.py"))
@@ -42,6 +42,26 @@ def test_httpx_is_only_imported_by_the_client_package() -> None:
         if "httpx" in _imported_roots(path) and path.relative_to(SRC).parts[0] != "client"
     )
     assert offenders == []
+
+
+def test_mcp_is_only_imported_by_the_client_package() -> None:
+    offenders = sorted(
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if "mcp" in _imported_roots(path) and path.relative_to(SRC).parts[0] != "client"
+    )
+    assert offenders == []
+
+
+def test_the_boundary_scan_catches_an_mcp_import(tmp_path: Path) -> None:
+    module = tmp_path / "m.py"
+    module.write_text("from mcp.client.stdio import stdio_client\nimport mcp\n")
+    assert _imported_roots(module) & FORBIDDEN == {"mcp"}
+
+
+def test_the_scan_covers_the_mcp_modules() -> None:
+    scanned = {str(path.relative_to(AGENT_SRC)) for path in AGENT_SRC.rglob("*.py")}
+    assert {"mcp/config.py", "mcp/hub.py", "mcp/tool.py"} <= scanned
 
 
 def test_textual_is_only_imported_by_the_tui_package() -> None:

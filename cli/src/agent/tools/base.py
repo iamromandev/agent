@@ -55,7 +55,13 @@ class Tool(ABC):
     parameters: ClassVar[dict[str, Any]]
     mutating: ClassVar[bool] = False  # write/edit: hidden + refused in plan mode
     needs_approval: ClassVar[bool] = False  # write/edit/bash
+    # A cancel waits for the call to finish (it changes files in a thread that cannot be stopped). None: as `mutating`.
+    uncancellable: ClassVar[bool | None] = None
     grant_arg: ClassVar[str | None] = None  # "Always" covers only calls with the same value of this argument
+
+    def runs_to_completion(self) -> bool:
+        """True when a cancel must wait for a running call instead of interrupting it."""
+        return self.mutating if self.uncancellable is None else self.uncancellable
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)

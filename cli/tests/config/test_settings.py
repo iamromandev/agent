@@ -21,6 +21,8 @@ def test_defaults() -> None:
     assert settings.num_ctx == 8192
     assert settings.bash_timeout == 120.0
     assert settings.max_steps == 25
+    assert settings.mcp_timeout == 60.0
+    assert settings.mcp_start_timeout == 120.0
 
 
 def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -31,7 +33,7 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.num_ctx == 4096
 
 
-@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS"])
+@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT"])
 def test_non_positive_values_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setenv(name, "0")
     with pytest.raises(ValidationError):
@@ -114,3 +116,10 @@ def test_fetch_limits_must_be_positive() -> None:
         Settings(_env_file=None, fetch_timeout=0)
     with pytest.raises(ValidationError):
         Settings(_env_file=None, fetch_max_bytes=0)
+
+
+def test_the_two_mcp_timeouts_are_separate_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_MCP_TIMEOUT", "5")
+    monkeypatch.setenv("AGENT_MCP_START_TIMEOUT", "300")
+    settings = Settings(_env_file=None)
+    assert (settings.mcp_timeout, settings.mcp_start_timeout) == (5.0, 300.0)
