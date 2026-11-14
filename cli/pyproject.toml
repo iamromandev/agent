@@ -8,6 +8,7 @@ dependencies = [
     "httpx==0.28.1",
     "pydantic-settings==2.12.0",
     "textual==8.2.8",
+    "pyte==0.8.2",
 ]
 
 [project.scripts]
@@ -33,3 +34,7 @@ pythonpath = ["."]
 testpaths = ["tests"]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # PtyProcess.spawn forks while asyncio threads may exist; the child only execs (see its docstring)
+    "ignore:This process .* is multi-threaded:DeprecationWarning",
+]

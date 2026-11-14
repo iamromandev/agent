@@ -9,18 +9,36 @@ from pathlib import Path
 
 TOOL_OUTPUT_LIMIT = 30_000
 
-_OSC_BODY = r"[^\x07\x1b]{0,2048}"
-_OSC_END = r"(?:\x07|\x1b\\)"
-# Parameters are bounded, so a kept style token is at most 67 bytes. Longer sequences are not styles:
-# the oversized alternatives of ESCAPE drop them whole (up to their terminator), so no body leaks as text.
-# (One cut by a chunk boundary after more than 64 parameter bytes still leaks its tail.)
+_STRING_BODY = r"[^\x07\x1b]{0,2048}"
+_STRING_END = r"(?:\x07|\x1b\\)"
+_STRING_START = r"\x1b[\]PX^_]"  # OSC, DCS, SOS, PM, APC: a body up to BEL or ST
+# What a terminal does with a byte stream, minus the drawing: the escape sequences are dropped whole.
+#  - CSI: ESC [, parameters and private prefixes (0-?), intermediates ( -/), a final byte (@-~)
+#  - strings (OSC, DCS, APC...) up to their terminator
+#  - ESC, intermediates, a final byte: charset designators like ESC ( B
+#  - ESC and one defined final byte: ESC = ESC > ESC 7 ESC 8 ESC M ESC D ESC c ... (not ESC b: no such code)
+# Every run is bounded, so a kept style token (SGR) is at most 67 bytes and nothing backtracks much.
+# Longer CSI and strings are not styles: the oversized alternatives drop them whole (up to their
+# terminator), so no body leaks as text. (One cut by a chunk boundary after more than 64 parameter bytes
+# still leaks its tail.)
 SGR = re.compile(r"\x1b\[[0-9;:]{0,64}m")
 ESCAPE = re.compile(
-    r"\x1b\[[0-9;:?]{0,64}[ -/]{0,16}[@-~]|\x1b\]" + _OSC_BODY + _OSC_END
-    + r"|\x1b\[[0-9;:?]{65,}[ -/]{0,16}[@-~]?|\x1b\][^\x07\x1b]{2049,}(?:\x07|\x1b\\)?"
+    r"\x1b\[[0-?]{0,64}[ -/]{0,16}[@-~]"
+    + "|"
+    + _STRING_START
+    + _STRING_BODY
+    + _STRING_END
+    + r"|\x1b[ -/]{1,16}[0-~]"
+    + r"|\x1b(?:[0-?]|[@-OQ-WYZ\\]|[cno|}~])"
+    + r"|\x1b\[[0-?]{65,}[ -/]{0,16}[@-~]?"
+    + r"|"
+    + _STRING_START
+    + r"[^\x07\x1b]{2049,}(?:\x07|\x1b\\)?"
 )
 # A partial sequence at the very end of the text (anchored, with bounded runs, so it stays linear).
-DANGLING = re.compile(r"\x1b(?:\[[0-9;:?]{0,64}[ -/]{0,16}|\]" + _OSC_BODY + r"\x1b?)?\Z")
+DANGLING = re.compile(
+    r"\x1b(?:\[[0-?]{0,64}[ -/]{0,16}|[\]PX^_]" + _STRING_BODY + r"\x1b?|[ -/]{1,16})?\Z"
+)
 _STRAY = re.compile(r"\x1b(?!\[[0-9;:]{0,64}m)")
 _SNIFF_BYTES = 8 * 1024
 

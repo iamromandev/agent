@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 from src.agent.tools.text import (
+    DANGLING,
     TOOL_OUTPUT_LIMIT,
     is_binary,
     keep_sgr,
@@ -155,3 +156,78 @@ def test_colon_form_sgr_is_kept_by_keep_sgr_and_removed_by_strip_ansi() -> None:
     text = "\x1b[38:2:1:2:3mx\x1b[0m"
     assert keep_sgr(text) == text
     assert strip_ansi(text) == "x"
+
+
+@pytest.mark.parametrize(
+    "sequence",
+    [
+        "\x1b(B",  # charset designators
+        "\x1b)0",
+        "\x1b*A",
+        "\x1b+B",
+        "\x1b#8",
+        "\x1b=",  # keypad modes, cursor save/restore, index, reset
+        "\x1b>",
+        "\x1b7",
+        "\x1b8",
+        "\x1bM",
+        "\x1bD",
+        "\x1bE",
+        "\x1bc",
+        "\x1b[>1u",  # private prefixes
+        "\x1b[<u",
+        "\x1b[=1;1u",
+        "\x1b[?2004h",
+        "\x1b[>4;2m",
+        "\x1b[2 q",  # intermediates
+        "\x1b[!p",
+        "\x1bPq#0;2;0;0;0\x1b\\",  # string sequences
+        "\x1b_Gf=24;AAAA\x1b\\",
+        "\x1b^private\x07",
+        "\x1bXtext\x1b\\",
+    ],
+)
+def test_every_kind_of_escape_sequence_is_removed_whole(sequence: str) -> None:
+    text = f"a{sequence}b"
+
+    assert strip_ansi(text) == "ab"
+    assert keep_sgr(text) == "ab"
+
+
+def test_the_escapes_a_shell_prompt_leaves_are_all_removed() -> None:
+    text = "\x1b(B\x1b[m done\x1b=\x1b>\x1b[>1u\n"
+
+    assert strip_ansi(text) == " done\n"
+    assert keep_sgr(text) == "\x1b[m done\n"  # the style reset is the only thing kept
+
+
+def test_keep_sgr_keeps_colors_between_the_other_new_sequences() -> None:
+    assert keep_sgr("\x1b(B\x1b[1;32mok\x1b[m\x1b=!") == "\x1b[1;32mok\x1b[m!"
+
+
+@pytest.mark.parametrize("partial", ["\x1b(", "\x1b)", "\x1b#", "\x1b[>", "\x1b[>1", "\x1b[2 ", "\x1bPq#0", "\x1b_Gf=24"])
+def test_a_partial_sequence_of_any_kind_at_the_end_is_dropped_by_keep_sgr(partial: str) -> None:
+    assert keep_sgr(f"ok{partial}") == "ok"
+
+
+def test_dangling_matches_the_partial_sequences_only_at_the_very_end() -> None:
+    for partial in ("\x1b", "\x1b(", "\x1b[>1", "\x1b[2 ", "\x1b]0;t", "\x1bPq", "\x1b_G"):
+        assert DANGLING.search(f"ok{partial}") is not None
+    for whole in ("\x1b(B", "\x1b[>1u", "\x1b=", "\x1b]0;t\x07", "\x1bPq\x1b\\"):
+        assert DANGLING.search(f"ok{whole}") is None
+
+
+def test_an_escape_before_an_undefined_letter_is_still_just_the_escape() -> None:
+    assert keep_sgr("a\x1bb") == "ab"
+    assert strip_ansi("a\x1bb") == "a\x1bb"  # strip_ansi leaves what is not a sequence
+
+
+@pytest.mark.parametrize("unit", ["\x1b(", "\x1b[>", "\x1b[?1;", "\x1b[ ", "\x1bP", "\x1b_G", "\x1b#", "\x1b[" + "1" * 70])
+def test_many_unterminated_sequences_of_every_kind_are_handled_in_linear_time(unit: str) -> None:
+    import time
+
+    text = unit * 50_000 + "tail"
+    start = time.perf_counter()
+    keep_sgr(text)
+    strip_ansi(text)
+    assert time.perf_counter() - start < 2.0

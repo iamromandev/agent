@@ -252,12 +252,12 @@ def test_the_notice_says_no_files_changed_for_an_empty_result() -> None:
     assert undo_notices(UndoResult([]), 0) == [Notice("info", "Undid the last turn: no files changed")]
 
 
-def test_the_bash_line_is_singular_and_plural() -> None:
+def test_the_bash_and_terminal_line_is_singular_and_plural() -> None:
     one = undo_notices(UndoResult([]), 1)
     two = undo_notices(UndoResult([]), 2)
 
-    assert one[1] == Notice("warn", "That turn ran 1 bash command; its effects were not undone.")
-    assert two[1] == Notice("warn", "That turn ran 2 bash commands; its effects were not undone.")
+    assert one[1] == Notice("warn", "That turn ran 1 bash/terminal command; its effects were not undone.")
+    assert two[1] == Notice("warn", "That turn ran 2 bash/terminal commands; their effects were not undone.")
 
 
 def test_a_created_folder_swapped_for_a_symlink_never_removes_a_folder_outside(

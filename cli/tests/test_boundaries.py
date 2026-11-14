@@ -6,7 +6,7 @@ import ast
 from pathlib import Path
 
 AGENT_SRC = Path(__file__).parent.parent / "src" / "agent"
-FORBIDDEN = {"textual", "httpx", "rich"}
+FORBIDDEN = {"textual", "httpx", "rich", "pyte"}
 
 
 def _imported_roots(path: Path) -> set[str]:
@@ -23,7 +23,7 @@ def test_the_scan_sees_the_agent_modules() -> None:
     assert len(list(AGENT_SRC.rglob("*.py"))) > 10
 
 
-def test_no_agent_module_imports_textual_httpx_or_rich() -> None:
+def test_no_agent_module_imports_textual_httpx_rich_or_pyte() -> None:
     offenders = {
         str(path.relative_to(AGENT_SRC)): sorted(_imported_roots(path) & FORBIDDEN)
         for path in sorted(AGENT_SRC.rglob("*.py"))
@@ -62,6 +62,31 @@ async def test_the_no_network_fixture_blocks_real_requests() -> None:
     async with httpx.AsyncClient() as client:
         with pytest.raises(NetworkAccessError):
             await client.get("http://example.invalid")
+
+
+def test_the_boundary_scan_catches_a_pyte_import(tmp_path: Path) -> None:
+    module = tmp_path / "m.py"
+    module.write_text("import pyte\nfrom pyte.screens import Screen\n")
+    assert _imported_roots(module) & FORBIDDEN == {"pyte"}
+
+
+def test_the_scan_covers_the_terminal_modules_and_tools() -> None:
+    scanned = {str(path.relative_to(AGENT_SRC)) for path in AGENT_SRC.rglob("*.py")}
+    assert {
+        "terminal/pty.py",
+        "terminal/manager.py",
+        "terminal/buffer.py",
+        "tools/terminal.py",
+    } <= scanned
+
+
+def test_pyte_is_only_imported_by_the_tui_package() -> None:
+    offenders = sorted(
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if "pyte" in _imported_roots(path) and path.relative_to(SRC).parts[0] != "tui"
+    )
+    assert offenders == []
 
 
 def test_the_boundary_scan_catches_a_rich_import(tmp_path: Path) -> None:

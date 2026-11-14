@@ -18,12 +18,13 @@ class StartChoice:
 NEW = StartChoice("new")
 
 
-def run(workspace: Path, start: StartChoice = NEW) -> None:
-    """Open the coding agent for `workspace` (a folder) and block until the user quits."""
+def run(workspace: Path, start: StartChoice = NEW) -> int:
+    """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
     from src.agent import Agent
     from src.agent.approval import Approver
     from src.agent.provider.ollama import OllamaProvider
     from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
+    from src.agent.terminal.manager import TerminalManager
     from src.agent.tools import default_tools
     from src.agent.tools.base import ToolContext
     from src.client import OllamaClient
@@ -37,6 +38,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> None:
     ctx = ToolContext(root, settings.bash_timeout)
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
+    terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
 
     def recorder_factory() -> Recorder:
         return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
@@ -44,7 +46,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> None:
     def agent_factory(approver: Approver) -> Agent:
         return Agent(
             provider,
-            default_tools(),
+            default_tools(terminals),
             approver,
             ctx,
             settings.max_steps,
@@ -54,7 +56,26 @@ def run(workspace: Path, start: StartChoice = NEW) -> None:
             instructions_share=settings.instructions_share,
         )
 
-    # The client is closed by the app on unmount, inside the loop that owns its connections.
-    AgentApp(
-        agent_factory, provider, root, store=store, start=start, recorder_factory=recorder_factory, on_close=client.aclose
-    ).run()
+    async def close() -> None:
+        try:
+            await terminals.close_all()  # no terminal process outlives the agent
+        finally:
+            await client.aclose()
+
+    # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
+    app = AgentApp(
+        agent_factory,
+        provider,
+        root,
+        store=store,
+        start=start,
+        recorder_factory=recorder_factory,
+        on_close=close,
+        terminals=terminals,
+    )
+    try:
+        app.run()
+    finally:
+        if terminals.names():  # none when the app closed them; else it failed before it could, and its loop is gone
+            terminals.kill_all()
+    return app.return_code or 0

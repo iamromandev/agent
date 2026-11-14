@@ -199,7 +199,7 @@ async def test_two_bash_commands_are_reported_not_undone(ctx: ToolContext) -> No
 
     assert events.notices() == [
         ("info", "Undid the last turn: no files changed"),
-        ("warn", "That turn ran 2 bash commands; its effects were not undone."),
+        ("warn", "That turn ran 2 bash/terminal commands; their effects were not undone."),
     ]
 
 
