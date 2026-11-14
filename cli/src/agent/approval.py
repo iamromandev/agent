@@ -37,19 +37,27 @@ class Grants:
 
     def __init__(self) -> None:
         self.tools: set[str] = set()
-        self.commands: set[str] = set()  # bash is granted per exact command, never per tool
+        self.exact: set[tuple[str, str]] = set()  # (tool, value of its key argument): granted per exact value
 
-    def covers(self, tool: str, args: dict[str, Any], mode: Mode) -> bool:
+    @staticmethod
+    def _key(tool: str, key: str | None) -> str | None:
+        return key or ("command" if tool == "bash" else None)  # bash is granted per exact command, never per tool
+
+    def covers(self, tool: str, args: dict[str, Any], mode: Mode, key: str | None = None) -> bool:
+        """`key` names the argument a grant is tied to (`Tool.grant_arg`); without one the whole tool is granted."""
         if mode is Mode.PLAN:
             return False
-        if tool == "bash":
-            return args.get("command") in self.commands
+        key = self._key(tool, key)
+        if key is not None:
+            value = args.get(key)
+            return isinstance(value, str) and (tool, value) in self.exact
         return tool in self.tools
 
-    def add(self, tool: str, args: dict[str, Any]) -> None:
-        if tool == "bash":
-            command = args.get("command")
-            if isinstance(command, str):
-                self.commands.add(command)
-        else:
+    def add(self, tool: str, args: dict[str, Any], key: str | None = None) -> None:
+        key = self._key(tool, key)
+        if key is None:
             self.tools.add(tool)
+            return
+        value = args.get(key)
+        if isinstance(value, str):
+            self.exact.add((tool, value))

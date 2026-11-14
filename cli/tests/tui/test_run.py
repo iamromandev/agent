@@ -17,7 +17,7 @@ from src.agent.provider.ollama import OllamaProvider
 from src.agent.session import FileRecorder, SessionStore, workspace_dir
 from src.agent.terminal import manager as terminal_manager
 from src.agent.terminal.manager import TerminalManager
-from src.client import OllamaClient
+from src.client import OllamaClient, WebClient
 from src.config.settings import get_settings
 from src.tui import StartChoice
 from src.tui.app import AgentApp
@@ -49,6 +49,7 @@ def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert {t.name for t in agent.tools} == {
         *("read", "glob", "grep", "write", "edit", "bash"),
         *("term_start", "term_read", "term_stop"),
+        "web_fetch",
     }
 
 
@@ -160,7 +161,11 @@ def wired(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Wired:
     async def aclose(self: OllamaClient) -> None:
         seen.order.append("client")
 
+    async def web_aclose(self: WebClient) -> None:
+        seen.order.append("web")
+
     monkeypatch.setattr(terminal_manager, "TerminalManager", SpyManager)
+    monkeypatch.setattr(WebClient, "aclose", web_aclose)
     monkeypatch.setattr(tui_app, "AgentApp", FakeApp)
     monkeypatch.setattr(OllamaClient, "aclose", aclose)
     src.tui.run(tmp_path)
@@ -174,7 +179,7 @@ async def test_quitting_stops_the_terminals_before_the_client_is_closed(wired: _
     try:
         await wired.on_close()
 
-        assert wired.order == ["terminals", "client"]
+        assert wired.order == ["terminals", "web", "client"]
         assert terminal.status[0] == "exited"
         await assert_all_gone(pid)
     finally:
@@ -194,7 +199,43 @@ async def test_quitting_closes_the_client_even_if_stopping_the_terminals_fails(
     with pytest.raises(RuntimeError, match="boom"):
         await wired.on_close()
 
-    assert wired.order == ["client"]
+    assert wired.order == ["web", "client"]
+
+
+async def test_quitting_closes_the_clients_even_if_closing_the_web_client_fails(
+    wired: _Wired, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert wired.on_close is not None
+
+    async def broken(self: WebClient) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(WebClient, "aclose", broken)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await wired.on_close()
+
+    assert wired.order == ["terminals", "client"]
+
+
+def test_the_web_client_is_closed_if_setting_up_the_app_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    closed: list[str] = []
+
+    async def web_aclose(self: WebClient) -> None:
+        closed.append("web")
+
+    def failing_app(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("no app")
+
+    monkeypatch.setattr(WebClient, "aclose", web_aclose)
+    monkeypatch.setattr(tui_app, "AgentApp", failing_app)
+
+    with pytest.raises(RuntimeError, match="no app"):
+        src.tui.run(tmp_path)
+
+    assert closed == ["web"]
 
 
 def test_a_failing_app_still_kills_the_terminals_it_leaves(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

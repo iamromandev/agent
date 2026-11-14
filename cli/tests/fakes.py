@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from src.agent.approval import ApprovalRequest, Choice, Decision
 from src.agent.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
 from src.agent.session import SessionWriteError, ToolMeta
+from src.agent.web import FetchResponse
 
 
 @dataclass
@@ -177,3 +178,18 @@ class MemoryRecorder:
         if self._queued:
             with contextlib.suppress(Exception):
                 self._write()
+
+
+class FakeFetcher:
+    """A Fetcher that records the URLs it is asked for and returns a canned response or raises."""
+
+    def __init__(self, response: object = None) -> None:
+        self.response = response  # a FetchResponse, or an Exception to raise
+        self.calls: list[str] = []
+
+    async def fetch(self, url: str) -> FetchResponse:
+        self.calls.append(url)
+        if isinstance(self.response, Exception):
+            raise self.response
+        assert isinstance(self.response, FetchResponse), "FakeFetcher needs a canned response"
+        return self.response
