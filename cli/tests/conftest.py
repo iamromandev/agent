@@ -132,6 +132,12 @@ def _sessions_dir(
     get_settings.cache_clear()
 
 
+@pytest.fixture(autouse=True)
+def _config_dir(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The developer's own ~/.config/agent/mcp.json must never be read by a test."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("config-env") / "config"))
+
+
 @pytest.fixture
 def fixture_path() -> Callable[[str], Path]:
     def resolve(name: str) -> Path:

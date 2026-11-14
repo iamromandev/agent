@@ -15,6 +15,7 @@ from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
+from textual.message import Message
 from textual.widgets import Tabs
 
 from src.agent import (
@@ -35,6 +36,7 @@ from src.agent.compaction import CHARS_PER_TOKEN
 from src.agent.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.agent.instructions import fingerprint, levels
 from src.agent.loop import close_recorder
+from src.agent.mcp.hub import HubEvent, McpHub
 from src.agent.mode import Mode
 from src.agent.prompt import build_init_prompt
 from src.agent.provider.base import Provider
@@ -116,10 +118,12 @@ class AgentApp(App[None]):
         recorder_factory: Callable[[], Recorder] | None = None,
         on_close: Callable[[], Awaitable[None]] | None = None,
         terminals: TerminalManager | None = None,
+        mcp: McpHub | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
         self.terminals = terminals
+        self.mcp = mcp
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -136,6 +140,13 @@ class AgentApp(App[None]):
         self._signals_before: dict[signal.Signals, Any] = {}  # what SIGTERM and SIGHUP did before the app
         self._keys_ignored_until = 0.0  # time.monotonic() until which an approval dialog takes no keys
         self._closing_tabs: set[str] = set()  # terminals whose tab is being closed (they are being stopped)
+
+    class McpEvent(Message):
+        """An MCP server became ready, failed or exited, or the hub has a warning."""
+
+        def __init__(self, event: HubEvent) -> None:
+            super().__init__()
+            self.event = event
 
     def compose(self) -> ComposeResult:
         yield Transcript(id="transcript")
@@ -176,6 +187,31 @@ class AgentApp(App[None]):
             await self._announce_instructions()
         finally:
             self._switching = False
+            self._start_mcp()  # after the session is drawn: a redraw would wipe the servers' notices
+
+    def _start_mcp(self) -> None:
+        """Start the configured MCP servers in the background; their events become notices."""
+        if self.mcp is None:
+            return
+        self.mcp.listen(self._post_mcp_event)
+        self.mcp.start()
+
+    def _post_mcp_event(self, event: HubEvent) -> None:
+        self.post_message(self.McpEvent(event))
+
+    async def on_agent_app_mcp_event(self, message: McpEvent) -> None:
+        kind, server, text = message.event
+        match kind:
+            case "ready":
+                level, line = "info", f"mcp {server} ready · {text}"
+            case "failed":
+                level, line = "warn", f"mcp {server} failed: {text}"
+            case "exited":
+                level, line = "warn", f"mcp {server} exited: {text}"
+            case "warn":
+                level, line = "warn", f"mcp {server}: {text}" if server else text
+        with contextlib.suppress(NoMatches):  # gone when the app is shutting down
+            await self.query_one(Transcript).add_notice(level, line)
 
     async def _announce_instructions(self) -> None:
         """Show which AGENTS.md files are in effect; never raises. The caller holds the switch claim."""
@@ -328,7 +364,7 @@ class AgentApp(App[None]):
         Without a handler the process would die at once and leave processes that ignore SIGHUP behind. The exit
         code is 128 + the signal, as for a process the signal kills.
         """
-        if self.terminals is None:
+        if self.terminals is None and self.mcp is None:
             return
         loop = asyncio.get_running_loop()
         for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -351,14 +387,18 @@ class AgentApp(App[None]):
         self._shutting_down = True
         self.agent.close()
         try:
-            if self.terminals is not None:
-                await self.terminals.close_all()  # no terminal process outlives the app, whatever ended it
+            if self.mcp is not None:
+                await self.mcp.close_all()  # no server process outlives the app, whatever ended it
         finally:
             try:
-                if self._on_close is not None:
-                    await self._on_close()
+                if self.terminals is not None:
+                    await self.terminals.close_all()  # nor any terminal process
             finally:
-                self._restore_signals()  # until here a second signal is absorbed too
+                try:
+                    if self._on_close is not None:
+                        await self._on_close()
+                finally:
+                    self._restore_signals()  # until here a second signal is absorbed too
 
     # keys
 

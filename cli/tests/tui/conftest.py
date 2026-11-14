@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from src.agent import Agent
 from src.agent.approval import Approver
+from src.agent.mcp.hub import McpHub
 from src.agent.provider.base import Message, ProviderEvent
 from src.agent.session import (
     FileRecorder,
@@ -89,6 +90,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         compact_keep_turns: int = 2,
         tools: bool = True,
         terminals: bool | TerminalManager = False,
+        mcp: McpHub | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -115,6 +117,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 recorder=new_recorder(),
                 compact_at=compact_at,
                 compact_keep_turns=compact_keep_turns,
+                extra_tools=mcp.tools if mcp is not None else None,
             )
 
         return AgentApp(
@@ -126,6 +129,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             recorder_factory=new_recorder,
             on_close=on_close,
             terminals=manager,
+            mcp=mcp,
         )
 
     return build

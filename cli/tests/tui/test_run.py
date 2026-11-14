@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import os
 import signal
 from collections.abc import Awaitable, Callable
@@ -12,6 +13,7 @@ import pytest
 import src.tui
 import src.tui.app as tui_app
 from src.agent import Agent
+from src.agent.mcp.hub import McpHub
 from src.agent.provider.base import Message
 from src.agent.provider.ollama import OllamaProvider
 from src.agent.session import FileRecorder, SessionStore, workspace_dir
@@ -267,3 +269,171 @@ def test_run_returns_the_exit_code_of_the_app(monkeypatch: pytest.MonkeyPatch, t
     monkeypatch.setattr(AgentApp, "return_code", property(lambda self: 143))
 
     assert src.tui.run(tmp_path) == 143
+
+
+def test_run_builds_the_mcp_hub_from_the_global_config_without_starting_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "mcp.json").write_text('{"servers": {"notes": {"command": "uvx", "args": ["n"]}}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setenv("AGENT_MCP_TIMEOUT", "3")
+    monkeypatch.setenv("AGENT_MCP_START_TIMEOUT", "90")
+    get_settings.cache_clear()
+
+    app = _run_app(monkeypatch, tmp_path)
+
+    assert app.mcp is not None
+    assert [(s.config.name, s.config.command, s.config.source, s.status) for s in app.mcp.states()] == [
+        ("notes", "uvx", "global", "starting")
+    ]
+    assert app.mcp._timeout == 3.0
+    assert app.mcp._start_timeout == 90.0
+    assert app.agent.all_tools() == app.agent.tools  # nothing is ready, so nothing is added
+
+
+def test_run_reports_an_invalid_mcp_config_as_a_warning_and_starts_without_servers(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "mcp.json").write_text("{not json")
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    app = _run_app(monkeypatch, tmp_path)
+
+    assert app.mcp is not None and app.mcp.states() == []
+    events: list[tuple[str, str, str]] = []
+    app.mcp.listen(events.append)
+    assert [(kind, server) for kind, server, _ in events] == [("warn", "")]
+    assert str(config / "agent" / "mcp.json") in events[0][2]
+
+
+def test_run_kills_what_is_left_of_the_mcp_servers_after_the_app_ends(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    killed: list[str] = []
+    monkeypatch.setattr(McpHub, "kill_all", lambda self: killed.append("mcp"))
+
+    _run_app(monkeypatch, tmp_path)
+    assert killed == ["mcp"]
+
+    def failing_run(self: AgentApp, **_: object) -> None:
+        raise RuntimeError("app crashed")
+
+    monkeypatch.setattr(AgentApp, "run", failing_run)
+    with pytest.raises(RuntimeError, match="app crashed"):
+        src.tui.run(tmp_path)
+    assert killed == ["mcp", "mcp"]
+
+
+async def test_quitting_closes_the_mcp_servers_first(wired: _Wired, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert wired.on_close is not None
+
+    async def close_all(self: McpHub) -> None:
+        wired.order.append("mcp")
+
+    monkeypatch.setattr(McpHub, "close_all", close_all)
+
+    await wired.on_close()
+
+    assert wired.order == ["mcp", "terminals", "web", "client"]
+
+
+async def test_quitting_closes_everything_else_even_if_stopping_the_mcp_servers_fails(
+    wired: _Wired, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert wired.on_close is not None
+
+    async def broken(self: McpHub) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(McpHub, "close_all", broken)
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await wired.on_close()
+
+    assert wired.order == ["terminals", "web", "client"]
+
+
+def test_run_really_kills_a_server_the_app_left_running_when_its_loop_is_gone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.client.test_mcp import fake_config
+    from tests.helpers import gone, wait_until
+
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    server = fake_config()
+    (config / "agent" / "mcp.json").write_text(
+        json.dumps({"servers": {"fake": {"command": server.command, "args": list(server.args), "env": dict(server.env)}}})
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    loop = asyncio.new_event_loop()
+    pids: list[int] = []
+
+    def abandoned_run(self: AgentApp, **_: object) -> None:
+        """The app's loop dies with the server still running: nothing closed the hub."""
+        hub = self.mcp
+        assert hub is not None
+
+        async def start() -> None:
+            hub.start()
+            await wait_until(lambda: hub.states()[0].status == "ready", 15)
+            pids.append(int((await hub.call("fake", "pid", {})).parts[0].split()[0]))
+
+        loop.run_until_complete(start())
+
+    monkeypatch.setattr(AgentApp, "run", abandoned_run)
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    try:
+        src.tui.run(workspace)
+
+        (pid,) = pids
+        loop.run_until_complete(wait_until(lambda: gone(pid), 5))
+    finally:
+        loop.run_until_complete(asyncio.sleep(0.1))
+        loop.close()
+
+
+def test_run_really_kills_a_server_that_was_still_starting_when_the_app_failed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tests.client.test_mcp import fake_config
+    from tests.helpers import gone, wait_until
+
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    server = fake_config("slow_init")
+    (config / "agent" / "mcp.json").write_text(
+        json.dumps({"servers": {"fake": {"command": server.command, "args": list(server.args), "env": dict(server.env)}}})
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    loop = asyncio.new_event_loop()
+    pids: list[int] = []
+
+    def abandoned_run(self: AgentApp, **_: object) -> None:
+        hub = self.mcp
+        assert hub is not None
+
+        async def start() -> None:
+            hub.start()
+            connector = hub._connector
+            await wait_until(lambda: bool(connector._pids), 10)  # ty: ignore[unresolved-attribute]
+            pids.extend(connector._pids)  # ty: ignore[unresolved-attribute]
+
+        loop.run_until_complete(start())
+
+    monkeypatch.setattr(AgentApp, "run", abandoned_run)
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+    try:
+        src.tui.run(workspace)
+
+        (pid,) = pids
+        loop.run_until_complete(wait_until(lambda: gone(pid), 5))
+    finally:
+        loop.run_until_complete(asyncio.sleep(0.1))
+        loop.close()

@@ -5,8 +5,12 @@ import contextlib
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
 
 from src.agent.approval import ApprovalRequest, Choice, Decision
+from src.agent.mcp.config import ServerConfig
+from src.agent.mcp.contract import CallResult, ToolInfo
 from src.agent.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
 from src.agent.session import SessionWriteError, ToolMeta
 from src.agent.web import FetchResponse
@@ -193,3 +197,83 @@ class FakeFetcher:
             raise self.response
         assert isinstance(self.response, FetchResponse), "FakeFetcher needs a canned response"
         return self.response
+
+
+class FakeConnection:
+    """A McpConnection with scripted tools and results; it records what it is asked."""
+
+    def __init__(self, tools: Sequence[ToolInfo] = (), results: Mapping[str, CallResult | Exception] | None = None) -> None:
+        self.tools = list(tools)
+        self.results = dict(results or {})  # by tool name: a CallResult, or an Exception to raise
+        self.calls: list[tuple[str, dict[str, Any], float]] = []
+        self.closed = 0  # aclose() count
+        self.killed = 0
+        self.cancelled = 0  # call_tool calls that were cancelled while waiting
+        self.call_gate: asyncio.Event | None = None  # while set and not set(), call_tool waits
+        self._exit_listeners: list[Callable[[str], None]] = []
+        self._exited = False
+
+    def on_exit(self, fn: Callable[[str], None]) -> None:
+        self._exit_listeners.append(fn)
+
+    def trigger_exit(self, reason: str) -> None:
+        """Pretend the server died: the listeners hear it once, and calls waiting on the gate fail."""
+        if self._exited:
+            return
+        self._exited = True
+        for fn in self._exit_listeners:
+            fn(reason)
+
+    async def list_tools(self) -> list[ToolInfo]:
+        return list(self.tools)
+
+    async def call_tool(self, name: str, args: dict[str, Any], timeout: float) -> CallResult:
+        self.calls.append((name, args, timeout))
+        if self.call_gate is not None:
+            try:
+                await self.call_gate.wait()
+            except asyncio.CancelledError:
+                self.cancelled += 1
+                raise
+        result = self.results.get(name, CallResult([f"ok {name}"], False))
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    def kill(self) -> None:
+        self.killed += 1
+
+    async def aclose(self) -> None:
+        self.closed += 1
+
+
+class FakeConnector:
+    """A McpConnector that hands out FakeConnections by server name, optionally after a delay or with a failure."""
+
+    def __init__(
+        self,
+        connections: Mapping[str, FakeConnection] | None = None,
+        failures: Mapping[str, Exception] | None = None,
+        delays: Mapping[str, float] | None = None,
+    ) -> None:
+        self.connections = dict(connections or {})
+        self.failures = dict(failures or {})
+        self.delays = dict(delays or {})
+        self.gates: dict[str, asyncio.Event] = {}  # while a server's gate exists and is unset, connect waits
+        self.connects: list[tuple[str, Path]] = []  # (server, cwd) of every connect, even a failing one
+        self.configs: list[ServerConfig] = []
+        self.kill_alls = 0  # kill_all() calls
+
+    def kill_all(self) -> None:
+        self.kill_alls += 1
+
+    async def connect(self, config: ServerConfig, cwd: Path) -> FakeConnection:
+        self.connects.append((config.name, cwd))
+        self.configs.append(config)
+        if (gate := self.gates.get(config.name)) is not None:
+            await gate.wait()
+        if (delay := self.delays.get(config.name)):
+            await asyncio.sleep(delay)
+        if (failure := self.failures.get(config.name)) is not None:
+            raise failure
+        return self.connections.setdefault(config.name, FakeConnection())

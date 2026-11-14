@@ -23,12 +23,15 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
     from src.agent import Agent
     from src.agent.approval import Approver
+    from src.agent.mcp.config import global_config_path, load_file
+    from src.agent.mcp.hub import McpHub
     from src.agent.provider.ollama import OllamaProvider
     from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.agent.terminal.manager import TerminalManager
     from src.agent.tools import default_tools
     from src.agent.tools.base import ToolContext
     from src.client import OllamaClient, WebClient
+    from src.client.mcp import SdkConnector
     from src.config.settings import get_settings
     from src.tui.app import AgentApp
 
@@ -42,6 +45,15 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
     try:
         terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
+        loaded = load_file(global_config_path(), "global")
+        mcp = McpHub(  # nothing starts yet
+            SdkConnector(),
+            root,
+            loaded.servers,
+            settings.mcp_timeout,
+            loaded.warnings,
+            start_timeout=settings.mcp_start_timeout,
+        )
 
         def recorder_factory() -> Recorder:
             return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
@@ -57,16 +69,20 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 compact_at=settings.compact_at,
                 compact_keep_turns=settings.compact_keep_turns,
                 instructions_share=settings.instructions_share,
+                extra_tools=mcp.tools,
             )
 
         async def close() -> None:
             try:
-                await terminals.close_all()  # no terminal process outlives the agent
+                await mcp.close_all()  # no server process outlives the agent
             finally:
                 try:
-                    await web.aclose()
+                    await terminals.close_all()  # nor any terminal process
                 finally:
-                    await client.aclose()
+                    try:
+                        await web.aclose()
+                    finally:
+                        await client.aclose()
 
         # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
         app = AgentApp(
@@ -78,6 +94,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             recorder_factory=recorder_factory,
             on_close=close,
             terminals=terminals,
+            mcp=mcp,
         )
     except BaseException:
         asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)
@@ -85,6 +102,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     try:
         app.run()
     finally:
+        mcp.kill_all()  # a server still running means the app failed before it could close it, and its loop is gone
         if terminals.names():  # none when the app closed them; else it failed before it could, and its loop is gone
             terminals.kill_all()
     return app.return_code or 0

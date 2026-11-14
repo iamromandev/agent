@@ -41,6 +41,13 @@ class Settings(BaseSettings):
     fetch_max_bytes: Annotated[
         int, Field(default=2_000_000, gt=0, description="Most bytes web_fetch downloads before it stops")
     ]
+    mcp_timeout: Annotated[
+        float, Field(default=60.0, gt=0, description="Seconds before an MCP tool call gives up")
+    ]
+    mcp_start_timeout: Annotated[
+        float,
+        Field(default=120.0, gt=0, description="Seconds an MCP server may take to start and list its tools"),
+    ]
 
 
 @lru_cache
