@@ -4,7 +4,7 @@ UV := uv
 UVX := $(UV)x
 
 # phony targets
-.PHONY: install check check-ci test run help
+.PHONY: install check check-ci test run tool-install tool-uninstall help
 
 # python tools (uv)
 install: # Install all dependencies
@@ -25,6 +25,12 @@ test: # Run the unit test suite
 
 run: # Run the CLI, e.g. make run ARGS="health check"
 	$(UV) run agent $(ARGS)
+
+tool-install: # Install the agent command on your PATH (editable, from this checkout)
+	$(UV) tool install --editable --force .
+
+tool-uninstall: # Remove the installed agent command
+	-$(UV) tool uninstall agent-cli
 
 # help
 help:
