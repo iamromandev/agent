@@ -480,3 +480,55 @@ async def test_a_connector_that_raises_a_bare_timeout_error_fails_the_server() -
     await ready(hub, events)
     assert events == [("failed", "a", "TimeoutError")]
     await hub.close_all()
+
+
+def make_untrusted_hub(connector: FakeConnector, untrusted: frozenset[str] = frozenset({"db"})) -> tuple[McpHub, list[HubEvent]]:
+    configs = [ServerConfig("notes", "cmd"), ServerConfig("db", "psql", ("-h", "x"), source="project")]
+    hub = McpHub(connector, Path("/ws"), configs, 7.0, untrusted=untrusted)
+    events: list[HubEvent] = []
+    hub.listen(events.append)
+    return hub, events
+
+
+async def test_untrusted_servers_start_untrusted_and_the_others_starting() -> None:
+    hub, _ = make_untrusted_hub(FakeConnector())
+    assert [(s.config.name, s.status) for s in hub.states()] == [("notes", "starting"), ("db", "untrusted")]
+    assert [s.name for s in hub.untrusted()] == ["db"]
+
+
+async def test_start_never_connects_an_untrusted_server() -> None:
+    connector = FakeConnector({"notes": FakeConnection([tool("a")])})
+    hub, events = make_untrusted_hub(connector)
+
+    hub.start()
+    await ready(hub, events)
+    await asyncio.sleep(0.05)
+
+    assert [name for name, _ in connector.connects] == ["notes"]  # NFR3: no spawn for the untrusted one
+    assert hub.states()[1].status == "untrusted"
+    assert hub.tools() != [] and all("db" not in t.name for t in hub.tools())
+
+
+async def test_starting_an_untrusted_server_by_name_connects_it() -> None:
+    connector = FakeConnector({"db": FakeConnection([tool("query")])})
+    hub, events = make_untrusted_hub(connector)
+    hub.start()
+
+    hub.start(["db"])
+    await wait_until(lambda: ("ready", "db", "1 tool") in events)
+
+    assert [name for name, _ in connector.connects].count("db") == 1
+    assert hub.untrusted() == []
+    assert "mcp__db__query" in [t.name for t in hub.tools()]
+
+
+async def test_a_server_that_stays_untrusted_is_never_connected_and_closing_is_clean() -> None:
+    connector = FakeConnector()
+    hub, _ = make_untrusted_hub(connector, frozenset({"notes", "db"}))
+
+    hub.start()
+    await hub.close_all()
+
+    assert connector.connects == []
+    assert hub.tools() == []
+    assert [s.status for s in hub.states()] == ["untrusted", "untrusted"]

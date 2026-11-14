@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -48,12 +48,19 @@ class McpHub:
         warnings: Sequence[str] = (),
         *,
         start_timeout: float = 120.0,
+        untrusted: Collection[str] = (),
     ) -> None:
         self._connector = connector
         self._workspace = workspace
         self._timeout = timeout  # seconds a tool call may take
         self._start_timeout = start_timeout  # seconds a server may take to connect and list its tools
-        self._states = {s.name: ServerState(s, "starting") for s in servers}
+        # An untrusted server is never started, however `start` is called, until it is named in `start(names)`.
+        self._states = {
+            s.name: ServerState(s, "untrusted")
+            if s.name in untrusted
+            else ServerState(s, "starting")
+            for s in servers
+        }
         self._connections: dict[str, McpConnection] = {}
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._inflight: dict[str, set[tuple[asyncio.Future[CallResult], asyncio.Future[CallResult]]]] = {}
@@ -84,12 +91,16 @@ class McpHub:
             fn(event)
 
     def start(self, names: Iterable[str] | None = None) -> None:
-        """Start servers in the background (every one that is not untrusted when `names` is None)."""
+        """Start servers in the background. `None` is every one that is not untrusted; a name that is untrusted
+        is started only when it is given here (the user trusted it)."""
         if self._closed:
             return
         wanted = [n for n, s in self._states.items() if s.status != "untrusted"] if names is None else list(names)
         for name in wanted:
-            if name in self._states and name not in self._tasks:
+            state = self._states.get(name)
+            if state is not None and name not in self._tasks:
+                if state.status == "untrusted":
+                    state.status, state.reason = "starting", ""
                 self._tasks[name] = asyncio.create_task(self._run(name))
 
     async def _run(self, name: str) -> None:
@@ -167,6 +178,10 @@ class McpHub:
                     tool = self._tools[(name, info.name)] = McpTool(self, name, info, full)
                 offered.append(tool)
         return offered
+
+    def untrusted(self) -> list[ServerConfig]:
+        """The servers that wait for the user's trust, in config order."""
+        return [s.config for s in self._states.values() if s.status == "untrusted"]
 
     def states(self) -> list[ServerState]:
         return list(self._states.values())

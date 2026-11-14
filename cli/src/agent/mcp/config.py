@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
 
@@ -19,12 +19,14 @@ class ServerConfig:
     args: tuple[str, ...] = ()
     env: Mapping[str, str] = field(default_factory=dict)
     source: Source = "global"
+    overrides_global: bool = False  # a project server that replaced a global one of the same name
 
 
 @dataclass(frozen=True)
 class LoadedConfig:
     servers: list[ServerConfig]
     warnings: list[str]
+    raw: bytes | None = None  # the exact bytes that were parsed, when the file was read (what trust is tied to)
 
 
 def global_config_path(env: Mapping[str, str] = os.environ) -> Path:
@@ -32,6 +34,11 @@ def global_config_path(env: Mapping[str, str] = os.environ) -> Path:
     config_home = env.get("XDG_CONFIG_HOME")
     base = Path(config_home) if config_home and Path(config_home).is_absolute() else Path.home() / ".config"
     return base / "agent" / "mcp.json"
+
+
+def project_config_path(workspace: Path) -> Path:
+    """`<workspace>/.agent/mcp.json`."""
+    return workspace / ".agent" / "mcp.json"
 
 
 def _is_strings(value: object) -> bool:
@@ -61,7 +68,8 @@ def _entry(name: str, raw: object, source: Source) -> ServerConfig | str:
 def load_file(path: Path, source: Source) -> LoadedConfig:
     """Read one config file. A missing file is no servers and no warning; anything else wrong is a warning."""
     try:
-        text = path.read_text(encoding="utf-8")
+        raw = path.read_bytes()
+        text = raw.decode("utf-8")
     except FileNotFoundError:
         return LoadedConfig([], [])
     except (OSError, UnicodeDecodeError) as exc:
@@ -69,18 +77,26 @@ def load_file(path: Path, source: Source) -> LoadedConfig:
     try:
         data = json.loads(text)
     except json.JSONDecodeError as exc:
-        return LoadedConfig([], [f"{path}: invalid JSON: {exc}"])
+        return LoadedConfig([], [f"{path}: invalid JSON: {exc}"], raw)
     if not isinstance(data, dict):
-        return LoadedConfig([], [f"{path}: top level must be an object"])
+        return LoadedConfig([], [f"{path}: top level must be an object"], raw)
     entries = data.get("servers")
     if not isinstance(entries, dict):
-        return LoadedConfig([], [f'{path}: "servers" must be an object'])
+        return LoadedConfig([], [f'{path}: "servers" must be an object'], raw)
     servers: list[ServerConfig] = []
     warnings: list[str] = []
-    for name, raw in entries.items():
-        entry = _entry(name, raw, source)
+    for name, value in entries.items():
+        entry = _entry(name, value, source)
         if isinstance(entry, str):
             warnings.append(f'{path}: server "{name}": {entry}')
         else:
             servers.append(entry)
-    return LoadedConfig(servers, warnings)
+    return LoadedConfig(servers, warnings, raw)
+
+
+def merge(global_: LoadedConfig, project: LoadedConfig) -> LoadedConfig:
+    """Both files' servers; a project server replaces the global one with the same name (in its place)."""
+    overrides = {s.name: s for s in project.servers}
+    servers = [replace(overrides.pop(s.name), overrides_global=True) if s.name in overrides else s for s in global_.servers]
+    servers.extend(overrides.values())
+    return LoadedConfig(servers, [*global_.warnings, *project.warnings])
