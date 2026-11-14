@@ -50,6 +50,7 @@ class TermStart(Tool):
     }
     needs_approval: ClassVar[bool] = True
     mutating: ClassVar[bool] = True
+    grant_arg: ClassVar[str | None] = "command"  # "Always" covers that command only, like bash
 
     def __init__(self, terminals: TerminalManager) -> None:
         self._terminals = terminals

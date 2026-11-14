@@ -55,3 +55,24 @@ def test_plan_mode_is_never_covered() -> None:
     assert not grants.covers("edit", {"path": "a.py"}, Mode.PLAN)
     assert not grants.covers("bash", {"command": "ls"}, Mode.PLAN)
     assert grants.covers("bash", {"command": "ls"}, Mode.BUILD)
+
+
+def test_a_grant_keyed_by_an_argument_covers_only_that_exact_value() -> None:
+    grants = Grants()
+    grants.add("web_fetch", {"url": "https://a.test/x", "max_chars": 10}, key="url")
+    assert grants.covers("web_fetch", {"url": "https://a.test/x"}, Mode.BUILD, key="url")
+    assert not grants.covers("web_fetch", {"url": "https://b.test/x"}, Mode.BUILD, key="url")
+    assert not grants.covers("web_fetch", {}, Mode.BUILD, key="url")
+    assert "web_fetch" not in grants.tools
+
+
+def test_a_keyed_grant_does_not_cover_another_tool_with_the_same_value() -> None:
+    grants = Grants()
+    grants.add("web_fetch", {"url": "u"}, key="url")
+    assert not grants.covers("other", {"url": "u"}, Mode.BUILD, key="url")
+
+
+def test_a_keyed_grant_is_not_covered_in_plan_mode() -> None:
+    grants = Grants()
+    grants.add("web_fetch", {"url": "u"}, key="url")
+    assert not grants.covers("web_fetch", {"url": "u"}, Mode.PLAN, key="url")

@@ -55,6 +55,7 @@ class Tool(ABC):
     parameters: ClassVar[dict[str, Any]]
     mutating: ClassVar[bool] = False  # write/edit: hidden + refused in plan mode
     needs_approval: ClassVar[bool] = False  # write/edit/bash
+    grant_arg: ClassVar[str | None] = None  # "Always" covers only calls with the same value of this argument
 
     def spec(self) -> ToolSpec:
         return ToolSpec(self.name, self.description, self.parameters)

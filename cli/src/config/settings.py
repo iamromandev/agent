@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     instructions_share: Annotated[
         float, Field(default=0.25, gt=0, le=0.5, description="Fraction of num_ctx that AGENTS.md files may use")
     ]
+    fetch_timeout: Annotated[
+        float, Field(default=15.0, gt=0, description="Seconds before a web_fetch request gives up")
+    ]
+    fetch_max_bytes: Annotated[
+        int, Field(default=2_000_000, gt=0, description="Most bytes web_fetch downloads before it stops")
+    ]
 
 
 @lru_cache

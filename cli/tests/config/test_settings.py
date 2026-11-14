@@ -97,3 +97,20 @@ def test_env_example_lists_the_instructions_share() -> None:
 
     example = (Path(__file__).parents[2] / ".env.example").read_text()
     assert "AGENT_INSTRUCTIONS_SHARE=0.25" in example.splitlines()
+
+
+def test_fetch_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.fetch_timeout == 15.0
+    assert settings.fetch_max_bytes == 2_000_000
+    monkeypatch.setenv("AGENT_FETCH_TIMEOUT", "3")
+    monkeypatch.setenv("AGENT_FETCH_MAX_BYTES", "100")
+    settings = Settings(_env_file=None)
+    assert (settings.fetch_timeout, settings.fetch_max_bytes) == (3.0, 100)
+
+
+def test_fetch_limits_must_be_positive() -> None:
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, fetch_timeout=0)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None, fetch_max_bytes=0)

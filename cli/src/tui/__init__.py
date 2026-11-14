@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -27,7 +28,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.agent.terminal.manager import TerminalManager
     from src.agent.tools import default_tools
     from src.agent.tools.base import ToolContext
-    from src.client import OllamaClient
+    from src.client import OllamaClient, WebClient
     from src.config.settings import get_settings
     from src.tui.app import AgentApp
 
@@ -38,41 +39,49 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     ctx = ToolContext(root, settings.bash_timeout)
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
-    terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
+    web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
+    try:
+        terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
 
-    def recorder_factory() -> Recorder:
-        return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
+        def recorder_factory() -> Recorder:
+            return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
 
-    def agent_factory(approver: Approver) -> Agent:
-        return Agent(
+        def agent_factory(approver: Approver) -> Agent:
+            return Agent(
+                provider,
+                default_tools(terminals, fetcher=web),
+                approver,
+                ctx,
+                settings.max_steps,
+                recorder=recorder_factory(),
+                compact_at=settings.compact_at,
+                compact_keep_turns=settings.compact_keep_turns,
+                instructions_share=settings.instructions_share,
+            )
+
+        async def close() -> None:
+            try:
+                await terminals.close_all()  # no terminal process outlives the agent
+            finally:
+                try:
+                    await web.aclose()
+                finally:
+                    await client.aclose()
+
+        # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
+        app = AgentApp(
+            agent_factory,
             provider,
-            default_tools(terminals),
-            approver,
-            ctx,
-            settings.max_steps,
-            recorder=recorder_factory(),
-            compact_at=settings.compact_at,
-            compact_keep_turns=settings.compact_keep_turns,
-            instructions_share=settings.instructions_share,
+            root,
+            store=store,
+            start=start,
+            recorder_factory=recorder_factory,
+            on_close=close,
+            terminals=terminals,
         )
-
-    async def close() -> None:
-        try:
-            await terminals.close_all()  # no terminal process outlives the agent
-        finally:
-            await client.aclose()
-
-    # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
-    app = AgentApp(
-        agent_factory,
-        provider,
-        root,
-        store=store,
-        start=start,
-        recorder_factory=recorder_factory,
-        on_close=close,
-        terminals=terminals,
-    )
+    except BaseException:
+        asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)
+        raise
     try:
         app.run()
     finally:

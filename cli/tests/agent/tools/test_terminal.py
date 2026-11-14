@@ -369,3 +369,14 @@ async def test_every_terminal_tool_shows_its_name_in_the_label(manager: Terminal
     assert TermStart(manager).label({"name": "api", "command": "x"}) == "term_start api"
     assert TermRead(manager).label({"name": "api"}) == "term_read api"
     assert TermStop(manager).label({"name": "api"}) == "term_stop api"
+
+
+def test_always_on_term_start_covers_only_that_command() -> None:
+    from src.agent.approval import Grants
+    from src.agent.mode import Mode
+    from src.agent.tools.terminal import TermStart
+
+    grants = Grants()
+    grants.add("term_start", {"name": "web", "command": "make dev"}, TermStart.grant_arg)
+    assert grants.covers("term_start", {"name": "api", "command": "make dev"}, Mode.BUILD, TermStart.grant_arg)
+    assert not grants.covers("term_start", {"name": "web", "command": "rm -rf ~"}, Mode.BUILD, TermStart.grant_arg)

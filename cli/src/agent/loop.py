@@ -584,7 +584,7 @@ class Agent:
     async def _approve_and_run(
         self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode
     ) -> tuple[ToolResult, bool]:
-        if tool.needs_approval and not self.grants.covers(call.name, call.arguments, mode):
+        if tool.needs_approval and not self.grants.covers(call.name, call.arguments, mode, tool.grant_arg):
             allow_always = mode is not Mode.PLAN
             request = ApprovalRequest(call.name, tool.label(call.arguments), prepared.preview, allow_always)
             decision = await self.approver.ask(request)
@@ -592,7 +592,7 @@ class Agent:
                 note = f" Note: {decision.note}" if decision.note else ""
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False
             if decision.choice is Choice.ALWAYS and allow_always:
-                self.grants.add(call.name, call.arguments)
+                self.grants.add(call.name, call.arguments, tool.grant_arg)
         if tool.name in UNDO_UNTRACKED:
             self._undo.note_bash()
         if not tool.mutating:
