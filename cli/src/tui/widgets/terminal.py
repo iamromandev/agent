@@ -289,7 +289,9 @@ class TerminalPane(Vertical):
     async def focus_active(self) -> None:
         await self.settled()
         if (view := self.active_view()) is not None:
-            view.focus()
+            # Now, not `view.focus()` (deferred): the caller may rely on where focus is when this returns, e.g. a
+            # tab close that drops its guard while focus would still be on the tab bar, where ctrl+w closes any tab.
+            self.screen.set_focus(view)
 
     def _on_event(self, name: str, event: Event) -> None:
         if self._closing:
