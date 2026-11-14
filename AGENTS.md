@@ -15,6 +15,7 @@ Agent: placeholder project (purpose TBD) — FastAPI API (Python 3.15) + Typer C
 | `make api-up` / `make api-migrate` | Start Postgres + API containers / run migrations in the container. |
 | `make cli-run ARGS="health check"` | Run the CLI. |
 | `make cli-run` (bare `agent`) | Open the terminal coding agent (Textual TUI); needs Ollama at `AGENT_OLLAMA_URL`. Its workspace is the directory it runs in: `cli/` for `make cli-run` and `cd cli && uv run agent`. For another folder run `uv run --project <repo>/cli agent` from it (`--project` keeps the cwd; `--directory` changes it). |
+| `make cli-tool-install` / `make cli-tool-uninstall` | Install `agent` on the PATH as an editable uv tool (`agent-cli`) / remove it. Rerun the install after dependency changes or moving the checkout. |
 | `uv run --directory api pre-commit install` | Install hooks once; mirrors CI (`ruff check`, `ty`, `prettier --check`). |
 
 - Prefer `make api-up` over raw `docker compose up`: the compose project name is pinned to `agent`.

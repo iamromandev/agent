@@ -12,7 +12,7 @@ UI_PORT := 3000
 .PHONY: check test setup down restart clean help \
 	api-check api-test api-run api-up api-down api-build api-build-prod api-push-prod api-restart api-ps api-logs \
 	api-migrate api-install api-export api-clean-all api-clean-volumes api-clean-host \
-	cli-install cli-check cli-test cli-run \
+	cli-install cli-check cli-test cli-run cli-tool-install cli-tool-uninstall \
 	ui-install ui-dev ui-down ui-restart ui-build ui-check ui-format
 
 ## both stacks
@@ -93,6 +93,12 @@ cli-test: # Run the CLI test suite
 
 cli-run: # Run the CLI, e.g. make cli-run ARGS="health check"
 	$(MAKE) -C $(CLI) run ARGS="$(ARGS)"
+
+cli-tool-install: # Install the agent command on your PATH
+	$(MAKE) -C $(CLI) tool-install
+
+cli-tool-uninstall: # Remove the installed agent command
+	$(MAKE) -C $(CLI) tool-uninstall
 
 ## ui — delegates to ui/package.json
 ui-install: # Install UI dependencies
