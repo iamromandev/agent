@@ -57,6 +57,9 @@ class Terminal:
         self._reaper: asyncio.Task[None] | None = None
         self._stops = 0  # stops in progress: each signals the group and kills what stays after the grace
         loop.add_reader(process.fd, self._on_readable)
+        # Watch the leader from the start: on Linux a child that ignores SIGHUP keeps the pty open after the
+        # leader exits, so EOF never comes and the exit would otherwise go unnoticed.
+        self._ensure_reaper()
 
     @property
     def status(self) -> Status:
