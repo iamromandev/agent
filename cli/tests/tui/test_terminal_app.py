@@ -8,6 +8,7 @@ import os
 import signal
 import struct
 import termios
+import time
 from collections.abc import Callable, Iterator
 from pathlib import Path
 
@@ -327,10 +328,10 @@ async def test_keys_typed_in_a_terminal_do_not_answer_an_approval_dialog_that_op
         assert isinstance(app.screen, ApprovalScreen)
         assert (tmp_path / "a.py").read_text() == "old\n"
 
-        await pilot.pause(0.7)  # the dialog takes keys again
+        await until(pilot, lambda: time.monotonic() >= app._keys_ignored_until)  # the dialog takes keys again
         await pilot.press("up", "up", "enter")
+        await until(pilot, lambda: (tmp_path / "a.py").read_text() == "new\n")  # slow CI runners need more than settled()
         await settled(app)
-        assert (tmp_path / "a.py").read_text() == "new\n"
 
 
 async def test_an_approval_dialog_opened_from_the_input_takes_keys_at_once(
