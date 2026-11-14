@@ -670,3 +670,21 @@ async def test_no_announcement_when_the_pane_is_shown_or_the_user_opens_it_with_
         await pilot.pause(0.1)
 
         assert not any("started" in n for n in _notices(app))
+
+
+async def test_when_a_close_ends_the_focus_has_already_left_the_tab_bar(
+    make_app: AppFactory, terminal_manager: TerminalManager
+) -> None:
+    # Removing the focused view moves focus to the tab bar; a deferred `focus()` back to the running tab would
+    # leave a window after the close where ctrl+w (allowed from the tab bar) closes the running one too.
+    app = make_app(terminals=terminal_manager)
+    async with app.run_test() as pilot:
+        await _open(app, pilot, terminal_manager, "sleep 30", "exit 3")
+        pane = pane_of(app)
+        await until(pilot, lambda: pane.title("t2") == "t2 ✗ exited 3")
+        await until(pilot, lambda: pane.active_name == "t2" and app.focused is pane.view("t2"))
+
+        await app._close_terminal_tab("t2")
+
+        assert app.focused is pane.view("t1")
+        assert not app.check_action("close_terminal_tab", ())
