@@ -5,13 +5,17 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import signal
+import time
 from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
+from textual import events
 from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
+from textual.widgets import Tabs
 
 from src.agent import (
     Agent,
@@ -43,13 +47,17 @@ from src.agent.session import (
     SessionStore,
     SessionWriteError,
 )
+from src.agent.terminal.manager import TerminalError, TerminalManager
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar, display_path
+from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import Transcript
+
+KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
 async def _uninterrupted(work: Awaitable[None]) -> None:
@@ -70,7 +78,10 @@ async def _uninterrupted(work: Awaitable[None]) -> None:
 
 HELP = (
     "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Esc interrupt · "
-    "ctrl+c interrupt (quit when idle) · /new or /clear new session · /sessions switch session · "
+    "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
+    "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
+    "ctrl+w close an exited terminal's tab (or the clicked one) · /new or /clear new session · "
+    "/sessions switch session · "
     "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
@@ -85,7 +96,14 @@ class AgentApp(App[None]):
         Binding("tab", "toggle_mode", "Mode", priority=True),
         Binding("escape", "interrupt_turn", "Interrupt", priority=True),
         Binding("ctrl+c", "interrupt_or_quit", "Interrupt / quit", priority=True, show=False),
+        Binding("ctrl+t", "toggle_terminal", "Terminal", priority=True),
+        Binding("ctrl+backslash", "focus_input", "Chat", priority=True, show=False),
+        Binding("ctrl+pageup", "terminal_tab(-1)", "Previous terminal", priority=True, show=False),
+        Binding("ctrl+pagedown", "terminal_tab(1)", "Next terminal", priority=True, show=False),
+        Binding("ctrl+w", "close_terminal_tab", "Close terminal tab", priority=True, show=False),
     ]
+    # Tab, Esc and Ctrl+C are the app's, except while a terminal has focus: they belong to its process then.
+    TERMINAL_KEYS: ClassVar[frozenset[str]] = frozenset({"toggle_mode", "interrupt_turn", "interrupt_or_quit"})
 
     def __init__(
         self,
@@ -97,9 +115,11 @@ class AgentApp(App[None]):
         start: StartChoice = NEW,
         recorder_factory: Callable[[], Recorder] | None = None,
         on_close: Callable[[], Awaitable[None]] | None = None,
+        terminals: TerminalManager | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
+        self.terminals = terminals
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -113,9 +133,14 @@ class AgentApp(App[None]):
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
         self._undoing = False  # /undo is running: keys that act on a turn leave it alone
         self._switching = False  # a session is being loaded and drawn: no turn may start meanwhile
+        self._signals_before: dict[signal.Signals, Any] = {}  # what SIGTERM and SIGHUP did before the app
+        self._keys_ignored_until = 0.0  # time.monotonic() until which an approval dialog takes no keys
+        self._closing_tabs: set[str] = set()  # terminals whose tab is being closed (they are being stopped)
 
     def compose(self) -> ComposeResult:
         yield Transcript(id="transcript")
+        if self.terminals is not None:
+            yield TerminalPane(self.terminals)
         yield ChatInput(id="input")
         yield StatusBar()
 
@@ -126,6 +151,7 @@ class AgentApp(App[None]):
         status.workspace = display_path(self.workspace)
         status.mode = self.agent.mode
         self.query_one(ChatInput).focus()
+        self._stop_on_signals()
         self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
@@ -272,17 +298,73 @@ class AgentApp(App[None]):
         self.agent.forget_instructions_notice()  # the transcript was redrawn: show the notice in it
         await self._announce_instructions()
 
+    def guard_keys(self) -> None:
+        """Called as an approval dialog opens: keys the user is typing into a terminal must not answer it.
+
+        With a terminal focused, an Up and an Enter typed for the shell would otherwise pick "Allow once".
+        """
+        if isinstance(self.focused, TerminalView):
+            self._keys_ignored_until = time.monotonic() + KEY_GUARD
+
+    async def on_event(self, event: events.Event) -> None:
+        if (
+            isinstance(event, events.Key)
+            and not event.is_forwarded
+            and event.key != "ctrl+c"  # it interrupts: it never approves
+            and time.monotonic() < self._keys_ignored_until
+            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen)  # empty on shutdown
+        ):
+            event.stop()
+            return
+        await super().on_event(event)
+
     def exit(self, *args: Any, **kwargs: Any) -> None:
         self._shutting_down = True  # from here on the widgets are going away: stop applying agent events
         super().exit(*args, **kwargs)
 
+    def _stop_on_signals(self) -> None:
+        """Quit properly on SIGTERM and SIGHUP (closing the window), which stops the terminals' processes too.
+
+        Without a handler the process would die at once and leave processes that ignore SIGHUP behind. The exit
+        code is 128 + the signal, as for a process the signal kills.
+        """
+        if self.terminals is None:
+            return
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):  # not the main thread, or no signals
+                previous = signal.getsignal(sig)
+                loop.add_signal_handler(sig, functools.partial(self.exit, return_code=128 + sig))
+                self._signals_before[sig] = previous
+
+    def _restore_signals(self) -> None:
+        """Put back what the signals did before the app (`nohup agent` ignores SIGHUP; the default would kill it)."""
+        loop = asyncio.get_running_loop()
+        for sig, previous in self._signals_before.items():
+            with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+                loop.remove_signal_handler(sig)  # leaves the default action behind
+                if previous is not None:  # None: it was not installed from Python; the default stays
+                    signal.signal(sig, previous)
+        self._signals_before.clear()
+
     async def on_unmount(self) -> None:
         self._shutting_down = True
         self.agent.close()
-        if self._on_close is not None:
-            await self._on_close()
+        try:
+            if self.terminals is not None:
+                await self.terminals.close_all()  # no terminal process outlives the app, whatever ended it
+        finally:
+            try:
+                if self._on_close is not None:
+                    await self._on_close()
+            finally:
+                self._restore_signals()  # until here a second signal is absorbed too
 
     # keys
+
+    async def on_terminal_pane_started_hidden(self, message: TerminalPane.StartedHidden) -> None:
+        with contextlib.suppress(NoMatches):  # gone when the app is shutting down
+            await self.query_one(Transcript).add_notice("info", f"terminal {message.name} started · ctrl+t to show")
 
     def action_toggle_mode(self) -> None:
         self.agent.set_mode(Mode.PLAN if self.agent.mode is Mode.BUILD else Mode.BUILD)
@@ -297,13 +379,93 @@ class AgentApp(App[None]):
     def action_interrupt_turn(self) -> None:
         self.interrupt_turn()
 
+    async def action_toggle_terminal(self) -> None:
+        """Show the pane (starting a shell if it is empty) and focus it; from a terminal go back to the input,
+        and from the input hide the pane. Hidden terminals keep running."""
+        if self.terminals is None:
+            return
+        pane = self.query_one(TerminalPane)
+        focused = self.focused
+        if not pane.display:
+            if not self.terminals.names():
+                try:
+                    self.terminals.start("shell", None)
+                except TerminalError as exc:
+                    await self.query_one(Transcript).add_notice("error", f"Could not start a shell: {exc}")
+                    return
+            pane.display = True
+            await pane.focus_active()
+        elif isinstance(focused, TerminalView):
+            self.query_one(ChatInput).focus()
+        elif isinstance(focused, ChatInput):
+            pane.display = False
+        else:
+            await pane.focus_active()
+
+    def action_focus_input(self) -> None:
+        self.query_one(ChatInput).focus()
+
+    async def action_terminal_tab(self, step: int) -> None:
+        await self.query_one(TerminalPane).switch(step)
+
+    def action_close_terminal_tab(self) -> None:
+        """Stop the active terminal if it runs, close its tab, and go on in the pane (the input if it was the last).
+
+        A worker: stopping a process that ignores SIGTERM takes the grace period, and the app must stay responsive.
+        """
+        name = self.query_one(TerminalPane).active_name
+        if self.terminals is None or name is None or self._closing_tabs:
+            return  # one close at a time: while it runs, the focus (and so what ctrl+w may close) is not settled
+        self._closing_tabs.add(name)
+        self.run_worker(self._close_terminal_tab(name), group="terminal-close")
+
+    async def _close_terminal_tab(self, name: str) -> None:
+        pane = self.query_one(TerminalPane)
+        try:
+            if self.terminals is not None:
+                await self.terminals.close(name)
+            await pane.settled()
+            focused = self.focused
+            if pane.tab_count:
+                # Focus goes on in the pane only if the user is still there (or nowhere): a slow close must not
+                # pull them back from the chat input they moved to meanwhile.
+                if focused is None or pane in focused.ancestors_with_self:
+                    await pane.focus_active()
+            else:  # nothing left to show: back to the chat (Ctrl+T starts a fresh shell)
+                pane.display = False
+                self.query_one(ChatInput).focus()
+        finally:
+            self._closing_tabs.discard(name)  # only now: until the focus has settled, no other tab may be closed
+
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         stack = self.screen_stack  # empty while shutting down; `self.screen` would raise then
+        if action in ("toggle_terminal", "focus_input"):
+            return self.terminals is not None and not any(isinstance(s, ApprovalScreen | SessionPicker) for s in stack)
+        if action in ("terminal_tab", "close_terminal_tab"):
+            return self._tab_key_applies(action, stack)
+        if action in self.TERMINAL_KEYS and stack and isinstance(stack[-1].focused, TerminalView):
+            return False  # the key goes on to the terminal
         if action == "interrupt_turn":  # with a dialog open Escape belongs to it (the approval denies, then interrupts)
             return not (stack and isinstance(stack[-1], ApprovalScreen | SessionPicker))
         if action == "toggle_mode":  # the mode is not changed under a dialog, nor Tab taken from it
             return not any(isinstance(screen, ApprovalScreen | SessionPicker) for screen in stack)
         return True
+
+    def _tab_key_applies(self, action: str, stack: list[Any]) -> bool:
+        """Ctrl+PageUp/PageDown and Ctrl+W work while the pane is shown. Ctrl+W is also readline's and the
+        input's "delete word", so it closes only a tab nobody types into: that of an exited terminal that has
+        focus, or any tab while the tab bar has it (not the input, the transcript, a running terminal or nothing)."""
+        if self.terminals is None or not stack or any(isinstance(s, ApprovalScreen | SessionPicker) for s in stack):
+            return False
+        pane = self.query_one(TerminalPane)
+        if not pane.display or not pane.tab_count:
+            return False
+        if action == "terminal_tab":
+            return True
+        focused = stack[-1].focused
+        if isinstance(focused, TerminalView):
+            return focused.terminal.status[0] == "exited"
+        return isinstance(focused, Tabs)  # a running tab closes only from the tab bar, never from the input or transcript
 
     def action_interrupt_or_quit(self) -> None:
         if self._turn_active:

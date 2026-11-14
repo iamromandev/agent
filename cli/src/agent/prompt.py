@@ -17,6 +17,7 @@ _GUIDANCE = (
     "Prefer edit over write for existing files, and keep edits small. "
     "Use glob and grep to find files instead of guessing paths. "
     "Tool calls may be denied by the user; if one is, follow their note and do not retry it unchanged. "
+    "Use term_start, not bash, for servers and watchers that do not exit. "
     "Be concise."
 )
 

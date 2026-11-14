@@ -23,6 +23,8 @@ NOTHING_TO_UNDO = "Nothing to undo"
 CHANGED = "changed since the turn"
 TOO_LARGE = "too large"
 READ_ONLY = "read-only"
+# Tools whose effects /undo cannot reverse: it only counts them, and says so.
+UNDO_UNTRACKED = frozenset({"bash", "term_start", "term_stop"})
 
 
 @dataclass
@@ -339,5 +341,8 @@ def undo_notices(result: UndoResult, bash: int) -> list[Notice]:
         notices = [Notice("info", "Undid the last turn: no files changed")]
     if bash > 0:
         plural = "" if bash == 1 else "s"
-        notices.append(Notice("warn", f"That turn ran {bash} bash command{plural}; its effects were not undone."))
+        its = "its" if bash == 1 else "their"
+        notices.append(
+            Notice("warn", f"That turn ran {bash} bash/terminal command{plural}; {its} effects were not undone.")
+        )
     return notices

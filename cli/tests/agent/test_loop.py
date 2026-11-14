@@ -479,7 +479,7 @@ async def test_a_forced_edit_in_plan_mode_is_refused_without_the_approver(
 
     await agent.run_turn("q", events)
 
-    assert tool_messages(agent)[0].content == "refused: write/edit are unavailable in plan mode"
+    assert tool_messages(agent)[0].content == "refused: edit is unavailable in plan mode"
     assert events.of(ToolFinished)[0].result.is_error
     assert approver.requests == []
     assert (workspace / "a.py").read_text() == "print('hi')\n"
@@ -491,7 +491,7 @@ async def test_a_forced_write_in_plan_mode_is_refused(ctx: ToolContext, workspac
 
     await agent.run_turn("q", Events())
 
-    assert "plan mode" in tool_messages(agent)[0].content
+    assert tool_messages(agent)[0].content == "refused: write is unavailable in plan mode"
     assert approver.requests == []
     assert not (workspace / "n.txt").exists()
 

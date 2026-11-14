@@ -60,7 +60,8 @@ def root(
             start = StartChoice("pick")
         else:
             start = StartChoice("resume", resume)
-        run(Path.cwd(), start)
+        if code := run(Path.cwd(), start):
+            raise typer.Exit(code)  # e.g. 128 + the signal that ended it
 
 
 def main() -> None:

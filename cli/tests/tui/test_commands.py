@@ -30,6 +30,38 @@ async def test_help_lists_the_keys_and_commands(make_app: AppFactory) -> None:
     assert scripted(app).requests == []
 
 
+async def test_help_lists_the_terminal_pane_keys(make_app: AppFactory) -> None:
+    app = make_app(terminals=True)
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/help")
+        await pilot.pause()
+        (help_text,) = [n for n in _notices(app) if "Enter" in n]
+
+    for needle in ("ctrl+t", "terminal", "ctrl+\\", "ctrl+pageup", "ctrl+pagedown", "ctrl+w", "inside a terminal"):
+        assert needle in help_text
+
+
+ROOT = Path(__file__).resolve().parents[3]
+
+
+@pytest.mark.parametrize(
+    ("doc", "needles"),
+    [
+        ("README.md", ("ctrl+t", "ctrl+\\", "ctrl+pageup", "ctrl+w", "Terminal.app", "term_start", "term_read", "term_stop")),
+        (
+            "AGENTS.md",
+            ("ctrl+t", "ctrl+\\", "ctrl+pageup", "ctrl+w", "Terminal.app", "term_start", "term_read", "term_stop", "cli/src/agent/terminal/", "pyte"),
+        ),
+    ],
+)
+def test_the_docs_describe_the_terminal_pane_its_keys_and_tools(doc: str, needles: tuple[str, ...]) -> None:
+    text = (ROOT / doc).read_text()
+
+    missing = [needle for needle in needles if needle not in text]
+
+    assert missing == []
+
+
 async def test_an_unknown_command_gets_a_warning_and_no_request(make_app: AppFactory) -> None:
     app = make_app()
     async with app.run_test() as pilot:

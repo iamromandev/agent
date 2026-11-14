@@ -185,3 +185,11 @@ def test_ansi_output_reads_colon_form_colors() -> None:
     assert text.plain == "red blue"
     assert text.spans[0].style == Style.parse("#ff0000")
     assert text.spans[1].style == Style.parse("on color(21)")
+
+
+def test_the_terminal_color_and_style_caches_are_bounded() -> None:
+    assert styles.terminal_color.cache_info().maxsize == 1024
+    assert styles.terminal_style.cache_info().maxsize == 4096
+    for n in range(1100):  # more colors than the cache holds: it evicts instead of growing
+        styles.terminal_color(f"{n:06x}")
+    assert styles.terminal_color.cache_info().currsize <= 1024

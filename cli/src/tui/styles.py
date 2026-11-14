@@ -7,9 +7,11 @@ parsed as markup. Colors are ANSI names, so they follow the terminal palette in 
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 from typing import Literal
 
 from rich.cells import cell_len, set_cell_size
+from rich.color import Color
 from rich.style import Style
 from rich.text import Text
 
@@ -88,3 +90,35 @@ def ansi_output(display: str) -> Text:
 
 def diff_theme(dark: bool) -> str:
     return "ansi_dark" if dark else "ansi_light"
+
+
+_PYTE_NAMES = {"brown": "yellow"}  # pyte's name for ANSI yellow; its other names are those of Rich's palette
+
+
+@lru_cache(maxsize=1024)  # bounded: a program can print any of 16 million colors
+def terminal_color(name: str) -> Color | None:
+    """A color of a terminal screen (pyte: an ANSI name, `brightX`, `rrggbb`, or `default`); None is the terminal's own."""
+    if name == "default":
+        return None
+    if name.startswith("bright"):
+        base = name.removeprefix("bright")
+        return Color.parse(f"bright_{_PYTE_NAMES.get(base, base)}")
+    if len(name) == 6 and all(c in "0123456789abcdef" for c in name):
+        return Color.parse(f"#{name}")
+    return Color.parse(_PYTE_NAMES.get(name, name))
+
+
+@lru_cache(maxsize=4096)
+def terminal_style(
+    fg: str, bg: str, bold: bool, italics: bool, underscore: bool, strikethrough: bool, reverse: bool
+) -> Style:
+    """The style of one cell of a terminal screen; cached, as screens repeat a few styles many times."""
+    return Style(
+        color=terminal_color(fg),
+        bgcolor=terminal_color(bg),
+        bold=bold or None,
+        italic=italics or None,
+        underline=underscore or None,
+        strike=strikethrough or None,
+        reverse=reverse or None,
+    )

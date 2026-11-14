@@ -53,6 +53,7 @@ from src.agent.undo import (
     NOTHING_TO_UNDO,
     SNAPSHOT_FILE_LIMIT,
     SNAPSHOT_TOTAL_LIMIT,
+    UNDO_UNTRACKED,
     UndoLog,
     restore_turn,
     undo_notices,
@@ -553,7 +554,7 @@ class Agent:
             if tool is None:
                 result = ToolResult(f"Unknown tool: {call.name}", True, "unknown tool")
             elif mode is Mode.PLAN and tool.mutating:
-                result = ToolResult("refused: write/edit are unavailable in plan mode", True, "refused: plan mode")
+                result = ToolResult(f"refused: {call.name} is unavailable in plan mode", True, "refused: plan mode")
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
             else:
@@ -592,7 +593,7 @@ class Agent:
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False
             if decision.choice is Choice.ALWAYS and allow_always:
                 self.grants.add(call.name, call.arguments)
-        if tool.name == "bash":
+        if tool.name in UNDO_UNTRACKED:
             self._undo.note_bash()
         if not tool.mutating:
             result = await prepared.execute()  # cancellable at once; bash kills its process group

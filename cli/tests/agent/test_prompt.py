@@ -35,6 +35,10 @@ def test_prompt_guides_tool_use(tmp_path: Path) -> None:
     assert "read" in prompt.lower()
 
 
+def test_prompt_sends_long_running_commands_to_term_start(tmp_path: Path) -> None:
+    assert "Use term_start, not bash, for servers and watchers that do not exit." in _prompt(tmp_path)
+
+
 def test_plan_text_appears_only_in_plan_mode(tmp_path: Path) -> None:
     marker = "You are in PLAN mode: do not modify files; write/edit are unavailable"
     assert marker in _prompt(tmp_path, Mode.PLAN)
@@ -132,6 +136,7 @@ def test_a_single_small_agents_md_gives_exactly_todays_prompt(tmp_path: Path) ->
         "Prefer edit over write for existing files, and keep edits small. "
         "Use glob and grep to find files instead of guessing paths. "
         "Tool calls may be denied by the user; if one is, follow their note and do not retry it unchanged. "
+        "Use term_start, not bash, for servers and watchers that do not exit. "
         "Be concise."
         "\n\n## AGENTS.md\nUse tabs\n"
     )

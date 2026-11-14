@@ -21,6 +21,7 @@ class TuiApprover:
     async def ask(self, request: ApprovalRequest) -> Decision:
         """Runs inside the turn worker (push_screen_wait needs one)."""
         screen = ApprovalScreen(request)
+        self.app.guard_keys()  # before the dialog is shown: keys typed from now on are not meant for it
         try:
             result = await self.app.push_screen_wait(screen)
         except asyncio.CancelledError:

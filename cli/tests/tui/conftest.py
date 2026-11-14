@@ -4,7 +4,7 @@ import asyncio
 import os
 import signal
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,7 @@ from src.agent.session import (
     sessions_root,
     workspace_dir,
 )
+from src.agent.terminal.manager import TerminalManager
 from src.agent.tools import default_tools
 from src.agent.tools.base import ToolContext
 from src.tui import NEW, StartChoice
@@ -26,6 +27,7 @@ from src.tui.app import AgentApp
 from textual.pilot import Pilot
 
 from tests.fakes import Gate, ScriptedProvider
+from tests.helpers import assert_all_gone
 
 WAIT = 5.0  # no test waits longer than this for the app; a regression fails instead of hanging
 TEST_LIMIT = 30
@@ -33,8 +35,43 @@ TEST_LIMIT = 30
 AppFactory = Callable[..., AgentApp]
 
 
+class Terminals:
+    """The terminal managers a test made, and every PID they started."""
+
+    def __init__(self) -> None:
+        self.managers: list[TerminalManager] = []
+        self.pids: list[int] = []
+
+    def make(self, workspace: Path) -> TerminalManager:
+        manager = TerminalManager(workspace, grace=0.3)  # a short grace: stopping is quick in tests
+
+        def started(name: str, event: str) -> None:
+            if event == "started" and (terminal := manager.get(name)) is not None:
+                self.pids.append(terminal.process.pid)
+
+        manager.listen(started)
+        self.managers.append(manager)
+        return manager
+
+
 @pytest.fixture
-def make_app(tmp_path: Path) -> AppFactory:
+async def terminal_pool(monkeypatch: pytest.MonkeyPatch) -> AsyncIterator[Terminals]:
+    """Managers for the test; each is closed afterwards and every process it started must be gone."""
+    monkeypatch.setenv("SHELL", "/bin/sh")  # terminals run $SHELL: not the developer's
+    made = Terminals()
+    yield made
+    for manager in made.managers:
+        await manager.close_all()
+    await assert_all_gone(*made.pids)
+
+
+@pytest.fixture
+def terminal_manager(terminal_pool: Terminals, tmp_path: Path) -> TerminalManager:
+    return terminal_pool.make(tmp_path.resolve())
+
+
+@pytest.fixture
+def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
     """Build an AgentApp over a ScriptedProvider and a tmp_path workspace."""
 
     def build(
@@ -51,6 +88,7 @@ def make_app(tmp_path: Path) -> AppFactory:
         compact_at: float = 0.8,
         compact_keep_turns: int = 2,
         tools: bool = True,
+        terminals: bool | TerminalManager = False,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -58,6 +96,11 @@ def make_app(tmp_path: Path) -> AppFactory:
             script or [], delay=delay, model=model, context_window=context_window, check_result=check_result
         )
         sessions = sessions_root(None)  # AGENT_SESSIONS_DIR: a folder of this test only
+        manager: TerminalManager | None = None
+        if isinstance(terminals, TerminalManager):
+            manager = terminals
+        elif terminals:  # a manager of this test: its processes are stopped (and checked) when the test ends
+            manager = terminal_pool.make(root)
 
         def new_recorder() -> Recorder:
             return FileRecorder(workspace_dir(sessions, root), root)
@@ -65,7 +108,7 @@ def make_app(tmp_path: Path) -> AppFactory:
         def factory(approver: Approver) -> Agent:
             return Agent(
                 provider,
-                default_tools() if tools else [],
+                default_tools(manager) if tools else [],
                 approver,
                 ToolContext(root, 5.0),
                 max_steps,
@@ -82,6 +125,7 @@ def make_app(tmp_path: Path) -> AppFactory:
             start=start,
             recorder_factory=new_recorder,
             on_close=on_close,
+            terminals=manager,
         )
 
     return build
