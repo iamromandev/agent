@@ -23,6 +23,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
     from src.agent import Agent
     from src.agent.approval import Approver
+    from src.agent.commands.loader import load_commands
     from src.agent.mcp.config import global_config_path
     from src.agent.mcp.hub import McpHub
     from src.agent.mcp.setup import prepare
@@ -37,7 +38,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.client import OllamaClient, WebClient
     from src.client.mcp import SdkConnector
     from src.config.settings import get_settings
-    from src.tui.app import AgentApp
+    from src.tui.app import BUILTINS, AgentApp
 
     settings = get_settings()
     root = workspace.resolve()
@@ -58,6 +59,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             TrustStore(trust_store_path(name="permission-trust.json")),
             permission_setup.tool_keys(default_tools(terminals, fetcher=web)),  # to warn about rules that never apply
         )
+        commands = load_commands(root, BUILTINS)  # read once, like the settings files
         mcp = McpHub(  # nothing starts yet
             SdkConnector(),
             root,
@@ -114,6 +116,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             mcp_trust=setup.remember,
             permissions=permissions.rules,
             permission_warnings=permissions.warnings,
+            commands=commands,
         )
     except BaseException:
         asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)

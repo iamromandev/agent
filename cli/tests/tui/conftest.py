@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from src.agent import Agent
 from src.agent.approval import Approver
+from src.agent.commands.loader import Commands
 from src.agent.mcp.hub import McpHub
 from src.agent.permissions.setup import Rules
 from src.agent.provider.base import Message, ProviderEvent
@@ -98,6 +99,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         permission_warnings: Sequence[str] = (),
         task: bool = False,
         task_fetcher: Fetcher | None = None,
+        commands: Commands | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -142,6 +144,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             mcp_trust=mcp_trust,
             permissions=permissions,
             permission_warnings=permission_warnings,
+            commands=commands,
         )
 
     return build

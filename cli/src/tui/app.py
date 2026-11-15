@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import re
 import signal
 import time
 from collections.abc import Awaitable, Callable, Sequence
@@ -16,7 +17,7 @@ from textual.app import App, ComposeResult
 from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
 from textual.message import Message
-from textual.widgets import Tabs
+from textual.widgets import OptionList, Tabs, TextArea
 
 from src.agent import (
     Agent,
@@ -33,6 +34,7 @@ from src.agent import (
     UsageUpdate,
 )
 from src.agent.approval import Approver
+from src.agent.commands.loader import Commands
 from src.agent.compaction import CHARS_PER_TOKEN
 from src.agent.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.agent.instructions import fingerprint, levels
@@ -61,6 +63,7 @@ from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
+from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import Transcript
@@ -89,10 +92,26 @@ HELP = (
     "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
-    "ctrl+w close an exited terminal's tab (or the clicked one) · /new or /clear new session · "
+    "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
     "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
+
+# Built-in commands and what `/` suggests for them. Must equal the cases of `AgentApp._command` (a test checks).
+BUILTINS: dict[str, str] = {
+    "help": "this help",
+    "new": "new session",
+    "clear": "new session",
+    "sessions": "switch session",
+    "mcp": "MCP servers and their tools",
+    "permissions": "saved permission rules",
+    "compact": "shrink the context",
+    "init": "write AGENTS.md",
+    "undo": "undo the last turn",
+    "quit": "exit",
+}
+
+_COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
 
 
 class AgentApp(App[None]):
@@ -129,6 +148,7 @@ class AgentApp(App[None]):
         mcp_trust: Callable[[], None] | None = None,
         permissions: Rules | None = None,
         permission_warnings: Sequence[str] = (),
+        commands: Commands | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -137,6 +157,7 @@ class AgentApp(App[None]):
         self._mcp_trust = mcp_trust  # remembers that the user trusted the project's servers
         self.permissions = permissions if permissions is not None else Rules.empty()
         self._permission_warnings = tuple(permission_warnings)
+        self.commands = commands if commands is not None else Commands({}, ())
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -165,6 +186,7 @@ class AgentApp(App[None]):
         yield Transcript(id="transcript")
         if self.terminals is not None:
             yield TerminalPane(self.terminals)
+        yield CommandSuggestions(id="suggestions")  # above the input
         yield ChatInput(id="input")
         yield StatusBar()
 
@@ -174,6 +196,7 @@ class AgentApp(App[None]):
         status.window = self.provider.context_window
         status.workspace = display_path(self.workspace)
         status.mode = self.agent.mode
+        self.query_one(ChatInput).suggestions = self.query_one(CommandSuggestions)
         self.query_one(ChatInput).focus()
         self._stop_on_signals()
         self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
@@ -213,12 +236,17 @@ class AgentApp(App[None]):
     def _start_trust(self) -> None:
         """One worker for everything to show or ask at launch: the permission warnings, then the MCP prompt, then
         the permission prompt. One after the other, so two prompts never overlap."""
-        if self._permission_warnings or self.permissions.untrusted_allow or (self.mcp is not None and self.mcp.untrusted()):
+        if (
+            self._permission_warnings
+            or self.commands.warnings
+            or self.permissions.untrusted_allow
+            or (self.mcp is not None and self.mcp.untrusted())
+        ):
             self.run_worker(self._ask_trust(), group="trust")
 
     async def _ask_trust(self) -> None:
         transcript = self.query_one(Transcript)
-        for warning in self._permission_warnings:
+        for warning in (*self._permission_warnings, *self.commands.warnings):
             await transcript.add_notice("warn", warning)
         if self.mcp is not None and self.mcp.untrusted():
             await self._ask_mcp_trust()
@@ -565,6 +593,10 @@ class AgentApp(App[None]):
             return self._tab_key_applies(action, stack)
         if action in self.TERMINAL_KEYS and stack and isinstance(stack[-1].focused, TerminalView):
             return False  # the key goes on to the terminal
+        if action in ("toggle_mode", "interrupt_turn") and stack:
+            focused = stack[-1].focused
+            if isinstance(focused, ChatInput) and focused.popup_open:
+                return False  # Tab and Esc belong to the open suggestions: the input handles them
         if action == "interrupt_turn":  # with a dialog open Escape belongs to it (the approval denies, then interrupts)
             return not (stack and isinstance(stack[-1], DIALOGS))
         if action == "toggle_mode":  # the mode is not changed under a dialog, nor Tab taken from it
@@ -623,30 +655,38 @@ class AgentApp(App[None]):
     async def on_chat_input_submitted(self, event: ChatInput.Submitted) -> None:
         text = event.text
         if text.strip().startswith("/"):
-            await self._command(text.strip())
+            await self._command(text)
             return
-        if self._turn_active or self._switching:
-            self._restore_draft(text)  # not accepted: the message stays in the box
-            hint = "press Esc to interrupt" if self._turn_active else "a session is loading"
-            await self.query_one(Transcript).add_notice("warn", f"busy — {hint}")
+        if await self._refuse_if_busy(text):
             return
         self._begin_turn(text, text)
 
-    def _begin_turn(self, text: str, draft: str, init: bool = False) -> None:
+    async def _refuse_if_busy(self, text: str) -> bool:
+        """A message cannot start now: it goes back in the box, with a notice. True when it was refused."""
+        if not (self._turn_active or self._switching):
+            return False
+        self._restore_draft(text)  # not accepted: the message stays in the box
+        hint = "press Esc to interrupt" if self._turn_active else "a session is loading"
+        await self.query_one(Transcript).add_notice("warn", f"busy — {hint}")
+        return True
+
+    def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> None:
         """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
         self._turn_active = True
         self._draft = draft
         self.query_one(StatusBar).busy = True
         self._turn_entered = False
         # A partial, not a coroutine: cancelled before it first runs, nothing is left un-awaited.
-        self.run_worker(functools.partial(self._turn, text, init, draft), group="turn")
+        self.run_worker(functools.partial(self._turn, text, init, draft, label), group="turn")
 
-    async def _command(self, command: str) -> None:
+    async def _command(self, original: str) -> None:
         transcript = self.query_one(Transcript)
-        name = command.split()[0]
+        found = _COMMAND.match(original.strip())
+        name = f"/{found.group(1)}" if found else "/"
+        rest = (found.group(2) or "") if found else ""
         match name:
             case "/help":
-                await transcript.add_notice("info", HELP)
+                await transcript.add_notice("info", self._help())
             case "/mcp":
                 await transcript.add_notice("info", self._mcp_summary())
             case "/permissions":
@@ -713,7 +753,52 @@ class AgentApp(App[None]):
             case "/undo":
                 await self._undo_command()
             case _:
-                await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
+                custom = self.commands.get(name[1:])
+                if custom is None:
+                    await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
+                    return
+                if await self._refuse_if_busy(original):
+                    return
+                prompt = custom.expand(rest)
+                if not prompt.strip():
+                    await transcript.add_notice("warn", f"{name} is empty")
+                    return
+                self._begin_turn(prompt, draft=original, label=f"{name} ({custom.source})")
+
+    def _suggestion_entries(self) -> list[tuple[str, str, str | None]]:
+        entries: list[tuple[str, str, str | None]] = [(name, text, None) for name, text in BUILTINS.items()]
+        entries.extend((c.name, c.description or "", c.source) for c in self.commands.sorted())
+        return entries
+
+    def on_text_area_changed(self, event: TextArea.Changed) -> None:
+        if isinstance(event.text_area, ChatInput) and event.text_area.suggestions is not None:
+            event.text_area.suggestions.update_for(event.text_area.text, self._suggestion_entries())
+
+    def on_descendant_blur(self, event: events.DescendantBlur) -> None:
+        if isinstance(event.widget, ChatInput) and event.widget.suggestions is not None:
+            event.widget.suggestions.hide()  # the popup belongs to the focused input
+
+    def on_descendant_focus(self, event: events.DescendantFocus) -> None:
+        if isinstance(event.widget, ChatInput) and event.widget.suggestions is not None:
+            event.widget.suggestions.update_for(event.widget.text, self._suggestion_entries())
+
+    def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
+        if isinstance(event.option_list, CommandSuggestions):
+            event.stop()
+            chat = self.query_one(ChatInput)
+            if (name := event.option_list.name_at(event.option_index)) is not None:
+                chat.complete(name)
+            chat.focus()
+
+    def _help(self) -> str:
+        """The key and command help, plus the custom commands (names, descriptions and paths come from files: escaped)."""
+        if not self.commands.by_name:
+            return HELP
+        lines = [
+            f"/{escape(c.name)}" + (f"  {escape(c.description)}" if c.description else "") + f" ({c.source})"
+            for c in self.commands.sorted()
+        ]
+        return f"{HELP}\nCustom commands:\n" + "\n".join(lines)
 
     async def _undo_command(self) -> None:
         transcript = self.query_one(Transcript)
@@ -752,7 +837,9 @@ class AgentApp(App[None]):
         block = render_facts(scan(self.workspace), int(FACTS_SHARE * self.provider.context_window) * CHARS_PER_TOKEN)
         return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents, facts=block)
 
-    async def _turn(self, text: str, init: bool = False, draft: str | None = None) -> None:
+    async def _turn(
+        self, text: str, init: bool = False, draft: str | None = None, label: str | None = None
+    ) -> None:
         self._turn_entered = True
         transcript = self.query_one(Transcript)
         status = self.query_one(StatusBar)
@@ -774,7 +861,7 @@ class AgentApp(App[None]):
             sent = True
             before = fingerprint(agents_md)
             shown = True
-            await transcript.add_user(text)
+            await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
             self._finished_since_toggle = False
             status.pending_mode = False
             await self._run_with_events(work)

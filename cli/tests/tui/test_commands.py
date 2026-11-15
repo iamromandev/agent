@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
+from src.agent.commands.loader import Command, Commands, load_commands
 from src.agent.mode import Mode
 from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.agent.session import SessionStore, sessions_root
+from src.tui import app as app_module
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, UserEntry
@@ -281,3 +284,213 @@ async def test_new_closes_the_old_recorder_off_the_ui_thread_before_the_next_mes
         await type_and_send(pilot, "hi")
         await settled(app)
         assert old.messages == []  # nothing reached the old session after /new
+
+
+# custom commands
+
+REPLY = [TextDelta("ok"), Done(1, 1)]
+
+
+def _commands(*commands: Command, warnings: tuple[str, ...] = ()) -> Commands:
+    return Commands({c.name: c for c in commands}, warnings)
+
+
+def test_builtins_match_the_cases_of_command() -> None:
+    tree = ast.parse(Path(app_module.__file__).read_text())
+    (func,) = [n for n in ast.walk(tree) if isinstance(n, ast.AsyncFunctionDef) and n.name == "_command"]
+    cases = {
+        str(c.value.value).removeprefix("/")
+        for m in ast.walk(func)
+        if isinstance(m, ast.match_case)
+        for c in ast.walk(m.pattern)
+        if isinstance(c, ast.MatchValue) and isinstance(c.value, ast.Constant)
+    }
+    assert cases == set(app_module.BUILTINS)
+
+
+async def test_a_custom_command_sends_its_expanded_prompt_with_a_label(make_app: AppFactory) -> None:
+    review = Command("review", "Focus on: $ARGUMENTS", "Review it", "project")
+    app = make_app([REPLY], commands=_commands(review))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/review  error handling ")
+        await settled(app)
+
+        (entry,) = app.query(UserEntry)
+        assert entry.text == "Focus on: error handling"
+        assert entry.label == "/review (project)"
+        messages, _ = scripted(app).requests[0]
+        assert messages[-1].role == "user" and messages[-1].content == "Focus on: error handling"
+    saved = [p for p in (sessions_root(None)).rglob("*.jsonl")]
+    assert saved and "Focus on: error handling" in saved[0].read_text()
+    assert "/review" not in saved[0].read_text()
+
+
+async def test_a_custom_command_keeps_multiline_arguments(make_app: AppFactory) -> None:
+    app = make_app([REPLY], commands=_commands(Command("x", "Do X", None, "global")))
+    async with app.run_test() as pilot:
+        await pilot.press(*"/x a")
+        await pilot.press("ctrl+j")
+        await pilot.press("b", "enter")
+        await settled(app)
+
+        messages, _ = scripted(app).requests[0]
+        assert messages[-1].content == "Do X\n\na\nb"
+
+
+async def test_a_custom_command_is_refused_while_a_turn_runs_and_keeps_the_draft(make_app: AppFactory) -> None:
+    gate = Gate()
+    app = make_app([[gate]], commands=_commands(Command("x", "Do X", None, "global")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "first")
+        await reached(gate)
+        await type_and_send(pilot, "/x now")
+        await pilot.pause()
+
+        assert any("busy" in n for n in _notices(app))
+        assert app.query_one(ChatInput).text == "/x now"
+        gate.release.set()
+        await settled(app)
+        assert len(scripted(app).requests) == 1
+
+
+async def test_an_empty_custom_command_warns_and_starts_no_turn(make_app: AppFactory) -> None:
+    app = make_app(commands=_commands(Command("blank", "  \n", None, "project")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/blank")
+        await pilot.pause()
+
+        assert any("/blank is empty" in n for n in _notices(app))
+        assert scripted(app).requests == [] and not list(app.query(UserEntry))
+
+
+async def test_an_unknown_command_still_warns_with_custom_commands_loaded(make_app: AppFactory) -> None:
+    app = make_app(commands=_commands(Command("x", "Do X", None, "global")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/nope")
+        await pilot.pause()
+
+        assert "⚠ Unknown command: /nope (try /help)" in _notices(app)
+
+
+async def test_a_builtin_cannot_be_replaced_by_a_custom_command(make_app: AppFactory) -> None:
+    # the loader skips such files; if one got through, the built-in still wins
+    app = make_app(commands=_commands(Command("help", "Do X", None, "project")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/help")
+        await pilot.pause()
+
+        assert any("Enter" in n for n in _notices(app)) and scripted(app).requests == []
+
+
+async def test_help_lists_custom_commands_sorted_with_descriptions_and_sources(make_app: AppFactory) -> None:
+    app = make_app(
+        commands=_commands(
+            Command("review", "r", "Review the staged diff", "project"),
+            Command("deploy", "d", None, "global"),
+            Command("evil", "e", "bad\x1b[31m text", "global"),
+        )
+    )
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/help")
+        await pilot.pause()
+        (text,) = [n for n in _notices(app) if "Enter" in n]
+
+    assert "Custom commands:" in text
+    lines = text.split("Custom commands:\n")[1].splitlines()
+    assert lines == [
+        "/deploy (global)",
+        "/evil  bad\\x1b[31m text (global)",
+        "/review  Review the staged diff (project)",
+    ]
+    assert "\x1b" not in text
+
+
+async def test_help_has_no_custom_section_without_commands(make_app: AppFactory) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/help")
+        await pilot.pause()
+        (text,) = [n for n in _notices(app) if "Enter" in n]
+
+    assert "Custom commands" not in text
+
+
+async def test_launch_warnings_about_commands_are_shown(make_app: AppFactory) -> None:
+    app = make_app(commands=_commands(warnings=("a/b.md: not a valid command name",)))
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: any("not a valid command name" in n for n in _notices(app)))
+        assert any(n.startswith("⚠") for n in _notices(app))
+
+
+async def test_the_transcript_shows_a_custom_prompt_escaped_but_the_model_gets_it_raw(make_app: AppFactory) -> None:
+    body = "a\x1b[2Jb\u202eevil\n\tline2"
+    app = make_app([REPLY], commands=_commands(Command("x", body, None, "project")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/x")
+        await settled(app)
+
+        (entry,) = app.query(UserEntry)
+        shown = str(entry.render())
+        assert "\x1b" not in shown and "\u202e" not in shown
+        assert "\\x1b[2J" in shown and "\\u202e" in shown
+        assert shown.endswith("\n> a\\x1b[2Jb\\u202eevil\n\tline2")
+        assert scripted(app).requests[0][0][-1].content == body
+
+
+async def test_undo_of_a_custom_command_turn_restores_what_was_typed(make_app: AppFactory) -> None:
+    app = make_app([REPLY], commands=_commands(Command("x", "Do $ARGUMENTS", None, "global")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/x  thing")
+        await settled(app)
+        await type_and_send(pilot, "/undo")
+        await pilot.pause()
+
+        assert app.query_one(ChatInput).text == "/x  thing"
+        assert not list(app.query(UserEntry))
+
+
+async def test_an_empty_custom_command_while_busy_keeps_the_text(make_app: AppFactory) -> None:
+    gate = Gate()
+    app = make_app([[gate]], commands=_commands(Command("blank", "", None, "project")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "first")
+        await reached(gate)
+        await type_and_send(pilot, "/blank")
+        await pilot.pause()
+
+        assert app.query_one(ChatInput).text == "/blank"
+        gate.release.set()
+        await settled(app)
+
+
+async def test_help_lists_commands_loaded_from_both_folders(make_app: AppFactory, tmp_path: Path) -> None:
+    cfg = tmp_path / "cfg" / "agent" / "commands"
+    cfg.mkdir(parents=True)
+    (cfg / "glob.md").write_text("---\ndescription: From global\n---\nG")
+    ws = tmp_path / "ws"
+    proj = ws / ".agent" / "commands"
+    proj.mkdir(parents=True)
+    (proj / "proj.md").write_text("---\ndescription: From project\n---\nP")
+    loaded = load_commands(ws, set(app_module.BUILTINS), {"XDG_CONFIG_HOME": str(tmp_path / "cfg")})
+    app = make_app(commands=loaded, workspace=ws)
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/help")
+        await pilot.pause()
+        (text,) = [n for n in _notices(app) if "Custom commands:" in n]
+
+    assert "/glob  From global (global)" in text and "/proj  From project (project)" in text
+
+
+async def test_a_crlf_file_with_multiline_arguments_expands_end_to_end(make_app: AppFactory, tmp_path: Path) -> None:
+    proj = tmp_path / ".agent" / "commands"
+    proj.mkdir(parents=True)
+    (proj / "r.md").write_bytes(b"---\r\ndescription: D\r\n---\r\nReview:\r\n$ARGUMENTS\r\n")
+    loaded = load_commands(tmp_path, set(app_module.BUILTINS), {"XDG_CONFIG_HOME": str(tmp_path / "none")})
+    app = make_app([REPLY], commands=loaded)
+    async with app.run_test() as pilot:
+        await pilot.press(*"/r a")
+        await pilot.press("ctrl+j")
+        await pilot.press("b", "enter")
+        await settled(app)
+
+        assert scripted(app).requests[0][0][-1].content == "Review:\na\nb"

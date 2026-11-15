@@ -14,18 +14,32 @@ from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
 from src.agent.session import TranscriptItem
+from src.agent.text import escape
 from src.agent.tools.base import Preview, ToolResult
 from src.tui.styles import Outcome, ansi_output, diff_theme, notice_text, tool_title
 
 REPLAY_BATCH = 500  # entries mounted at once when a saved conversation is redrawn
 
 
+def _readable(text: str) -> str:
+    """`escape(text)` per line and per tab, so line breaks and tabs stay as they are."""
+    return "\n".join("\t".join(escape(part) for part in line.split("\t")) for line in text.split("\n"))
+
+
 class UserEntry(Static):
     DEFAULT_CSS = "UserEntry { margin: 1 0 0 0; padding: 0 1; background: $boost; }"
 
-    def __init__(self, text: str) -> None:
-        super().__init__(Text(f"> {text}"))
+    def __init__(self, text: str, label: str | None = None) -> None:
+        shown = Text()
+        if label:
+            shown.append(f"{label}\n", "dim")
+            text_shown = _readable(text)  # a custom command's prompt comes from a file: no escape sequences
+        else:
+            text_shown = text
+        shown.append(f"> {text_shown}")
+        super().__init__(shown)
         self.text = text
+        self.label = label
         self.turn: int | None = None  # set by Transcript.add_user
 
 
@@ -140,11 +154,11 @@ class Transcript(VerticalScroll):
         self._last: dict[int, Widget] = {}  # turn token -> the last widget it ended with
         self._ended: list[int] = []  # tokens of the turns that ended, oldest first
 
-    async def add_user(self, text: str) -> int:
-        """Show a user message; returns the token of the turn it starts."""
+    async def add_user(self, text: str, label: str | None = None) -> int:
+        """Show a user message (with a dim `label` line above it, e.g. the custom command); returns the turn's token."""
         self._turns += 1
         self.latest_turn = self._turns
-        entry = UserEntry(text)
+        entry = UserEntry(text, label)
         entry.turn = self._turns
         await self._add(entry)
         return self._turns
