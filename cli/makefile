@@ -4,7 +4,7 @@ UV := uv
 UVX := $(UV)x
 
 # phony targets
-.PHONY: install check check-ci test run tool-install tool-uninstall help
+.PHONY: install check check-ci test run eval tool-install tool-uninstall help
 
 # python tools (uv)
 install: # Install all dependencies
@@ -25,6 +25,9 @@ test: # Run the unit test suite
 
 run: # Run the CLI, e.g. make run ARGS="health check"
 	$(UV) run agent $(ARGS)
+
+eval: # Run the real-model smoke test (needs Ollama)
+	$(UV) run python -m evals
 
 tool-install: # Install the agent command on your PATH (editable, from this checkout)
 	$(UV) tool install --editable --force .
