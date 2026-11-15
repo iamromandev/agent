@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 from typing import Annotated
+from urllib.parse import urlsplit
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -45,6 +46,9 @@ class Settings(BaseSettings):
     fetch_max_bytes: Annotated[
         int, Field(default=2_000_000, gt=0, description="Most bytes web_fetch downloads before it stops")
     ]
+    search_url: Annotated[
+        str | None, Field(default=None, description="SearXNG base URL for web_search; unset hides the tool")
+    ]
     mcp_timeout: Annotated[
         float, Field(default=60.0, gt=0, description="Seconds before an MCP tool call gives up")
     ]
@@ -52,6 +56,21 @@ class Settings(BaseSettings):
         float,
         Field(default=120.0, gt=0, description="Seconds an MCP server may take to start and list its tools"),
     ]
+
+    @field_validator("search_url")
+    @classmethod
+    def _blank_search_url_is_unset(cls, value: str | None) -> str | None:
+        value = value.strip() if value else ""
+        if not value:
+            return None
+        try:
+            url = urlsplit(value)
+            host = url.hostname
+        except ValueError as e:
+            raise ValueError("AGENT_SEARCH_URL must be a valid http(s) URL") from e
+        if url.scheme not in ("http", "https") or not host:
+            raise ValueError("AGENT_SEARCH_URL must be an http(s) URL with a host")
+        return value
 
 
 @lru_cache

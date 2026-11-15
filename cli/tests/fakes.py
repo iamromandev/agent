@@ -12,6 +12,7 @@ from src.engine.approval import ApprovalRequest, Choice, Decision
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import CallResult, ToolInfo
 from src.engine.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
+from src.engine.search_web import SearchHit
 from src.engine.session import SessionWriteError, ToolMeta
 from src.engine.web import FetchResponse
 
@@ -197,6 +198,21 @@ class FakeFetcher:
             raise self.response
         assert isinstance(self.response, FetchResponse), "FakeFetcher needs a canned response"
         return self.response
+
+
+class FakeSearcher:
+    """A Searcher that records (query, limit) calls and returns canned hits or raises."""
+
+    def __init__(self, hits: object = None) -> None:
+        self.hits = hits if hits is not None else []  # a list of SearchHit, or an Exception to raise
+        self.calls: list[tuple[str, int]] = []
+
+    async def search(self, query: str, limit: int) -> list[SearchHit]:
+        self.calls.append((query, limit))
+        if isinstance(self.hits, Exception):
+            raise self.hits
+        assert isinstance(self.hits, list)
+        return list(self.hits)  # not cut to limit: the tool must not rely on the client for that
 
 
 class FakeConnection:

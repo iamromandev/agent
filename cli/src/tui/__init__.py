@@ -21,7 +21,7 @@ NEW = StartChoice("new")
 
 def run(workspace: Path, start: StartChoice = NEW) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
-    from src.client import OllamaClient, WebClient
+    from src.client import OllamaClient, SearxClient, WebClient
     from src.client.mcp import SdkConnector
     from src.config.settings import get_settings
     from src.engine import Agent
@@ -48,7 +48,9 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
     web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
+    search: SearxClient | None = None
     try:
+        search = SearxClient(settings.search_url, settings.fetch_timeout) if settings.search_url else None
         terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
         # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
@@ -57,7 +59,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             root,
             global_settings_path(),
             TrustStore(trust_store_path(name="permission-trust.json")),
-            permission_setup.tool_keys(default_tools(terminals, fetcher=web)),  # to warn about rules that never apply
+            permission_setup.tool_keys(default_tools(terminals, fetcher=web, searcher=search)),  # to warn about rules that never apply
         )
         commands = load_commands(root, BUILTINS)  # read once, like the settings files
         mcp = McpHub(  # nothing starts yet
@@ -76,7 +78,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
         def agent_factory(approver: Approver) -> Agent:
             return Agent(
                 provider,
-                default_tools(terminals, fetcher=web),
+                default_tools(terminals, fetcher=web, searcher=search),
                 approver,
                 ctx,
                 settings.max_steps,
@@ -85,7 +87,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 compact_keep_turns=settings.compact_keep_turns,
                 instructions_share=settings.instructions_share,
                 extra_tools=mcp.tools,
-                task_tools=read_only_tools(web),
+                task_tools=read_only_tools(web, search),
                 task_max_steps=settings.task_max_steps,
                 rules=permissions.rules,
             )
@@ -100,7 +102,11 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                     try:
                         await web.aclose()
                     finally:
-                        await client.aclose()
+                        try:
+                            if search is not None:
+                                await search.aclose()
+                        finally:
+                            await client.aclose()
 
         # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
         app = AgentApp(
@@ -119,7 +125,11 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             commands=commands,
         )
     except BaseException:
-        asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)
+        try:  # setup failed before the app could close them (no loop is running here)
+            asyncio.run(web.aclose())
+        finally:
+            if search is not None:
+                asyncio.run(search.aclose())
         raise
     try:
         app.run()
