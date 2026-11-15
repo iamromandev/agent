@@ -14,8 +14,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
-from src.agent.permissions.rules import Rule
-from src.agent.text import escape
+from src.engine.permissions.rules import Rule
+from src.engine.text import escape
 
 
 class PermissionTrustScreen(ModalScreen[bool]):

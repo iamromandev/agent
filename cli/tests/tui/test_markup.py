@@ -5,9 +5,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.agent.approval import ApprovalRequest
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.agent.tools.base import Preview, ToolResult
+from src.engine.approval import ApprovalRequest
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.tools.base import Preview, ToolResult
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import NoticeEntry, ToolEntry, Transcript
 from textual.widgets import Collapsible, Label, Static

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 
-from src.agent.tools.base import ToolResult
+from src.engine.tools.base import ToolResult
 from src.tui.widgets.transcript import Transcript
 
 from tests.tui.conftest import AppFactory

@@ -7,10 +7,10 @@ import json
 import threading
 from pathlib import Path
 
-from src.agent.mode import Mode
-from src.agent.prompt import build_init_prompt
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import sessions_root
+from src.engine.mode import Mode
+from src.engine.prompt import build_init_prompt
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import sessions_root
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar

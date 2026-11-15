@@ -5,8 +5,8 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from src.agent import UsageUpdate
-from src.agent.session import TranscriptItem
+from src.engine import UsageUpdate
+from src.engine.session import TranscriptItem
 from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, Transcript, UserEntry

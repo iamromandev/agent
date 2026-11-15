@@ -8,7 +8,7 @@ import time
 from typing import Any
 
 import pytest
-from src.agent.terminal.manager import Terminal, TerminalManager
+from src.engine.terminal.manager import Terminal, TerminalManager
 from src.tui.app import AgentApp
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.terminal import TerminalPane, TerminalView

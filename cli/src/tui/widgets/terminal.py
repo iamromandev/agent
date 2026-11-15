@@ -18,8 +18,8 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import TabbedContent, TabPane
 
-from src.agent.terminal.manager import Event, Terminal, TerminalManager
-from src.agent.terminal.pty import WriteOverflow
+from src.engine.terminal.manager import Event, Terminal, TerminalManager
+from src.engine.terminal.pty import WriteOverflow
 from src.tui.keys import encode
 from src.tui.terminal_render import line_strip
 from src.tui.terminal_screen import TerminalScreen, TerminalStream

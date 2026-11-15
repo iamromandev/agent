@@ -8,13 +8,13 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
-from src.agent import Agent
-from src.agent.approval import Approver
-from src.agent.commands.loader import Commands
-from src.agent.mcp.hub import McpHub
-from src.agent.permissions.setup import Rules
-from src.agent.provider.base import Message, ProviderEvent
-from src.agent.session import (
+from src.engine import Agent
+from src.engine.approval import Approver
+from src.engine.commands.loader import Commands
+from src.engine.mcp.hub import McpHub
+from src.engine.permissions.setup import Rules
+from src.engine.provider.base import Message, ProviderEvent
+from src.engine.session import (
     FileRecorder,
     Recorder,
     SessionStore,
@@ -22,10 +22,10 @@ from src.agent.session import (
     sessions_root,
     workspace_dir,
 )
-from src.agent.terminal.manager import TerminalManager
-from src.agent.tools import default_tools, read_only_tools
-from src.agent.tools.base import ToolContext
-from src.agent.web import Fetcher
+from src.engine.terminal.manager import TerminalManager
+from src.engine.tools import default_tools, read_only_tools
+from src.engine.tools.base import ToolContext
+from src.engine.web import Fetcher
 from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot

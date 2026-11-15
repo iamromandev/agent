@@ -7,11 +7,11 @@ import time
 from pathlib import Path
 
 import pytest
-from src.agent.mcp.config import ServerConfig
-from src.agent.mcp.contract import McpError, ToolInfo
-from src.agent.mcp.hub import McpHub
-from src.agent.provider.base import Done, TextDelta
 from src.client.mcp import SdkConnector
+from src.engine.mcp.config import ServerConfig
+from src.engine.mcp.contract import McpError, ToolInfo
+from src.engine.mcp.hub import McpHub
+from src.engine.provider.base import Done, TextDelta
 from src.tui.app import AgentApp
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry
 

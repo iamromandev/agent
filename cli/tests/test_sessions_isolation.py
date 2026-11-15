@@ -7,8 +7,8 @@ import os
 from pathlib import Path
 
 import pytest
-from src.agent.session.paths import sessions_root
 from src.config import get_settings
+from src.engine.session.paths import sessions_root
 
 from tests.conftest import REAL_DATA_DIRS, RealDataDirWriteError
 

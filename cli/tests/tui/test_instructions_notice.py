@@ -6,8 +6,8 @@ import threading
 from pathlib import Path
 
 import pytest
-from src.agent.loop import Agent
-from src.agent.provider.base import Done, TextDelta
+from src.engine.loop import Agent
+from src.engine.provider.base import Done, TextDelta
 from src.tui import StartChoice
 from src.tui.styles import ICONS
 from src.tui.widgets.transcript import NoticeEntry

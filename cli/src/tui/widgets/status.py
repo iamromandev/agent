@@ -7,7 +7,7 @@ from pathlib import Path
 from textual.reactive import reactive
 from textual.widgets import Static
 
-from src.agent.mode import Mode
+from src.engine.mode import Mode
 
 WARN_AT = 0.8
 

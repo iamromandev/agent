@@ -153,7 +153,7 @@ async def test_a_slow_provider_times_out_and_is_recorded() -> None:
 
 
 async def test_a_provider_error_is_recorded() -> None:
-    from src.agent.provider.base import ProviderError
+    from src.engine.provider.base import ProviderError
 
     record = await run_task(TASKS["find"], 1, ScriptedProvider([[ProviderError("model gone")]]), _settings(), timeout=30, keep=False)
     assert record.error == "model gone"
@@ -273,7 +273,7 @@ async def test_a_failing_git_init_is_a_warning_in_the_run(monkeypatch: pytest.Mo
 
 
 async def test_without_usage_steps_come_from_the_history_and_tokens_stay_unknown() -> None:
-    from src.agent.provider.base import Done, TextDelta
+    from src.engine.provider.base import Done, TextDelta
 
     record = await run_task(TASKS["command"], 1, ScriptedProvider([[TextDelta("average"), Done(0, 0)]]), _settings(), timeout=30, keep=False)
     assert record.steps == 1

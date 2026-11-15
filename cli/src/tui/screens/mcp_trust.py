@@ -15,8 +15,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
-from src.agent.mcp.config import ServerConfig
-from src.agent.text import escape
+from src.engine.mcp.config import ServerConfig
+from src.engine.text import escape
 
 
 def command_line(server: ServerConfig) -> str:

@@ -21,23 +21,23 @@ NEW = StartChoice("new")
 
 def run(workspace: Path, start: StartChoice = NEW) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
-    from src.agent import Agent
-    from src.agent.approval import Approver
-    from src.agent.commands.loader import load_commands
-    from src.agent.mcp.config import global_config_path
-    from src.agent.mcp.hub import McpHub
-    from src.agent.mcp.setup import prepare
-    from src.agent.mcp.trust import TrustStore, trust_store_path
-    from src.agent.permissions import setup as permission_setup
-    from src.agent.permissions.config import global_settings_path
-    from src.agent.provider.ollama import OllamaProvider
-    from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
-    from src.agent.terminal.manager import TerminalManager
-    from src.agent.tools import default_tools, read_only_tools
-    from src.agent.tools.base import ToolContext
     from src.client import OllamaClient, WebClient
     from src.client.mcp import SdkConnector
     from src.config.settings import get_settings
+    from src.engine import Agent
+    from src.engine.approval import Approver
+    from src.engine.commands.loader import load_commands
+    from src.engine.mcp.config import global_config_path
+    from src.engine.mcp.hub import McpHub
+    from src.engine.mcp.setup import prepare
+    from src.engine.mcp.trust import TrustStore, trust_store_path
+    from src.engine.permissions import setup as permission_setup
+    from src.engine.permissions.config import global_settings_path
+    from src.engine.provider.ollama import OllamaProvider
+    from src.engine.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
+    from src.engine.terminal.manager import TerminalManager
+    from src.engine.tools import default_tools, read_only_tools
+    from src.engine.tools.base import ToolContext
     from src.tui.app import BUILTINS, AgentApp
 
     settings = get_settings()

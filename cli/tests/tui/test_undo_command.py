@@ -7,8 +7,8 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import FileRecorder
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import FileRecorder
 from src.tui import StartChoice
 from src.tui.app import HELP
 from src.tui.screens.approval import ApprovalScreen

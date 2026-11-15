@@ -19,7 +19,7 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import OptionList, Tabs, TextArea
 
-from src.agent import (
+from src.engine import (
     Agent,
     AgentBusy,
     AgentEvent,
@@ -34,19 +34,19 @@ from src.agent import (
     TurnEnded,
     UsageUpdate,
 )
-from src.agent.approval import Approver
-from src.agent.commands.loader import Commands
-from src.agent.compaction import CHARS_PER_TOKEN
-from src.agent.facts import FACTS_SHARE, init_check, render_facts, scan
-from src.agent.instructions import fingerprint, levels
-from src.agent.loop import close_recorder
-from src.agent.mcp.hub import HubEvent, McpHub
-from src.agent.mcp.names import tool_name
-from src.agent.mode import Mode
-from src.agent.permissions.setup import Rules
-from src.agent.prompt import build_init_prompt
-from src.agent.provider.base import Provider
-from src.agent.session import (
+from src.engine.approval import Approver
+from src.engine.commands.loader import Commands
+from src.engine.compaction import CHARS_PER_TOKEN
+from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
+from src.engine.instructions import fingerprint, levels
+from src.engine.loop import close_recorder
+from src.engine.mcp.hub import HubEvent, McpHub
+from src.engine.mcp.names import tool_name
+from src.engine.mode import Mode
+from src.engine.permissions.setup import Rules
+from src.engine.prompt import build_init_prompt
+from src.engine.provider.base import Provider
+from src.engine.session import (
     FileRecorder,
     NullRecorder,
     Recorder,
@@ -55,8 +55,8 @@ from src.agent.session import (
     SessionStore,
     SessionWriteError,
 )
-from src.agent.terminal.manager import TerminalError, TerminalManager
-from src.agent.text import escape
+from src.engine.terminal.manager import TerminalError, TerminalManager
+from src.engine.text import escape
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen

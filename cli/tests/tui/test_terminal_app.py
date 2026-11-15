@@ -13,9 +13,9 @@ from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.agent.terminal.manager import Terminal, TerminalManager
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.terminal.manager import Terminal, TerminalManager
 from src.tui.app import AgentApp
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.sessions import SessionPicker

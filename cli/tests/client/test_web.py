@@ -6,8 +6,8 @@ from collections.abc import Callable
 
 import httpx
 import pytest
-from src.agent.web import FetchError, FetchTooLarge
 from src.client import WebClient
+from src.engine.web import FetchError, FetchTooLarge
 
 URL = "http://site.test/page"
 

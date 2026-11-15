@@ -8,11 +8,11 @@ import time
 from pathlib import Path
 
 import pytest
-from src.agent.mcp.config import ServerConfig
-from src.agent.mcp.contract import McpError, ToolInfo
-from src.agent.mcp.hub import McpHub
-from src.agent.mcp.setup import McpSetup, prepare
-from src.agent.mcp.trust import TrustStore, trust_store_path
+from src.engine.mcp.config import ServerConfig
+from src.engine.mcp.contract import McpError, ToolInfo
+from src.engine.mcp.hub import McpHub
+from src.engine.mcp.setup import McpSetup, prepare
+from src.engine.mcp.trust import TrustStore, trust_store_path
 from src.tui.app import HELP, AgentApp
 from src.tui.screens.mcp_trust import McpTrustScreen, describe
 from src.tui.widgets.transcript import NoticeEntry

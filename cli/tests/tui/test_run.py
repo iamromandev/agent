@@ -12,15 +12,15 @@ from typing import Any
 import pytest
 import src.tui
 import src.tui.app as tui_app
-from src.agent import Agent
-from src.agent.mcp.hub import McpHub
-from src.agent.provider.base import Message
-from src.agent.provider.ollama import OllamaProvider
-from src.agent.session import FileRecorder, SessionStore, workspace_dir
-from src.agent.terminal import manager as terminal_manager
-from src.agent.terminal.manager import TerminalManager
 from src.client import OllamaClient, WebClient
 from src.config.settings import get_settings
+from src.engine import Agent
+from src.engine.mcp.hub import McpHub
+from src.engine.provider.base import Message
+from src.engine.provider.ollama import OllamaProvider
+from src.engine.session import FileRecorder, SessionStore, workspace_dir
+from src.engine.terminal import manager as terminal_manager
+from src.engine.terminal.manager import TerminalManager
 from src.tui import StartChoice
 from src.tui.app import AgentApp
 

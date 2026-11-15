@@ -6,7 +6,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any
 
-from src.agent.events import (
+from src.engine.events import (
     AgentEvent,
     AssistantText,
     EventSink,

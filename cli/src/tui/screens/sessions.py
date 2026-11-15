@@ -15,7 +15,7 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
-from src.agent.session import SessionInfo
+from src.engine.session import SessionInfo
 from src.tui.styles import session_row
 
 TITLE_WIDTH = 40

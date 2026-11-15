@@ -7,8 +7,8 @@ from collections.abc import Sequence
 from rich.text import Text
 from textual.widgets import Static
 
-from src.agent.text import escape
-from src.agent.todo import MARK, TodoItem, active
+from src.engine.text import escape
+from src.engine.todo import MARK, TodoItem, active
 
 
 class TodoPanel(Static):

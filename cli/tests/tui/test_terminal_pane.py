@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 
 import pytest
-from src.agent.terminal.manager import TerminalManager
+from src.engine.terminal.manager import TerminalManager
 from src.tui.widgets.terminal import FEED_SLICE, MAX_PENDING, TerminalPane, TerminalView, _Tab, _title
 from textual import events
 from textual.app import App, ComposeResult

@@ -7,8 +7,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui import StartChoice
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.sessions import SessionPicker, relative
@@ -288,7 +288,7 @@ def timezone_of(hours: int):
 def test_rows_align_title_time_and_count_in_fixed_columns() -> None:
     from datetime import UTC, datetime
 
-    from src.agent.session import SessionInfo
+    from src.engine.session import SessionInfo
     from src.tui.screens.sessions import TITLE_WIDTH, describe
 
     now = datetime(2026, 11, 13, 12, 0, tzinfo=UTC)

@@ -7,9 +7,9 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from src.agent.compaction import is_summary
-from src.agent.provider.base import Done, Message, ProviderError, TextDelta, ToolCall
-from src.agent.session import SessionStore, ToolMeta, sessions_root
+from src.engine.compaction import is_summary
+from src.engine.provider.base import Done, Message, ProviderError, TextDelta, ToolCall
+from src.engine.session import SessionStore, ToolMeta, sessions_root
 from src.tui import StartChoice
 from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar

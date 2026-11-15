@@ -4,10 +4,10 @@ import ast
 from pathlib import Path
 
 import pytest
-from src.agent.commands.loader import Command, Commands, load_commands
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import SessionStore, sessions_root
+from src.engine.commands.loader import Command, Commands, load_commands
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import SessionStore, sessions_root
 from src.tui import app as app_module
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
@@ -53,7 +53,7 @@ ROOT = Path(__file__).resolve().parents[3]
         ("README.md", ("ctrl+t", "ctrl+\\", "ctrl+pageup", "ctrl+w", "Terminal.app", "term_start", "term_read", "term_stop")),
         (
             "AGENTS.md",
-            ("ctrl+t", "ctrl+\\", "ctrl+pageup", "ctrl+w", "Terminal.app", "term_start", "term_read", "term_stop", "cli/src/agent/terminal/", "pyte"),
+            ("ctrl+t", "ctrl+\\", "ctrl+pageup", "ctrl+w", "Terminal.app", "term_start", "term_read", "term_stop", "cli/src/engine/terminal/", "pyte"),
         ),
     ],
 )
