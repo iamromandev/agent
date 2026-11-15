@@ -152,6 +152,23 @@ async def test_request_payload_has_model_options_tools_and_messages() -> None:
     ]
 
 
+async def test_a_system_message_in_the_middle_is_sent_in_place() -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, content=_ndjson(DONE_LINE))
+
+    messages = [Message("system", "be brief"), Message("system", "note: list"), Message("user", "go")]
+    await _events(_provider(handler), messages, [])
+
+    assert [(m["role"], m["content"]) for m in captured[0]["messages"]] == [
+        ("system", "be brief"),
+        ("system", "note: list"),
+        ("user", "go"),
+    ]
+
+
 async def test_stream_dropped_after_two_chunks_yields_a_provider_error() -> None:
     async def body() -> AsyncIterator[bytes]:
         yield _ndjson({"message": {"content": "a"}, "done": False})

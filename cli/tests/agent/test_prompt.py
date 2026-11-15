@@ -243,3 +243,13 @@ def test_task_prompt_has_the_role_workspace_and_agents_md(tmp_path: Path) -> Non
     assert "Date: 2026-11-12" in prompt
     assert "Project rules here." in prompt
     assert "Mode:" not in prompt
+
+
+def test_todo_guidance_appears_only_when_todo_is_offered(tmp_path: Path) -> None:
+    guidance = (
+        "For a task with three or more steps, keep a checklist with the todo tool: send the whole list each time, "
+        "keep exactly one item in_progress, and mark items done as soon as they are finished. "
+        "Don't use it for simple one-step requests."
+    )
+    assert guidance in build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Linux", todo=True)
+    assert "checklist" not in _prompt(tmp_path)

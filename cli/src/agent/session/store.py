@@ -27,6 +27,7 @@ from src.agent.session.records import (
     compaction_notice,
     message_from_obj,
 )
+from src.agent.todo import TodoItem, current_todos
 
 MIN_PREFIX = 6
 UNTITLED = "(untitled)"
@@ -59,6 +60,7 @@ class LoadedSession:
     tool_meta: dict[str, ToolMeta]  # by tool_call_id
     items: list[TranscriptItem]
     skipped_lines: int  # complete-but-invalid lines skipped (a cut last line is not counted)
+    todos: tuple[TodoItem, ...] = ()  # the todo list as the last successful `todo` call left it
 
 
 class SessionError(Exception):
@@ -174,6 +176,7 @@ class SessionStore:
         tool_meta: dict[str, ToolMeta] = {}
         items: list[TranscriptItem] = []
         marks: dict[int, int] = {0: 0}  # history length -> items length at that point (where an undo can cut)
+        base: tuple[TodoItem, ...] = ()  # the list a compaction record carried over
         skipped = 0
         for line in complete.split(b"\n")[1:]:  # the first line is the header
             if not line.strip():
@@ -189,6 +192,7 @@ class SessionStore:
                         items.append(item)
                     marks[len(history)] = len(items)
                 elif kind == "compaction":
+                    base = current_todos(history, base)
                     history, notice = _compaction(obj, tool_meta)
                     items.append(notice)
                     marks = {len(history): len(items)}
@@ -207,7 +211,7 @@ class SessionStore:
                     raise RecordError("record without a type")
             except (ValueError, TypeError, AttributeError, RecursionError):  # bad JSON or UTF-8, RecordError
                 skipped += 1
-        return LoadedSession(info, history, tool_meta, items, skipped)
+        return LoadedSession(info, history, tool_meta, items, skipped, current_todos(history, base))
 
 
 def _read_regular_file(path: Path) -> tuple[bytes, float]:

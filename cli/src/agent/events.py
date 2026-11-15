@@ -6,6 +6,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
+from src.agent.todo import TodoItem
 from src.agent.tools.base import Preview, ToolResult
 
 
@@ -55,6 +56,13 @@ class TurnEnded:
 
 
 @dataclass(frozen=True)
+class TodosChanged:
+    """The todo list after a `todo` call or an undo (the whole list; empty or all done: nothing to show)."""
+
+    items: tuple[TodoItem, ...]
+
+
+@dataclass(frozen=True)
 class TaskProgress:
     """An event of the child agent of a `task` call, tagged with the parent's call."""
 
@@ -63,6 +71,6 @@ class TaskProgress:
 
 
 AgentEvent = (
-    AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded | TaskProgress
+    AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded | TaskProgress | TodosChanged
 )
 EventSink = Callable[[AgentEvent], None]

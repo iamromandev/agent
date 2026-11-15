@@ -34,6 +34,9 @@ INTERRUPTED = "Interrupted by user"
 SKIPPED = "Skipped: the turn was interrupted before this call ran"
 PARTIAL_MARK = "\n[interrupted by user]"
 
+# The system prompt and tool specs alone take about 1,150 tokens, so the window must be above that.
+WINDOW = 2000
+
 
 @pytest.fixture(autouse=True)
 def _posix_sh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,7 +110,7 @@ def assert_valid_history(history: Sequence[Message]) -> None:
 def make_agent(
     ctx: ToolContext, script: list[list[ProviderEvent | Gate]], approver: Any
 ) -> tuple[Agent, ScriptedProvider]:
-    provider = ScriptedProvider(script)
+    provider = ScriptedProvider(script, context_window=WINDOW)
     agent = Agent(provider, default_tools(), approver, ctx, 25, today=lambda: date(2026, 11, 12))
     return agent, provider
 
@@ -430,7 +433,7 @@ class SlowCloseProvider:
     """Reports a ProviderError, then takes its time closing the stream."""
 
     model = "slow-close"
-    context_window = 1000
+    context_window = WINDOW
 
     def __init__(self) -> None:
         self.closing = asyncio.Event()
@@ -517,7 +520,7 @@ class SlowReadTool(Tool):
 async def test_cancel_between_two_calls_while_a_read_runs_leaves_valid_history(ctx: ToolContext) -> None:
     SlowReadTool.started = asyncio.Event()
     script = [reply(call("slow_read", "c1"), call("read", "c2", path="a.py"))]
-    provider = ScriptedProvider(script)
+    provider = ScriptedProvider(script, context_window=WINDOW)
     agent = Agent(provider, [*default_tools(), SlowReadTool()], RecordingApprover(), ctx, 25)
     events = Events()
     task = asyncio.create_task(agent.run_turn("q", events))

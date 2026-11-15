@@ -50,7 +50,7 @@ def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_pa
     assert agent.max_steps == 7
     assert agent.ctx.workspace == tmp_path.resolve()
     assert {t.name for t in agent.tools} == {
-        *("read", "glob", "grep", "write", "edit", "bash"),
+        *("read", "glob", "grep", "write", "edit", "bash", "todo"),
         *("term_start", "term_read", "term_stop"),
         "web_fetch",
         "task",

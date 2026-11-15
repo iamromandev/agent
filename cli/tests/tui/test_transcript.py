@@ -33,7 +33,8 @@ async def test_transcript_shows_user_streamed_text_and_a_tool_entry(make_app: Ap
         [
             [TextDelta("Let me "), TextDelta("look."), _read_call("src/main.py"), Done(10, 5)],
             [TextDelta("It has "), TextDelta("**31** lines."), Done(20, 5)],
-        ]
+        ],
+        context_window=2000,  # the prompt and tool specs alone are about 1,150 tokens
     )
     async with app.run_test() as pilot:
         await type_and_send(pilot, "what is in main?")

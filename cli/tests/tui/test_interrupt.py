@@ -25,7 +25,8 @@ async def test_a_second_escape_while_the_queue_drains_loses_no_events(
         [
             [TextDelta("a"), TextDelta("b"), TextDelta("c"), provider_gate, Done(1, 1)],
             [TextDelta("next"), Done(1, 1)],
-        ]
+        ],
+        context_window=2000,  # the prompt and tool specs alone are about 1,150 tokens
     )
     original = Transcript.write_assistant
     first = True

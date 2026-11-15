@@ -28,6 +28,7 @@ from src.agent.session.store import (
     _updated_at,
     compaction_notice,
 )
+from src.agent.todo import TodoItem
 
 CLI_DIR = Path(__file__).resolve().parents[3]
 STAMP = "2026-11-12T15:03:18Z"
@@ -1009,3 +1010,51 @@ def test_an_undo_with_no_keep_is_skipped(store: SessionStore, root: Path, worksp
     loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
     assert len(loaded.history) == 1
     assert loaded.skipped_lines == 1
+
+
+# --- todo list ---------------------------------------------------------------------------------
+
+
+def todo_turn(call_id: str, *pairs: tuple[str, str], ok: bool = True) -> list[dict[str, Any]]:
+    items = [{"content": c, "status": s} for c, s in pairs]
+    records = [assistant("", [ToolCall(call_id, "todo", {"items": items})])]
+    if ok:
+        records.append(tool(call_id, "todo", "Updated", ToolMeta("todo", "x")))
+    return records
+
+
+def test_a_session_without_todo_calls_has_no_list(store: SessionStore, root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", three_turns())
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == ()
+
+
+def test_the_last_todo_call_with_a_result_is_the_list(store: SessionStore, root: Path, workspace: Path) -> None:
+    records = [user("go"), *todo_turn("t1", ("a", "pending")), *todo_turn("t2", ("b", "done")), *todo_turn("t3", ("c", "pending"), ok=False)]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == (TodoItem("b", "done"),)
+
+
+def test_the_list_survives_a_compaction_record(store: SessionStore, root: Path, workspace: Path) -> None:
+    kept = [Message("user", "Summary of the earlier conversation:\nstuff"), Message("user", "latest")]
+    records = [user("go"), *todo_turn("t1", ("a", "pending")), compaction([embedded(m) for m in kept]), user("more")]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == (TodoItem("a", "pending"),)
+
+
+def test_a_todo_call_after_a_compaction_replaces_the_kept_list(store: SessionStore, root: Path, workspace: Path) -> None:
+    kept = [Message("user", "Summary of the earlier conversation:\nstuff")]
+    records = [
+        user("go"),
+        *todo_turn("t1", ("a", "pending")),
+        compaction([embedded(m) for m in kept]),
+        *todo_turn("t2", ("b", "pending")),
+    ]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == (TodoItem("b", "pending"),)
+
+
+def test_an_undo_record_restores_the_earlier_list(store: SessionStore, root: Path, workspace: Path) -> None:
+    first = [user("one"), *todo_turn("t1", ("a", "pending")), assistant("a1")]
+    second = [user("two"), *todo_turn("t2", ("b", "pending")), assistant("a2")]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [*first, *second, undo_record(len(first))])
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == (TodoItem("a", "pending"),)

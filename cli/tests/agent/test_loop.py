@@ -29,6 +29,9 @@ from tests.fakes import BlockingApprover, Gate, RecordingApprover, ScriptedProvi
 
 TODAY = date(2026, 11, 12)
 
+# The system prompt and tool specs alone take about 1,150 tokens, so the window must be above that.
+WINDOW = 2000
+
 
 class Events:
     """An EventSink that keeps what it was given."""
@@ -98,7 +101,7 @@ def make_agent(
     max_steps: int = 25,
     extra_tools: list[Tool] | None = None,
 ) -> tuple[Agent, ScriptedProvider, RecordingApprover]:
-    provider = ScriptedProvider(script)
+    provider = ScriptedProvider(script, context_window=WINDOW)
     approver = approver or RecordingApprover()
     agent = Agent(provider, [*default_tools(), *(extra_tools or [])], approver, ctx, max_steps, today=lambda: TODAY)
     return agent, provider, approver
@@ -201,7 +204,7 @@ async def test_a_done_event_updates_usage(ctx: ToolContext) -> None:
 
     await agent.run_turn("q", events)
 
-    assert events.of(UsageUpdate) == [UsageUpdate(used=823, window=1000)]
+    assert events.of(UsageUpdate) == [UsageUpdate(used=823, window=WINDOW)]
 
 
 async def test_usage_updates_are_not_marked_estimated_by_default() -> None:
@@ -454,8 +457,8 @@ async def test_a_tool_error_without_a_dialog_is_not_asked(ctx: ToolContext) -> N
 def test_tools_for_plan_drops_mutating_tools(ctx: ToolContext) -> None:
     agent, _, _ = make_agent(ctx, [])
 
-    assert [t.name for t in agent.tools_for(Mode.BUILD)] == ["read", "glob", "grep", "write", "edit", "bash"]
-    assert [t.name for t in agent.tools_for(Mode.PLAN)] == ["read", "glob", "grep", "bash"]
+    assert [t.name for t in agent.tools_for(Mode.BUILD)] == ["read", "glob", "grep", "write", "edit", "bash", "todo"]
+    assert [t.name for t in agent.tools_for(Mode.PLAN)] == ["read", "glob", "grep", "bash", "todo"]
 
 
 async def test_plan_mode_offers_no_write_or_edit_and_says_so_in_the_prompt(ctx: ToolContext) -> None:
@@ -465,7 +468,7 @@ async def test_plan_mode_offers_no_write_or_edit_and_says_so_in_the_prompt(ctx: 
     await agent.run_turn("q", Events())
 
     messages, tool_names = provider.requests[0]
-    assert tool_names == ["read", "glob", "grep", "bash"]
+    assert tool_names == ["read", "glob", "grep", "bash", "todo"]
     assert "Mode: plan" in messages[0].content
     assert "PLAN mode" in messages[0].content
 
@@ -539,7 +542,7 @@ async def test_a_mode_switch_during_a_turn_applies_from_the_next_request(ctx: To
     second_messages, second_tools = provider.requests[1]
     assert "edit" in first_tools
     assert "Mode: build" in first_messages[0].content
-    assert second_tools == ["read", "glob", "grep", "bash"]
+    assert second_tools == ["read", "glob", "grep", "bash", "todo"]
     assert "Mode: plan" in second_messages[0].content
     assert (workspace / "a.py").read_text() == "print('bye')\n"  # this step still ran as BUILD
 
@@ -699,7 +702,7 @@ class BreakingProvider:
     """Breaks the provider contract: raises mid-stream instead of yielding ProviderError."""
 
     model = "broken"
-    context_window = 1000
+    context_window = 2000
 
     async def stream(self, messages: Any, tools: Any) -> Any:
         yield TextDelta("half")
