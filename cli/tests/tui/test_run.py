@@ -528,3 +528,17 @@ def test_run_really_kills_a_server_that_was_still_starting_when_the_app_failed(
     finally:
         loop.run_until_complete(asyncio.sleep(0.1))
         loop.close()
+
+
+def test_run_loads_the_custom_commands_of_the_launch_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
+    folder = tmp_path / "ws" / ".agent" / "commands"
+    folder.mkdir(parents=True)
+    (folder / "review.md").write_text("Review it")
+    (folder / "help.md").write_text("x")
+
+    app = _run_app(monkeypatch, tmp_path / "ws")
+
+    command = app.commands.get("review")
+    assert command is not None and command.source == "project"
+    assert app.commands.get("help") is None and len(app.commands.warnings) == 1
