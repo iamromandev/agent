@@ -586,3 +586,16 @@ def test_without_the_tool_list_no_rule_is_checked_against_tools(launch: Launch) 
     launch.write(launch.global_path, allow=["write(a.py)"])
 
     assert launch.prepare().warnings == ()
+
+
+def test_prepare_exposes_the_parsed_data_of_both_files(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    (ws / ".agent").mkdir(parents=True)
+    (ws / ".agent" / "settings.json").write_text('{"guardrails": {"protected": ["a"]}}')
+    glob = tmp_path / "g.json"
+    glob.write_text('{"guardrails": {"keepEnv": ["X"]}}')
+
+    setup = prepare(ws, glob, TrustStore(tmp_path / "t.json"))
+
+    assert setup.global_data == {"guardrails": {"keepEnv": ["X"]}}
+    assert setup.project_data == {"guardrails": {"protected": ["a"]}}

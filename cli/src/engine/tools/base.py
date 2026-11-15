@@ -12,6 +12,7 @@ from src.engine.provider.base import ToolSpec
 
 if TYPE_CHECKING:
     from src.engine.events import AgentEvent
+    from src.engine.guardrails.setup import Guardrails
 
 
 class FileJournal(Protocol):
@@ -30,6 +31,8 @@ class ToolContext:
     bash_timeout: float
     journal: FileJournal | None = None  # told about each file write/edit changes
     progress: Callable[[AgentEvent], None] | None = None  # set per call by the loop; only the task tool uses it
+    guard: Guardrails | None = None  # None: the built-in defaults (see `guard_of`)
+    protected_ok: bool = False  # set per call by the loop: the user allowed this call to read the protected file it names
 
 
 @dataclass(frozen=True)

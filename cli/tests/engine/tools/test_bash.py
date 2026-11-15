@@ -391,3 +391,34 @@ def test_the_display_copy_resets_styles_before_the_omitted_marker() -> None:
     assert "\x1b[0m\n[" in capture.raw().split("omitted")[0]
     assert capture.text().startswith("a" * 10_000 + "\n[")
     assert "\x1b" not in capture.text()
+
+
+async def test_ac9_bash_gets_no_secret_variables_but_the_agent_keeps_them(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    monkeypatch.setenv("MY_API_KEY", "k-1234567890")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+
+    result = await _run("env", _ctx(workspace))
+
+    lines = result.output.splitlines()
+    assert "AWS_REGION=eu-west-1" in lines
+    assert any(line.startswith("PATH=") for line in lines)
+    assert not any(line.startswith(("GITHUB_TOKEN=", "MY_API_KEY=")) for line in lines)
+    assert os.environ["GITHUB_TOKEN"] == "ghp_agentsecret1234"  # the agent's own environment is unchanged (R10)
+
+
+async def test_bash_keeps_a_variable_named_in_the_global_keep_env(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.engine.guardrails.setup import prepare
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    monkeypatch.setenv("OTHER_TOKEN", "other-value-1234")
+    guard = prepare(workspace, {"guardrails": {"keepEnv": ["GITHUB_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+
+    result = await _run("env", ToolContext(workspace, 5.0, guard=guard))
+
+    assert "GITHUB_TOKEN=ghp_agentsecret1234" in result.output.splitlines()
+    assert "OTHER_TOKEN" not in result.output

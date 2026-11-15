@@ -489,3 +489,36 @@ async def test_a_write_to_the_agent_settings_file_offers_neither_always_nor_alwa
         screen = await _open_dialog(app, pilot)
 
         assert _option_ids(screen) == ["once", "deny"]
+
+
+async def test_a_protected_read_dialog_names_the_path_and_offers_only_allow_once_and_deny(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    from src.engine.guardrails.setup import prepare as prepare_guard
+
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host x\n")
+    guard = prepare_guard(tmp_path, None, None, {}, "Darwin", home=home.resolve())
+    call = ToolCall("r1", "read", {"path": str(home / ".ssh" / "config")})
+    app = make_app([[ToolCallEvent(call), Done(1, 1)], [TextDelta("done"), Done(1, 1)]], guard=guard)
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _option_ids(screen) == ["once", "deny"]
+        line = str(screen.query_one("#protected", Static).visual)
+        assert line == f"Protected path: {(home / '.ssh' / 'config').resolve()}"
+
+
+async def test_a_protected_path_with_control_characters_is_shown_escaped(make_app: AppFactory, tmp_path: Path) -> None:
+    from src.engine.approval import ApprovalRequest
+
+    screen = ApprovalScreen(ApprovalRequest("read", "read x", None, False, None, protected=True, protected_path="/h/\x1b[31m.ssh/id"))
+    app = make_app([])
+    async with app.run_test() as pilot:
+        app.push_screen(screen)
+        await pilot.pause()
+
+        line = str(screen.query_one("#protected", Static).visual)
+        assert "\\x1b" in line
+        assert "\x1b" not in line

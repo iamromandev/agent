@@ -758,3 +758,28 @@ async def test_kill_all_kills_every_group_at_once_without_the_event_loop(
 async def test_kill_all_with_nothing_running_is_quiet(manager: TerminalManager) -> None:
     manager.kill_all()
     manager.kill_all()  # twice is fine
+
+
+async def test_ac10_a_terminal_gets_the_same_filtered_environment_as_bash(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.engine.guardrails.setup import prepare
+
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    monkeypatch.setenv("KEPT_TOKEN", "kept-value")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    guard = prepare(workspace, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+    terminals = TerminalManager(workspace, grace=0.3, guard=guard)
+    try:
+        terminal = terminals.start("a", 'echo "[${GITHUB_TOKEN-unset}][${KEPT_TOKEN-unset}][${AWS_REGION-unset}]"')
+        await wait_until(lambda: "[unset][kept-value][eu-west-1]" in _text(terminal))
+    finally:
+        await terminals.close_all()
+
+
+async def test_a_terminal_without_a_guard_still_filters_secrets(manager: TerminalManager, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    terminal = manager.start("a", 'echo "[${GITHUB_TOKEN-unset}]"')
+
+    await wait_until(lambda: "[unset]" in _text(terminal))

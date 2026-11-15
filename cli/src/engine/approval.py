@@ -28,6 +28,8 @@ class ApprovalRequest:
     preview: Preview | None
     allow_always: bool  # False for bash in plan mode
     save_rule: str | None = None  # "Always here" would save this rule to the project settings file; None: not offered
+    protected: bool = False  # a read of a protected path (guardrails): only Allow once / Deny, never Always
+    protected_path: str = ""  # the resolved path, shown by the dialog (unescaped: the UI escapes it)
 
     @property
     def allow_save(self) -> bool:

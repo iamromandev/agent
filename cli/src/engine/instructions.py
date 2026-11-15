@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Literal
 
 from src.engine.compaction import CHARS_PER_TOKEN
+from src.engine.guardrails.paths import ProtectedPaths
+from src.engine.text import escape
 
 AGENTS_MD = "AGENTS.md"
 AGENTS_MD_LIMIT = 32 * 1024  # bytes read from one file at most
@@ -38,6 +40,7 @@ class Instructions:
     text: str  # the instructions part of the system prompt; "" when there is none
     files: tuple[InstructionFile, ...]  # outermost first; only files that exist with content
     budget: int | None  # tokens; None = no budget (only the 32 KB cap)
+    refused: tuple[str, ...] = ()  # "<label> (<reason>)" of files that were not read: a symlink or a protected path
 
     @property
     def tokens(self) -> int:
@@ -46,11 +49,12 @@ class Instructions:
     @property
     def key(self) -> tuple[tuple[str, str], ...]:
         """What a notice reports: the files and their states, not their sizes."""
-        return tuple((f.label, f.state) for f in self.files)
+        return (*((f.label, f.state) for f in self.files), *((entry, "refused") for entry in self.refused))
 
     def notice(self) -> tuple[Literal["info", "warn"], str] | None:
+        refused = ", ".join(escape(entry) for entry in self.refused)
         if not self.files:
-            return None
+            return ("warn", f"Instructions refused: {refused}") if refused else None
         entries = []
         for f in self.files:
             if f.state == "omitted":
@@ -62,8 +66,8 @@ class Instructions:
             else:
                 entries.append(f"{f.label} (~{f.tokens})")
         tail = f"~{self.tokens} tokens" if self.budget is None else f"~{self.tokens} of ~{self.budget} tokens"
-        level = "warn" if any(f.state != "whole" for f in self.files) else "info"
-        return level, f"Instructions: {', '.join(entries)} · {tail}"
+        level = "warn" if refused or any(f.state != "whole" for f in self.files) else "info"
+        return level, f"Instructions: {', '.join(entries)} · {tail}" + (f"; refused: {refused}" if refused else "")
 
 
 def levels(workspace: Path) -> list[tuple[str, Path]]:
@@ -94,11 +98,13 @@ def fingerprint(path: Path) -> tuple[int, int] | None:
     return (info.st_size, info.st_mtime_ns) if stat.S_ISREG(info.st_mode) else None
 
 
-def read_head(path: Path, limit: int) -> tuple[bytes, int] | None:
-    """Up to `limit` bytes of a regular file and its size; None for anything else (FIFO, device, directory)."""
+def read_head(path: Path, limit: int, *, nofollow: bool = False) -> tuple[bytes, int] | None:
+    """Up to `limit` bytes of a regular file and its size; None for anything else (FIFO, device, directory, and
+    with `nofollow` a symlink)."""
     try:
         # O_NONBLOCK so opening a FIFO returns at once; the fstat then rejects it (no TOCTOU).
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | (getattr(os, "O_NOFOLLOW", 0) if nofollow else 0)
+        fd = os.open(path, flags)
     except OSError:  # missing, unreadable
         return None
     try:
@@ -121,9 +127,22 @@ class _Read:
     original: int  # estimated tokens of the whole file
 
 
-def _read(label: str, path: Path) -> _Read | None:
+def _refusal(path: Path, paths: ProtectedPaths) -> str | None:
+    """Why `path` must not be read into the prompt: a symlink (it can point at anything) or a protected file. Never raises."""
     try:
-        head = read_head(path, AGENTS_MD_LIMIT + 1)
+        if stat.S_ISLNK(os.lstat(path).st_mode):
+            return "symlink"
+        return "protected path" if paths.is_protected(path.resolve()) else None
+    except (OSError, RuntimeError):  # missing, or not examinable: reading it fails the same way
+        return None
+
+
+def _read(label: str, path: Path, paths: ProtectedPaths) -> _Read | str | None:
+    """The file's text; the reason it was refused (a `str`); None when it is missing, empty or not a regular file."""
+    if (reason := _refusal(path, paths)) is not None:
+        return f"{label} ({reason})"
+    try:
+        head = read_head(path, AGENTS_MD_LIMIT + 1, nofollow=True)
     except OSError:
         return None
     if head is None:
@@ -151,9 +170,20 @@ def _omitted_line(label: str) -> str:
     return f"[{label} omitted: no room in the instruction budget]"
 
 
-def load_instructions(workspace: Path, budget: int | None) -> Instructions:
-    """Read every level and fit the files into `budget` tokens; the workspace's file gets room first."""
-    found = [r for label, path in levels(workspace) if (r := _read(label, path)) is not None]
+def load_instructions(workspace: Path, budget: int | None, paths: ProtectedPaths | None = None) -> Instructions:
+    """Read every level and fit the files into `budget` tokens; the workspace's file gets room first.
+
+    A symlinked file, or one that is a protected path (`paths`; the built-in ones by default), is not read: the
+    result names it in `refused`."""
+    paths = paths if paths is not None else ProtectedPaths(Path.home(), ())
+    found: list[_Read] = []
+    refused: list[str] = []
+    for label, path in levels(workspace):
+        read = _read(label, path, paths)
+        if isinstance(read, str):
+            refused.append(read)
+        elif read is not None:
+            found.append(read)
     sections: dict[str, str] = {}  # label -> text for whole / cut / omitted-line entries
     states: dict[str, State] = {}
     capped_only: set[str] = set()  # cut by the read cap alone, not by the budget
@@ -211,4 +241,4 @@ def load_instructions(workspace: Path, budget: int | None) -> Instructions:
         )
         for r in found
     )
-    return Instructions(text, files, budget)
+    return Instructions(text, files, budget, tuple(refused))

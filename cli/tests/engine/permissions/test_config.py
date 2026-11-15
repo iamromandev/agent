@@ -387,3 +387,20 @@ def test_the_file_is_private_to_the_user_when_created(tmp_path: Path) -> None:
     add_allow(path, "write")
 
     assert path.stat().st_mode & 0o077 == 0
+
+
+def test_the_parsed_top_level_object_is_kept_with_its_other_keys(tmp_path: Path) -> None:
+    _write(tmp_path / "s.json", {"permissions": {"allow": ["write"]}, "guardrails": {"protected": ["*.key"]}})
+
+    loaded = read_rules(tmp_path / "s.json")
+
+    assert loaded.data == {"permissions": {"allow": ["write"]}, "guardrails": {"protected": ["*.key"]}}
+
+
+def test_a_missing_or_unusable_file_has_no_data(tmp_path: Path) -> None:
+    (tmp_path / "bad.json").write_text("{nope")
+    (tmp_path / "list.json").write_text("[]")
+
+    assert read_rules(tmp_path / "missing.json").data is None
+    assert read_rules(tmp_path / "bad.json").data is None
+    assert read_rules(tmp_path / "list.json").data is None

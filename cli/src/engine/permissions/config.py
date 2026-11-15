@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import os
 import stat
@@ -42,6 +43,7 @@ class RuleFile:
     raw: bytes | None  # the exact bytes that were parsed; None if the file is missing or could not be read
     error: str | None  # unreadable, bad JSON, wrong shape or a symlink: the file contributes no rules at all
     list_errors: tuple[str, ...] = ()  # an `allow` or `deny` that is not a list of strings: only that list is lost
+    data: Mapping[str, object] | None = None  # the parsed top-level object (other keys, e.g. `guardrails`); None: no object
 
 
 def _failed(error: str, raw: bytes | None = None) -> RuleFile:
@@ -79,7 +81,7 @@ def read_rules(path: Path, *, follow_symlink: bool = False) -> RuleFile:
         return _failed("top level must be an object", raw)
     permissions = data.get("permissions", {})
     if not isinstance(permissions, dict):
-        return _failed('"permissions" must be an object', raw)
+        return dataclasses.replace(_failed('"permissions" must be an object', raw), data=data)
     invalid: list[tuple[str, str]] = []
     list_errors: list[str] = []
     parsed: dict[str, tuple[Rule, ...]] = {}
@@ -96,7 +98,7 @@ def read_rules(path: Path, *, follow_symlink: bool = False) -> RuleFile:
             except RuleError as exc:
                 invalid.append((text, str(exc)))
         parsed[name] = tuple(rules)
-    return RuleFile(parsed["allow"], parsed["deny"], tuple(invalid), raw, None, tuple(list_errors))
+    return RuleFile(parsed["allow"], parsed["deny"], tuple(invalid), raw, None, tuple(list_errors), data)
 
 
 def add_allow(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:

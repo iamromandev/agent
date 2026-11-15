@@ -8,6 +8,7 @@ import dataclasses
 import platform
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from pathlib import Path, PurePath
 from typing import Literal
 
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
@@ -36,6 +37,7 @@ from src.engine.events import (
     TurnEnded,
     UsageUpdate,
 )
+from src.engine.guardrails.setup import guard_of
 from src.engine.instructions import Instructions, load_instructions
 from src.engine.mode import Mode
 from src.engine.permissions.config import agent_config_files
@@ -237,7 +239,7 @@ class Agent:
     def instructions(self) -> Instructions:
         """The AGENTS.md files as they are on disk now, fitted to this model's window; remembered for `estimate`."""
         budget = int(self.instructions_share * self.provider.context_window)
-        self._loaded = loaded = load_instructions(self.ctx.workspace, budget)
+        self._loaded = loaded = load_instructions(self.ctx.workspace, budget, guard_of(self.ctx).paths)
         return loaded
 
     def forget_instructions_notice(self) -> None:
@@ -259,11 +261,20 @@ class Agent:
         skill_tool = next((t for t in self.tools if isinstance(t, SkillTool)), None)
         skills = skill_tool.skills.section() if skill_tool is not None else None
         if self.role == "task":
-            prompt = build_task_prompt(self.ctx.workspace, self.today(), platform.system(), loaded, skills=skills)
+            prompt = build_task_prompt(
+                self.ctx.workspace, self.today(), platform.system(), loaded, skills=skills, paths=guard_of(self.ctx).paths
+            )
             return Message("system", prompt)
         todo = any(t.name == "todo" for t in self.tools)
         prompt = build_system_prompt(
-            self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded, todo=todo, skills=skills
+            self.ctx.workspace,
+            mode,
+            self.today(),
+            platform.system(),
+            instructions=loaded,
+            todo=todo,
+            skills=skills,
+            paths=guard_of(self.ctx).paths,
         )
         return Message("system", prompt)
 
@@ -639,9 +650,13 @@ class Agent:
                 result = ToolResult(f"refused: {call.name} is unavailable in plan mode", True, "refused: plan mode")
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
+            elif isinstance(gate := await self._confirm_protected(tool, call), ToolResult):
+                result = gate
             else:
+                # `gate` is True when the user allowed this call to read a protected file: the tool's own check of
+                # the file it opens (a symlink may have changed since the path check) lets that one through.
                 call_ctx = dataclasses.replace(
-                    self.ctx, progress=lambda event: emit(TaskProgress(call.id, event))
+                    self.ctx, progress=lambda event: emit(TaskProgress(call.id, event)), protected_ok=gate
                 )
                 prepared = await tool.prepare(call.arguments, call_ctx)
                 if isinstance(prepared, ToolResult):
@@ -709,6 +724,44 @@ class Agent:
             if target == protected or (target.exists() and protected.exists() and target.samefile(protected)):
                 return True
         return False
+
+    def _protected_target(self, tool: Tool, call: ToolCall) -> Path | None:
+        """The protected file a read, a glob with a wildcard-free pattern or a grep of one file names, as the file
+        system sees it (symlinks, `~` and `..` resolved); None when the call names none, or it does not exist."""
+        args = call.arguments
+        raw: object
+        if tool.name in ("read", "grep"):
+            raw = args.get("path")
+        elif tool.name == "glob":
+            pattern, base = args.get("pattern"), args.get("path") or "."
+            if not isinstance(pattern, str) or not isinstance(base, str) or any(c in pattern for c in "*?["):
+                return None
+            raw = str(PurePath(base) / pattern)
+        else:
+            return None
+        if not isinstance(raw, str) or not raw:
+            return None
+        try:
+            target = resolve_path(self.ctx, raw)
+        except InvalidPath:
+            return None
+        return target if target.is_file() and guard_of(self.ctx).paths.is_protected(target) else None
+
+    async def _confirm_protected(self, tool: Tool, call: ToolCall) -> ToolResult | bool:
+        """Ask before a call reads a protected path, whatever the rules, grants and mode say (deny rules ran before):
+        only Allow once or Deny. Returns the refusal; else whether the user allowed a protected read (False: the call
+        names no protected file)."""
+        target = self._protected_target(tool, call)  # a few stat calls: cheap, like `_edits_agent_config`
+        if target is None:
+            return False
+        request = ApprovalRequest(
+            call.name, tool.label(call.arguments), None, False, None, protected=True, protected_path=str(target)
+        )
+        decision = await self.approver.ask(request)
+        if decision.choice in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # an Always is not offered: it counts as once
+            return True
+        note = f" Note: {decision.note}" if decision.note else ""
+        return ToolResult(f"User denied this call.{note}", True, "denied")
 
     async def _approve_and_run(
         self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode, emit: EventSink

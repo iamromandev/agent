@@ -96,10 +96,10 @@ def test_a_symlink_to_an_endless_device_is_skipped(tmp_path: Path) -> None:
     assert "AGENTS.md" not in _prompt(tmp_path)
 
 
-def test_a_symlink_to_a_regular_file_is_read(tmp_path: Path) -> None:
+def test_a_symlink_to_a_regular_file_is_not_read(tmp_path: Path) -> None:
     (tmp_path / "real.md").write_text("Use tabs\n")
     (tmp_path / "AGENTS.md").symlink_to("real.md")
-    assert "## AGENTS.md\nUse tabs" in _prompt(tmp_path)
+    assert "Use tabs" not in _prompt(tmp_path)
 
 
 def test_an_invalid_byte_mid_file_is_replaced_not_dropped(tmp_path: Path) -> None:
@@ -150,6 +150,20 @@ def test_passed_instructions_are_appended_instead_of_loading(tmp_path: Path) -> 
     prompt = build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Darwin", Instructions("## X\nhi", (), 10))
     assert prompt.endswith("\n\n## X\nhi")
     assert "from disk" not in prompt
+
+
+def test_the_fallback_load_uses_the_guards_protected_paths(tmp_path: Path) -> None:
+    from src.engine.guardrails.paths import ProtectedPaths
+
+    home = tmp_path / "home"
+    ws = home / "priv" / "ws"
+    ws.mkdir(parents=True)
+    (ws / "AGENTS.md").write_text("private rules")
+    paths = ProtectedPaths(home, ["~/priv/**"])
+
+    assert "private rules" in build_system_prompt(ws, Mode.BUILD, TODAY, "Darwin")
+    assert "private rules" not in build_system_prompt(ws, Mode.BUILD, TODAY, "Darwin", paths=paths)
+    assert "private rules" not in build_task_prompt(ws, TODAY, "Darwin", None, paths=paths)
 
 
 # --- build_init_prompt (R12) -----------------------------------------------------------------

@@ -40,7 +40,7 @@ DANGLING = re.compile(
     r"\x1b(?:\[[0-?]{0,64}[ -/]{0,16}|[\]PX^_]" + _STRING_BODY + r"\x1b?|[ -/]{1,16})?\Z"
 )
 _STRAY = re.compile(r"\x1b(?!\[[0-9;:]{0,64}m)")
-_SNIFF_BYTES = 8 * 1024
+SNIFF_BYTES = 8 * 1024
 
 
 def truncate(s: str, limit: int = TOOL_OUTPUT_LIMIT) -> str:
@@ -95,7 +95,12 @@ def truncate_ansi(s: str, limit: int = TOOL_OUTPUT_LIMIT) -> str:
 def is_binary(path: Path) -> bool:
     """True when the first 8 KB hold a NUL byte or are not UTF-8."""
     with path.open("rb") as handle:
-        head = handle.read(_SNIFF_BYTES)
+        head = handle.read(SNIFF_BYTES)
+    return head_is_binary(head)
+
+
+def head_is_binary(head: bytes) -> bool:
+    """`is_binary` for the first bytes of a file already read."""
     if b"\x00" in head:
         return True
     try:

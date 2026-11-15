@@ -598,3 +598,34 @@ def test_run_loads_the_custom_commands_of_the_launch_folder(monkeypatch: pytest.
     command = app.commands.get("review")
     assert command is not None and command.source == "project"
     assert app.commands.get("help") is None and len(app.commands.warnings) == 1
+
+
+def test_run_builds_one_guard_from_both_settings_files_and_shares_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "settings.json").write_text('{"guardrails": {"keepEnv": ["KEPT_TOKEN"], "protected": ["*.vault"]}}')
+    workspace = tmp_path / "ws"
+    (workspace / ".agent").mkdir(parents=True)
+    (workspace / ".agent" / "settings.json").write_text('{"guardrails": {"sandbox": {"enabled": false}, "protected": ["p/**"]}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    monkeypatch.setenv("KEPT_TOKEN", "kept-value-1")
+    get_settings.cache_clear()
+
+    try:
+        app = _run_app(monkeypatch, workspace)
+    finally:
+        get_settings.cache_clear()
+
+    guard = app.guard
+    assert app.agent.ctx.guard is guard
+    assert app.terminals is not None
+    assert app.terminals._guard is guard
+    assert "GITHUB_TOKEN" in guard.removed_env
+    assert "KEPT_TOKEN" not in guard.removed_env
+    assert guard.paths.extra_count == 2
+    (warning,) = [w for w in app._permission_warnings if "guardrails" in w]
+    assert "guardrails.sandbox.enabled can only be set in the global settings" in warning
+    assert "ghp_agentsecret1234" not in " ".join(app._permission_warnings)

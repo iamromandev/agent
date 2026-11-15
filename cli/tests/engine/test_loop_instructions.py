@@ -239,3 +239,16 @@ def test_forgetting_the_notice_makes_the_next_one_show_again(ws: Path) -> None:
     assert agent.instructions_notice() is None
     agent.forget_instructions_notice()
     assert agent.instructions_notice() is not None
+
+
+async def test_a_symlinked_file_is_not_sent_and_the_notice_says_so(ws: Path, tmp_path: Path) -> None:
+    (tmp_path / "creds").write_text("TOPSECRETVALUE")
+    (ws / "AGENTS.md").symlink_to(tmp_path / "creds")
+    agent, provider = _agent(ws)
+
+    notice = agent.instructions_notice()
+    await agent.run_turn("hi", Sink())
+
+    assert notice is not None and notice.level == "warn" and "AGENTS.md (symlink)" in notice.text
+    assert "TOPSECRETVALUE" not in _system(provider)
+    assert agent.instructions_notice() is None  # announced once
