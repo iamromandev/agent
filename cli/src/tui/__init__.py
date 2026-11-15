@@ -27,6 +27,8 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.agent.mcp.hub import McpHub
     from src.agent.mcp.setup import prepare
     from src.agent.mcp.trust import TrustStore, trust_store_path
+    from src.agent.permissions import setup as permission_setup
+    from src.agent.permissions.config import global_settings_path
     from src.agent.provider.ollama import OllamaProvider
     from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.agent.terminal.manager import TerminalManager
@@ -49,6 +51,13 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
         terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
         # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
+        # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
+        permissions = permission_setup.prepare(
+            root,
+            global_settings_path(),
+            TrustStore(trust_store_path(name="permission-trust.json")),
+            permission_setup.tool_keys(default_tools(terminals, fetcher=web)),  # to warn about rules that never apply
+        )
         mcp = McpHub(  # nothing starts yet
             SdkConnector(),
             root,
@@ -76,6 +85,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 extra_tools=mcp.tools,
                 task_tools=read_only_tools(web),
                 task_max_steps=settings.task_max_steps,
+                rules=permissions.rules,
             )
 
         async def close() -> None:
@@ -102,6 +112,8 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             terminals=terminals,
             mcp=mcp,
             mcp_trust=setup.remember,
+            permissions=permissions.rules,
+            permission_warnings=permissions.warnings,
         )
     except BaseException:
         asyncio.run(web.aclose())  # setup failed before the app could close it (no loop is running here)

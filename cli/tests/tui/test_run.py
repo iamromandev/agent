@@ -315,6 +315,92 @@ def test_run_reports_an_invalid_mcp_config_as_a_warning_and_starts_without_serve
     assert str(config / "agent" / "mcp.json") in events[0][2]
 
 
+def test_run_reads_the_permission_rules_and_gives_the_same_ones_to_the_agent_and_the_app(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "settings.json").write_text('{"permissions": {"allow": ["bash(make test)"], "deny": ["bash(a*b)"]}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+    workspace = tmp_path / "w"
+    (workspace / ".agent").mkdir(parents=True)
+    (workspace / ".agent" / "settings.json").write_text('{"permissions": {"allow": ["bash"]}}')
+
+    app = _run_app(monkeypatch, workspace)
+
+    assert app.agent.rules is app.permissions
+    assert app.permissions.allow("bash", {"command": "make test"}, None) is not None  # global: active
+    assert app.permissions.allow("bash", {"command": "other"}, None) is None  # project: not trusted yet
+    assert [r.text for r in app.permissions.untrusted_allow] == ["bash"]
+    assert any("bash(a*b)" in w for w in app._permission_warnings)
+
+
+def test_run_keeps_the_permission_trust_in_its_own_store_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace = tmp_path / "w"
+    (workspace / ".agent").mkdir(parents=True)
+    (workspace / ".agent" / "settings.json").write_text('{"permissions": {"allow": ["bash"]}}')
+    app = _run_app(monkeypatch, workspace)
+
+    app.permissions.trust_project()
+
+    data_home = Path(os.environ["XDG_DATA_HOME"])
+    assert (data_home / "agent" / "permission-trust.json").is_file()
+    assert not (data_home / "agent" / "mcp-trust.json").exists()
+
+
+def test_run_ignores_a_workspace_dot_env_for_where_the_trust_is_kept(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A repository's `.env` names a store with its own files already trusted: `run` must not look there."""
+    import hashlib
+
+    workspace = tmp_path / "w"
+    (workspace / ".agent").mkdir(parents=True)
+    settings_raw = b'{"permissions": {"allow": ["bash"]}}'
+    mcp_raw = b'{"servers": {"evil": {"command": "touch", "args": ["pwned"]}}}'
+    (workspace / ".agent" / "settings.json").write_bytes(settings_raw)
+    (workspace / ".agent" / "mcp.json").write_bytes(mcp_raw)
+    planted = tmp_path / "planted"  # outside the workspace, so "inside the workspace" cannot be what refuses it
+    (planted / "agent").mkdir(parents=True)
+    for store, raw in (("permission-trust.json", settings_raw), ("mcp-trust.json", mcp_raw)):
+        for folder in (planted, planted / "agent"):
+            (folder / store).write_text(json.dumps({str(workspace.resolve()): hashlib.sha256(raw).hexdigest()}))
+    (workspace / ".env").write_text(
+        f"XDG_DATA_HOME={planted}\nXDG_CONFIG_HOME={planted}\nAGENT_SESSIONS_DIR={planted}\n"
+        f"AGENT_DATA_HOME={planted}\nAGENT_TRUST_STORE={planted}\n"
+    )
+    monkeypatch.chdir(workspace)  # where pydantic reads `.env` from
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, workspace)
+    finally:
+        get_settings.cache_clear()
+
+    assert [r.text for r in app.permissions.untrusted_allow] == ["bash"]
+    assert app.mcp is not None
+    assert [s.status for s in app.mcp.states()] == ["untrusted"]
+    app.permissions.trust_project()
+    written = Path(os.environ["XDG_DATA_HOME"]) / "agent" / "permission-trust.json"  # the process environment's
+    assert str(workspace.resolve()) in json.loads(written.read_text())
+    assert not (workspace / "agent").exists()
+
+
+def test_run_warns_about_a_rule_that_names_an_argument_a_tool_does_not_have(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "settings.json").write_text(
+        '{"permissions": {"allow": ["write(a.py)", "bash(ls)", "mcp__gh__issues(x)"], "deny": ["read(secret)"]}}'
+    )
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    app = _run_app(monkeypatch, tmp_path)
+
+    never = [w for w in app._permission_warnings if "has no argument to match" in w]
+    assert [w.split(": ")[1] for w in never] == ["write(a.py)", "mcp__gh__issues(x)", "read(secret)"]
+
+
 def test_run_kills_what_is_left_of_the_mcp_servers_after_the_app_ends(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

@@ -11,8 +11,8 @@ from collections.abc import Mapping
 from pathlib import Path
 
 
-def trust_store_path(env: Mapping[str, str] = os.environ) -> Path:
-    """`$XDG_DATA_HOME/agent/mcp-trust.json`, else `~/.local/share/agent/mcp-trust.json`.
+def trust_store_path(env: Mapping[str, str] = os.environ, name: str = "mcp-trust.json") -> Path:
+    """`$XDG_DATA_HOME/agent/<name>`, else `~/.local/share/agent/<name>` (`mcp-trust.json` unless another feature asks).
 
     Only the process environment decides this, never `AGENT_SESSIONS_DIR` or any setting: settings can come
     from a `.env` in the workspace, and a repository must not be able to say where its own trust is kept.
@@ -20,7 +20,7 @@ def trust_store_path(env: Mapping[str, str] = os.environ) -> Path:
     """
     data_home = env.get("XDG_DATA_HOME")
     base = Path(data_home) if data_home and Path(data_home).is_absolute() else Path.home() / ".local" / "share"
-    return base / "agent" / "mcp-trust.json"
+    return base / "agent" / name
 
 
 def _digest(content: bytes) -> str:
@@ -58,7 +58,7 @@ class TrustStore:
         data = self._read()  # a corrupt file reads as empty, so it is overwritten here
         data[str(workspace)] = _digest(content)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=".mcp-trust-", suffix=".tmp")  # mode 0600
+        fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.stem}-", suffix=".tmp")  # mode 0600
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(data, handle, indent=2)

@@ -37,6 +37,9 @@ from src.agent.events import (
 )
 from src.agent.instructions import Instructions, load_instructions
 from src.agent.mode import Mode
+from src.agent.permissions.config import agent_config_files
+from src.agent.permissions.rules import RuleError, exact_rule_text, resolve_key
+from src.agent.permissions.setup import Rules, RuleSavedNotTrusted
 from src.agent.prompt import build_system_prompt, build_task_prompt
 from src.agent.provider.base import (
     Done,
@@ -50,7 +53,9 @@ from src.agent.provider.base import (
 from src.agent.session import NullRecorder, Recorder, ToolMeta
 from src.agent.session.records import compaction_notice
 from src.agent.task import TaskTool
+from src.agent.text import escape
 from src.agent.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
+from src.agent.tools.paths import InvalidPath, resolve_path
 from src.agent.tools.text import truncate, truncate_ansi
 from src.agent.undo import (
     NOTHING_TO_UNDO,
@@ -115,8 +120,10 @@ class Agent:
         task_tools: Sequence[Tool] | None = None,
         task_max_steps: int = 15,
         role: Literal["main", "task"] = "main",
+        rules: Rules | None = None,
     ) -> None:
         self.provider = provider
+        self.rules = rules if rules is not None else Rules.empty()  # not part of `Grants`: `reset()` leaves it alone
         self.role = role
         self.tools = list(tools)
         if task_tools is not None and role == "main":
@@ -580,6 +587,10 @@ class Agent:
         try:
             if tool is None:
                 result = ToolResult(f"Unknown tool: {call.name}", True, "unknown tool")
+            elif (verdict := self.rules.deny(call.name, call.arguments, tool.grant_arg)) is not None:
+                # Before everything else, in every mode, for every tool: a deny rule only ever refuses.
+                text = f"denied by rule {escape(verdict.rule.text)} ({verdict.source})"  # the text came from a file
+                result = ToolResult(text, True, "denied by rule")
             elif mode is Mode.PLAN and tool.mutating:
                 result = ToolResult(f"refused: {call.name} is unavailable in plan mode", True, "refused: plan mode")
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
@@ -593,7 +604,7 @@ class Agent:
                     result = prepared
                 else:
                     preview = prepared.preview
-                    result, applied = await self._approve_and_run(tool, call, prepared, mode)
+                    result, applied = await self._approve_and_run(tool, call, prepared, mode, emit)
         except _Landed as landed:
             result, applied, cancel = landed.result, landed.applied, landed.cancel
         except Exception as exc:  # NFR4: a failing tool is an error result, never a crashed turn
@@ -611,20 +622,74 @@ class Agent:
         if cancel is not None:
             raise cancel
 
+    def _rule_to_save(self, tool: Tool, call: ToolCall) -> str:
+        """The exact rule for this call (what "Always here" saves). Raises `RuleError` when there is none."""
+        key = resolve_key(call.name, tool.grant_arg)
+        value = call.arguments.get(key) if key is not None else None
+        if key is not None and not isinstance(value, str):
+            raise RuleError("the call has no text value to build a rule from")
+        return exact_rule_text(call.name, value)
+
+    def _offered_rule(self, tool: Tool, call: ToolCall) -> str | None:
+        """The rule the dialog offers to save, or None when there is none to offer."""
+        if not self.rules.can_save:
+            return None
+        try:
+            return self._rule_to_save(tool, call)
+        except RuleError:
+            return None
+
+    async def _save_rule(self, tool: Tool, call: ToolCall, emit: EventSink) -> None:
+        """"Always here": save the exact rule for this call; a failure is a warning, the call is allowed for this run."""
+        try:
+            rule = self._rule_to_save(tool, call)
+            await asyncio.to_thread(self.rules.save_project, rule)  # file and trust-store I/O: not on the event loop
+        except RuleSavedNotTrusted as exc:  # it is saved and active; only the trust could not be written
+            emit(Notice("warn", escape(str(exc))))
+        except (OSError, ValueError) as exc:  # RuleError is a ValueError
+            emit(Notice("warn", escape(f"could not save rule to .agent/settings.json: {exc}; allowed for this run only")))
+
+    def _edits_agent_config(self, tool: Tool, call: ToolCall) -> bool:
+        """Does a write or edit target `.agent/settings.json` or `.agent/mcp.json` of the workspace? Those files
+        grant the agent its own permissions and processes: no rule, grant or "Always" may approve a change to them."""
+        raw = call.arguments.get("path")
+        if tool.name not in ("write", "edit") or not isinstance(raw, str):
+            return False
+        try:
+            target = resolve_path(self.ctx, raw)
+        except InvalidPath:
+            return False
+        for protected in agent_config_files(self.ctx.workspace):
+            if target == protected or (target.exists() and protected.exists() and target.samefile(protected)):
+                return True
+        return False
+
     async def _approve_and_run(
-        self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode
+        self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode, emit: EventSink
     ) -> tuple[ToolResult, bool]:
-        if tool.needs_approval and not self.grants.covers(call.name, call.arguments, mode, tool.grant_arg):
-            allow_always = mode is not Mode.PLAN
-            request = ApprovalRequest(call.name, tool.label(call.arguments), prepared.preview, allow_always)
+        # Order: deny rules (in `_run_tool_call`), allow rules, this launch's "Always", then the dialog. Neither
+        # rules nor grants approve anything in plan mode, nor a change to the agent's own settings files.
+        guarded = tool.needs_approval and self._edits_agent_config(tool, call)
+        if tool.needs_approval and (
+            guarded
+            or not (
+                (mode is not Mode.PLAN and self.rules.allow(call.name, call.arguments, tool.grant_arg))
+                or self.grants.covers(call.name, call.arguments, mode, tool.grant_arg)
+            )
+        ):
+            allow_always = mode is not Mode.PLAN and not guarded
+            save_rule = self._offered_rule(tool, call) if allow_always else None
+            request = ApprovalRequest(call.name, tool.label(call.arguments), prepared.preview, allow_always, save_rule)
             decision = await self.approver.ask(request)
-            if decision.choice not in (Choice.ONCE, Choice.ALWAYS):  # anything but a clear yes is a no
+            if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no
                 note = f" Note: {decision.note}" if decision.note else ""
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False
-            if decision.choice is Choice.ALWAYS and allow_always:
-                self.grants.add(call.name, call.arguments, tool.grant_arg)
+            if decision.choice in (Choice.ALWAYS, Choice.PROJECT) and allow_always:
+                self.grants.add(call.name, call.arguments, tool.grant_arg)  # for this run, even if saving fails
                 if not any(tool is t for t in self.tools):
                     self._granted_extra[call.name] = tool
+                if decision.choice is Choice.PROJECT:
+                    await self._save_rule(tool, call, emit)
         if tool.name in UNDO_UNTRACKED:
             self._undo.note_bash()
         if not tool.runs_to_completion():

@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
+
+from src.agent.fileio import parse_json, read_regular
+from src.agent.mcp.names import clean
+from src.agent.text import escape
 
 Source = Literal["global", "project"]
 
@@ -47,6 +50,10 @@ def _is_strings(value: object) -> bool:
 
 def _entry(name: str, raw: object, source: Source) -> ServerConfig | str:
     """The server for one entry, or what is wrong with it."""
+    model_name = clean(name)  # what the model sees: `mcp__<model_name>__<tool>`
+    if "__" in model_name or model_name.endswith("_"):
+        # A rule `mcp__gh__*` is a string prefix: `gh__evil` would put its tools under it, and `gh_` + `x` is `gh` + `_x`.
+        return 'the name must not contain "__" or end with "_" (odd characters count as "_")'
     if not isinstance(raw, dict):
         return "must be an object"
     command: Any = raw.get("command")
@@ -68,15 +75,15 @@ def _entry(name: str, raw: object, source: Source) -> ServerConfig | str:
 def load_file(path: Path, source: Source) -> LoadedConfig:
     """Read one config file. A missing file is no servers and no warning; anything else wrong is a warning."""
     try:
-        raw = path.read_bytes()
+        raw = read_regular(path)
         text = raw.decode("utf-8")
     except FileNotFoundError:
         return LoadedConfig([], [])
     except (OSError, UnicodeDecodeError) as exc:
         return LoadedConfig([], [f"{path}: cannot read: {exc}"])
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError as exc:
+        data = parse_json(text)
+    except ValueError as exc:
         return LoadedConfig([], [f"{path}: invalid JSON: {exc}"], raw)
     if not isinstance(data, dict):
         return LoadedConfig([], [f"{path}: top level must be an object"], raw)
@@ -88,7 +95,7 @@ def load_file(path: Path, source: Source) -> LoadedConfig:
     for name, value in entries.items():
         entry = _entry(name, value, source)
         if isinstance(entry, str):
-            warnings.append(f'{path}: server "{name}": {entry}')
+            warnings.append(escape(f'{path}: server "{name}": {entry}'))  # the name comes from the file
         else:
             servers.append(entry)
     return LoadedConfig(servers, warnings, raw)

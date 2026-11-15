@@ -15,6 +15,7 @@ from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
 from src.agent.approval import ApprovalRequest, Choice, Decision
+from src.agent.text import escape
 from src.tui.styles import TOOL_NAME, diff_theme
 
 
@@ -25,6 +26,12 @@ def _title(what: str) -> Text:
     text.append(name, TOOL_NAME)
     text.append(f"{space}{rest}?")
     return text
+
+
+def _save_label(tool: str, rule: str) -> str:
+    """The "Always here" option: the rule it writes to `.agent/settings.json`, or "every <tool> call" for a bare tool."""
+    what = f"every {escape(tool)} call" if rule == tool else escape(rule)
+    return f"Always here: {what}"
 
 
 class ApprovalScreen(ModalScreen[Decision | None]):
@@ -67,6 +74,9 @@ class ApprovalScreen(ModalScreen[Decision | None]):
             options = [Option("Allow once", id="once")]
             if request.allow_always:
                 options.append(Option("Always", id="always"))
+            if request.save_rule is not None:
+                # Says what it saves: the rule comes from the call, so it is escaped and never read as markup.
+                options.append(Option(Text(_save_label(request.tool, request.save_rule)), id="project"))
             options.append(Option("Deny…", id="deny"))
             yield OptionList(*options)
             yield Input(placeholder="Note for the model (optional), Enter to deny", id="note")
@@ -84,6 +94,8 @@ class ApprovalScreen(ModalScreen[Decision | None]):
                 self.dismiss(Decision(Choice.ONCE))
             case "always" if self.request.allow_always:
                 self.dismiss(Decision(Choice.ALWAYS))
+            case "project" if self.request.allow_always and self.request.allow_save:
+                self.dismiss(Decision(Choice.PROJECT))
             case "deny":
                 note = self.query_one(Input)
                 note.add_class("-visible")

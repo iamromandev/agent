@@ -7,7 +7,7 @@ import contextlib
 import functools
 import signal
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -40,6 +40,7 @@ from src.agent.loop import close_recorder
 from src.agent.mcp.hub import HubEvent, McpHub
 from src.agent.mcp.names import tool_name
 from src.agent.mode import Mode
+from src.agent.permissions.setup import Rules
 from src.agent.prompt import build_init_prompt
 from src.agent.provider.base import Provider
 from src.agent.session import (
@@ -52,17 +53,19 @@ from src.agent.session import (
     SessionWriteError,
 )
 from src.agent.terminal.manager import TerminalError, TerminalManager
+from src.agent.text import escape
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
+from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, McpTrustScreen)  # modal screens: the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, SessionPicker, McpTrustScreen, PermissionTrustScreen)  # modal screens: the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -87,7 +90,7 @@ HELP = (
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · /new or /clear new session · "
-    "/sessions switch session · /mcp MCP servers and their tools · "
+    "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
     "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
@@ -124,12 +127,16 @@ class AgentApp(App[None]):
         terminals: TerminalManager | None = None,
         mcp: McpHub | None = None,
         mcp_trust: Callable[[], None] | None = None,
+        permissions: Rules | None = None,
+        permission_warnings: Sequence[str] = (),
     ) -> None:
         super().__init__()
         self._on_close = on_close
         self.terminals = terminals
         self.mcp = mcp
         self._mcp_trust = mcp_trust  # remembers that the user trusted the project's servers
+        self.permissions = permissions if permissions is not None else Rules.empty()
+        self._permission_warnings = tuple(permission_warnings)
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -194,6 +201,7 @@ class AgentApp(App[None]):
         finally:
             self._switching = False
             self._start_mcp()  # after the session is drawn: a redraw would wipe the servers' notices
+            self._start_trust()
 
     def _start_mcp(self) -> None:
         """Start the configured MCP servers in the background; their events become notices."""
@@ -201,8 +209,36 @@ class AgentApp(App[None]):
             return
         self.mcp.listen(self._post_mcp_event)
         self.mcp.start()  # never the untrusted ones
-        if self.mcp.untrusted():
-            self.run_worker(self._ask_mcp_trust(), group="mcp-trust")
+
+    def _start_trust(self) -> None:
+        """One worker for everything to show or ask at launch: the permission warnings, then the MCP prompt, then
+        the permission prompt. One after the other, so two prompts never overlap."""
+        if self._permission_warnings or self.permissions.untrusted_allow or (self.mcp is not None and self.mcp.untrusted()):
+            self.run_worker(self._ask_trust(), group="trust")
+
+    async def _ask_trust(self) -> None:
+        transcript = self.query_one(Transcript)
+        for warning in self._permission_warnings:
+            await transcript.add_notice("warn", warning)
+        if self.mcp is not None and self.mcp.untrusted():
+            await self._ask_mcp_trust()
+        await self._ask_permission_trust()
+
+    async def _ask_permission_trust(self) -> None:
+        """Ask once whether to trust the project's allow rules; only a yes turns them on."""
+        rules = self.permissions.untrusted_allow
+        if not rules:
+            return
+        self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
+        trusted = await self.push_screen_wait(PermissionTrustScreen(rules))
+        transcript = self.query_one(Transcript)
+        if not trusted:
+            await transcript.add_notice("info", "project permission rules not trusted: allow rules are off for this run")
+            return
+        try:
+            await asyncio.to_thread(self.permissions.trust_project)  # writes the trust store: not on the event loop
+        except OSError as exc:  # the rules are on for this run; it will ask again next time
+            await transcript.add_notice("warn", escape(f"permissions: could not remember the trust: {exc}"))
 
     async def _ask_mcp_trust(self) -> None:
         """Ask once whether to start the project's MCP servers; only a yes starts them."""
@@ -392,7 +428,7 @@ class AgentApp(App[None]):
             and not event.is_forwarded
             and event.key != "ctrl+c"  # it interrupts: it never approves
             and time.monotonic() < self._keys_ignored_until
-            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen | McpTrustScreen)  # empty on shutdown
+            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen | McpTrustScreen | PermissionTrustScreen)  # empty on shutdown
         ):
             event.stop()
             return
@@ -613,6 +649,9 @@ class AgentApp(App[None]):
                 await transcript.add_notice("info", HELP)
             case "/mcp":
                 await transcript.add_notice("info", self._mcp_summary())
+            case "/permissions":
+                lines = self.permissions.listing()
+                await transcript.add_notice("info", "\n".join(lines) if lines else "no permission rules")
             case "/quit":
                 self.exit()
             case "/sessions":

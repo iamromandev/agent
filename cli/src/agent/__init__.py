@@ -11,3 +11,4 @@ from .events import UsageUpdate as UsageUpdate
 from .loop import Agent as Agent
 from .loop import AgentBusy as AgentBusy
 from .mode import Mode as Mode
+from .permissions.setup import Rules as Rules

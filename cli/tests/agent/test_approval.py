@@ -10,7 +10,7 @@ def test_mode_values() -> None:
 
 
 def test_choice_values() -> None:
-    assert [c.value for c in Choice] == ["once", "always", "deny"]
+    assert [c.value for c in Choice] == ["once", "always", "project", "deny"]
     assert Decision(Choice.DENY).note == ""
 
 
