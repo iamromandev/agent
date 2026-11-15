@@ -45,7 +45,7 @@ def _text(terminal: Terminal) -> str:
 
 
 async def test_the_terminal_tools_are_added_only_with_a_manager(manager: TerminalManager) -> None:
-    base = ["read", "glob", "grep", "write", "edit", "bash"]
+    base = ["read", "glob", "grep", "write", "edit", "bash", "todo"]
 
     assert [t.name for t in default_tools()] == base
     assert [t.name for t in default_tools(manager)] == [*base, "term_start", "term_read", "term_stop"]

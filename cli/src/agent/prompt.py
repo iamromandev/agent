@@ -21,6 +21,12 @@ _GUIDANCE = (
     "Be concise."
 )
 
+_TODO = (
+    "For a task with three or more steps, keep a checklist with the todo tool: send the whole list each time, "
+    "keep exactly one item in_progress, and mark items done as soon as they are finished. "
+    "Don't use it for simple one-step requests."
+)
+
 _TASK_ROLE = (
     "You are a research subagent. Investigate the task with the read-only tools you have. "
     "You cannot change files or run commands. Finish with a concise report for another agent: "
@@ -31,13 +37,20 @@ _PLAN = "You are in PLAN mode: do not modify files; write/edit are unavailable. 
 
 
 def build_system_prompt(
-    workspace: Path, mode: Mode, today: date, os_name: str, instructions: Instructions | None = None
+    workspace: Path,
+    mode: Mode,
+    today: date,
+    os_name: str,
+    instructions: Instructions | None = None,
+    todo: bool = False,
 ) -> str:
     parts = [
         _ROLE,
         f"Workspace: {workspace}\nMode: {mode.value}\nOS: {os_name}\nDate: {today.isoformat()}",
         _GUIDANCE,
     ]
+    if todo:
+        parts.append(_TODO)
     if mode is Mode.PLAN:
         parts.append(_PLAN)
     if instructions is None:

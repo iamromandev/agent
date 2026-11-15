@@ -35,6 +35,9 @@ from tests.fakes import BlockingApprover, Gate, MemoryRecorder, RecordingApprove
 
 TODAY = date(2026, 11, 12)
 
+# The system prompt and tool specs alone take about 1,150 tokens, so the window must be above that.
+WINDOW = 2000
+
 
 @pytest.fixture(autouse=True)
 def _posix_sh(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -81,7 +84,7 @@ def make_agent(
     max_steps: int = 25,
     extra_tools: list[Tool] | None = None,
 ) -> tuple[Agent, ScriptedProvider, MemoryRecorder]:
-    provider = ScriptedProvider(script)
+    provider = ScriptedProvider(script, context_window=WINDOW)
     recorder = recorder if recorder is not None else MemoryRecorder()
     agent = Agent(
         provider,
@@ -662,7 +665,7 @@ async def test_done_sets_the_reported_count_and_emits_a_real_usage_update(ctx: T
 
     await agent.run_turn("q", events)
 
-    assert events.of(UsageUpdate) == [UsageUpdate(823, 1000, estimated=False)]
+    assert events.of(UsageUpdate) == [UsageUpdate(823, WINDOW, estimated=False)]
     assert agent._reported == Reported(823, 2)  # the user message plus the assistant reply
 
 

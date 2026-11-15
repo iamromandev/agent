@@ -4,6 +4,7 @@ from .events import Compacting as Compacting
 from .events import EventSink as EventSink
 from .events import Notice as Notice
 from .events import TaskProgress as TaskProgress
+from .events import TodosChanged as TodosChanged
 from .events import ToolFinished as ToolFinished
 from .events import ToolStarted as ToolStarted
 from .events import TurnEnded as TurnEnded

@@ -28,6 +28,7 @@ from src.agent import (
     EventSink,
     Notice,
     TaskProgress,
+    TodosChanged,
     ToolFinished,
     ToolStarted,
     TurnEnded,
@@ -66,6 +67,7 @@ from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
+from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
 DIALOGS = (ApprovalScreen, SessionPicker, McpTrustScreen, PermissionTrustScreen)  # modal screens: the app's own keys leave them alone
@@ -186,6 +188,7 @@ class AgentApp(App[None]):
         yield Transcript(id="transcript")
         if self.terminals is not None:
             yield TerminalPane(self.terminals)
+        yield TodoPanel(id="todos")
         yield CommandSuggestions(id="suggestions")  # above the input
         yield ChatInput(id="input")
         yield StatusBar()
@@ -426,10 +429,13 @@ class AgentApp(App[None]):
         try:
             if self._turn_active:  # a turn started while the file was read
                 raise AgentBusy
-            old = self.agent.reset(recorder=recorder, history=loaded.history, tool_meta=loaded.tool_meta)
+            old = self.agent.reset(
+                recorder=recorder, history=loaded.history, tool_meta=loaded.tool_meta, todos=loaded.todos
+            )
         except AgentBusy:
             await self._refuse_switch()
             return
+        self.query_one(TodoPanel).show(self.agent.todos)
         await self._close_old(old)
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
@@ -708,6 +714,7 @@ class AgentApp(App[None]):
                 except AgentBusy:
                     await transcript.add_notice("warn", self._busy_text(name))
                     return
+                self.query_one(TodoPanel).show(self.agent.todos)
                 self._switching = True  # no message is accepted until the notice is back in the new transcript
                 try:
                     await self._close_old(old)
@@ -823,6 +830,7 @@ class AgentApp(App[None]):
             status.busy = False
         if prompt is not None:
             await transcript.remove_last_turn()
+            self.query_one(TodoPanel).show(self.agent.todos)
             self._restore_draft(prompt)
             status.used = self.agent.estimate()
             status.estimated = True
@@ -965,6 +973,8 @@ class AgentApp(App[None]):
                         await entry.finish_child(child_id, result)
                     case Notice("warn" | "info" as level, text):  # an error ends the call: its result shows it
                         await transcript.add_notice(level, f"task: {text}")
+            case TodosChanged(items):
+                self.query_one(TodoPanel).show(items)
             case Compacting(active):
                 status.compacting = active
             case UsageUpdate(used, window, estimated):

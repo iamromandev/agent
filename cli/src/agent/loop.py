@@ -30,6 +30,7 @@ from src.agent.events import (
     EventSink,
     Notice,
     TaskProgress,
+    TodosChanged,
     ToolFinished,
     ToolStarted,
     TurnEnded,
@@ -54,6 +55,7 @@ from src.agent.session import NullRecorder, Recorder, ToolMeta
 from src.agent.session.records import compaction_notice
 from src.agent.task import TaskTool
 from src.agent.text import escape
+from src.agent.todo import INTERRUPTED, NOT_COMPLETED, SKIPPED, TodoItem, active, current_todos, render_note
 from src.agent.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
 from src.agent.tools.paths import InvalidPath, resolve_path
 from src.agent.tools.text import truncate, truncate_ansi
@@ -67,9 +69,6 @@ from src.agent.undo import (
     undo_notices,
 )
 
-INTERRUPTED = "Interrupted by user"
-SKIPPED = "Skipped: the turn was interrupted before this call ran"
-NOT_COMPLETED = "Not completed: the turn ended with an internal error"
 # Marks a partial assistant message that a cancel cut short, so the model does not take it for a
 # complete answer on the next turn.
 PARTIAL_MARK = "\n[interrupted by user]"
@@ -148,9 +147,11 @@ class Agent:
         self.today = today
         self.mode = Mode.BUILD
         self.history: list[Message] = []  # no system message; the prompt is rebuilt per request
+        self.todo_base: tuple[TodoItem, ...] = ()  # the list before the history's first todo call (kept by compaction)
         self.grants = Grants()
         self.tool_meta: dict[str, ToolMeta] = {}  # by tool_call_id: how each tool message is shown and pruned
         self._recorder: Recorder = recorder if recorder is not None else NullRecorder()
+        self._todos_cache: tuple[tuple[int, Message | None, tuple[TodoItem, ...]], tuple[TodoItem, ...]] | None = None
         self._reported: Reported | None = None  # the model's own count after its last reply
         self._save_error: str | None = None  # a write failure not yet shown to the UI
         self._save_failing = False  # inside a failure streak: no new notice until a write succeeds
@@ -173,6 +174,7 @@ class Agent:
         recorder: Recorder,
         history: Sequence[Message] = (),
         tool_meta: Mapping[str, ToolMeta] | None = None,
+        todos: Sequence[TodoItem] = (),
     ) -> Recorder | None:
         """Start over with `history` (a new session, or a resumed one): BUILD mode, no grants.
 
@@ -185,6 +187,7 @@ class Agent:
         old = self._recorder if recorder is not self._recorder else None
         self._recorder = recorder
         self.history = list(history)
+        self.todo_base = tuple(todos)
         self.tool_meta = dict(tool_meta or {})
         self.mode = Mode.BUILD
         self.grants = Grants()
@@ -196,6 +199,26 @@ class Agent:
         self._undo.clear()
         return old
 
+    @property
+    def todos(self) -> tuple[TodoItem, ...]:
+        """The todo list as the history leaves it (see `current_todos`)."""
+        history = self.history
+        last = history[-1] if history else None
+        key = (len(history), last, self.todo_base)
+        cached = self._todos_cache
+        if cached is not None and cached[0][0] == key[0] and cached[0][1] is last and cached[0][2] == key[2]:
+            return cached[1]
+        found = current_todos(history, self.todo_base)
+        self._todos_cache = (key, found)
+        return found
+
+    def _todo_note(self) -> Message | None:
+        """The reminder of the list for a request: the main agent only, and only while something is left to do."""
+        todos = self.todos
+        if self.role != "main" or not active(todos):
+            return None
+        return Message("system", render_note(todos))
+
     def close(self) -> None:
         """Release the recorder (one last attempt to write what is queued). Never raises."""
         close_recorder(self._recorder)
@@ -204,7 +227,11 @@ class Agent:
         """Tokens the next request would use: the model's last count plus a guess for what came after."""
         specs = [t.spec() for t in self.tools_for(self.mode)]
         loaded = self._loaded if self._loaded is not None else self.instructions()
-        return estimate_tokens(self._system(self.mode, loaded), self.history, self._reported, specs)
+        total = estimate_tokens(self._system(self.mode, loaded), self.history, self._reported, specs)
+        if self._reported is not None:
+            return total  # the model's count already includes the note it was sent
+        note = self._todo_note()
+        return total + message_tokens(note) if note is not None else total
 
     def instructions(self) -> Instructions:
         """The AGENTS.md files as they are on disk now, fitted to this model's window; remembered for `estimate`."""
@@ -230,7 +257,10 @@ class Agent:
         loaded = instructions if instructions is not None else self.instructions()
         if self.role == "task":
             return Message("system", build_task_prompt(self.ctx.workspace, self.today(), platform.system(), loaded))
-        prompt = build_system_prompt(self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded)
+        todo = any(t.name == "todo" for t in self.tools)
+        prompt = build_system_prompt(
+            self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded, todo=todo
+        )
         return Message("system", prompt)
 
     def _record(self, message: Message, meta: ToolMeta | None = None) -> None:
@@ -325,6 +355,7 @@ class Agent:
                 with contextlib.suppress(Exception):  # nor replace a cancel
                     emit(Compacting(False))
             if text:
+                self.todo_base = self.todos  # the summarized calls leave the history: keep their list (R12)
                 self.history[:] = [Message("user", SUMMARY_PREFIX + text), *self.history[cut:]]
                 self._reported = None  # the summary request's own Done is never kept as the count
                 summarized = older
@@ -467,6 +498,8 @@ class Agent:
                 self._reported = None
             self._save(lambda: self._recorder.undo(turn.start))
             self._flush_save_error(emit)
+            with contextlib.suppress(Exception):  # a status signal: a sink that raises must not break the undo
+                emit(TodosChanged(self.todos))
             if cancel is not None:
                 raise cancel
             if result is None:
@@ -537,13 +570,20 @@ class Agent:
         """
         system = self._system(mode)
         specs = [t.spec() for t in self.tools_for(mode)]
+        messages = [system, *self.history]
+        if (note := self._todo_note()) is not None:
+            # Just before the latest user message: the model reads it next to what it is asked now.
+            # Trade-off: the note changes the request prefix after it, so a provider's prompt cache
+            # is reused only up to here; placing it last would keep the cache but sit apart from the question.
+            last_user = max((i for i, m in enumerate(messages) if m.role == "user"), default=len(messages))
+            messages.insert(last_user, note)
         parts: list[str] = []
         calls: list[ToolCall] = []
         # aclosing so that leaving the loop early (cancel, error) closes the provider stream now
         failure: str | None = None
         total: int | None = None
         try:
-            async with contextlib.aclosing(self.provider.stream([system, *self.history], specs)) as events:
+            async with contextlib.aclosing(self.provider.stream(messages, specs)) as events:
                 async for event in events:
                     match event:
                         case TextDelta(text):
@@ -619,6 +659,8 @@ class Agent:
         self._inflight = None
         self._flush_save_error(emit)
         emit(ToolFinished(call.id, result, preview, applied))
+        if call.name == "todo" and not result.is_error:
+            emit(TodosChanged(self.todos))
         if cancel is not None:
             raise cancel
 

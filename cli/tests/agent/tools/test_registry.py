@@ -5,8 +5,14 @@ from src.agent.tools import default_tools, read_only_tools
 from tests.fakes import FakeFetcher
 
 
-def test_default_tools_are_exactly_the_six_in_order() -> None:
-    assert [t.name for t in default_tools()] == ["read", "glob", "grep", "write", "edit", "bash"]
+def test_default_tools_are_exactly_the_seven_in_order() -> None:
+    assert [t.name for t in default_tools()] == ["read", "glob", "grep", "write", "edit", "bash", "todo"]
+
+
+def test_todo_needs_no_approval_and_is_not_mutating() -> None:
+    todo = next(t for t in default_tools() if t.name == "todo")
+    assert not todo.needs_approval and not todo.mutating
+    assert todo.spec().parameters["required"] == ["items"]
 
 
 def test_default_tools_returns_fresh_instances() -> None:
@@ -23,6 +29,8 @@ def test_only_write_edit_and_bash_need_approval() -> None:
 
 def test_every_spec_is_an_object_schema_with_required_properties() -> None:
     for tool in default_tools():
+        if tool.name == "todo":  # its one property is an array of objects: see the test below
+            continue
         spec = tool.spec()
         assert spec.name == tool.name
         assert spec.description
@@ -40,7 +48,7 @@ def test_web_fetch_is_added_last_only_with_a_fetcher() -> None:
 
     tools = default_tools(fetcher=FakeFetcher())
     assert [t.name for t in tools][-1] == "web_fetch"
-    assert len(tools) == 7
+    assert len(tools) == 8
     web = tools[-1]
     assert web.needs_approval and not web.mutating
     assert web.spec().parameters["required"] == ["url"]
@@ -55,4 +63,17 @@ def test_read_only_tools_are_read_glob_grep_and_web_fetch_with_a_fetcher() -> No
 def test_no_read_only_tool_mutates_or_runs_commands() -> None:
     tools = read_only_tools(FakeFetcher())
     assert not any(t.mutating for t in tools)
-    assert {t.name for t in tools}.isdisjoint({"write", "edit", "bash", "task"})
+    assert {t.name for t in tools}.isdisjoint({"write", "edit", "bash", "task", "todo"})
+
+
+def test_todo_items_schema_is_an_array_of_objects_with_content_and_status() -> None:
+    todo = next(t for t in default_tools() if t.name == "todo")
+    parameters = todo.spec().parameters
+    items = parameters["properties"]["items"]
+
+    assert parameters["type"] == "object" and set(parameters["properties"]) == {"items"}
+    assert items["type"] == "array" and items["description"]
+    assert items["items"]["type"] == "object"
+    assert items["items"]["required"] == ["content", "status"]
+    assert items["items"]["properties"]["content"]["type"] == "string"
+    assert items["items"]["properties"]["status"] == {"type": "string", "enum": ["pending", "in_progress", "done"]}
