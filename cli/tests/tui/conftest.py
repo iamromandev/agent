@@ -21,8 +21,9 @@ from src.agent.session import (
     workspace_dir,
 )
 from src.agent.terminal.manager import TerminalManager
-from src.agent.tools import default_tools
+from src.agent.tools import default_tools, read_only_tools
 from src.agent.tools.base import ToolContext
+from src.agent.web import Fetcher
 from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
@@ -92,6 +93,8 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         terminals: bool | TerminalManager = False,
         mcp: McpHub | None = None,
         mcp_trust: Callable[[], None] | None = None,
+        task: bool = False,
+        task_fetcher: Fetcher | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -119,6 +122,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 compact_at=compact_at,
                 compact_keep_turns=compact_keep_turns,
                 extra_tools=mcp.tools if mcp is not None else None,
+                task_tools=read_only_tools(task_fetcher) if task else None,
             )
 
         return AgentApp(

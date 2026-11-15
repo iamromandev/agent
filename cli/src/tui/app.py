@@ -26,6 +26,7 @@ from src.agent import (
     Compacting,
     EventSink,
     Notice,
+    TaskProgress,
     ToolFinished,
     ToolStarted,
     TurnEnded,
@@ -820,14 +821,24 @@ class AgentApp(App[None]):
                 if self._finished_since_toggle:  # text after a tool result: a new request has started
                     status.pending_mode = False
                 await transcript.write_assistant(delta)
-            case ToolStarted(call_id, label):
-                await transcript.add_tool(call_id, label)
+            case ToolStarted(call_id, label, task):
+                await transcript.add_tool(call_id, label, task=task)
             case ToolFinished(call_id, result, preview, applied):
                 self._finished_since_toggle = True
                 if (entry := transcript.tool(call_id)) is not None:
                     await entry.finish(result, preview, applied)
             case Notice(level, text):
                 await transcript.add_notice(level, text)
+            case TaskProgress(call_id, inner):
+                # The child's usage and compaction are not the parent's: the status bar keeps the parent's context.
+                entry = transcript.tool(call_id)  # None: the block is gone (undone, cleared); its progress is dropped
+                match inner:
+                    case ToolStarted(child_id, label) if entry is not None:
+                        await entry.add_child(child_id, label)
+                    case ToolFinished(child_id, result, _, _) if entry is not None:
+                        await entry.finish_child(child_id, result)
+                    case Notice("warn" | "info" as level, text):  # an error ends the call: its result shows it
+                        await transcript.add_notice(level, f"task: {text}")
             case Compacting(active):
                 status.compacting = active
             case UsageUpdate(used, window, estimated):

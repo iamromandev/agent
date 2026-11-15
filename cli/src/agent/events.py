@@ -18,6 +18,7 @@ class AssistantText:
 class ToolStarted:
     call_id: str
     label: str
+    task: bool = False  # a `task` call: the UI shows it as a block that unfolds while it runs
 
 
 @dataclass(frozen=True)
@@ -53,5 +54,15 @@ class TurnEnded:
     status: Literal["done", "interrupted", "step_limit", "error"]
 
 
-AgentEvent = AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded
+@dataclass(frozen=True)
+class TaskProgress:
+    """An event of the child agent of a `task` call, tagged with the parent's call."""
+
+    call_id: str  # the parent's task call
+    event: AgentEvent  # ToolStarted, ToolFinished, Notice, UsageUpdate or Compacting of the child
+
+
+AgentEvent = (
+    AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded | TaskProgress
+)
 EventSink = Callable[[AgentEvent], None]

@@ -776,3 +776,27 @@ async def test_an_emit_that_always_raises_does_not_escape_run_turn(ctx: ToolCont
         raise RuntimeError("ui is gone")
 
     await agent.run_turn("q", emit)  # must not raise
+
+
+
+async def test_a_tool_gets_a_progress_sink_that_wraps_events_with_its_call_id(ctx: ToolContext) -> None:
+    from src.agent.events import TaskProgress
+
+    class Reporter(Tool):
+        name: ClassVar[str] = "reporter"
+        description: ClassVar[str] = "reports progress"
+        parameters: ClassVar[dict[str, Any]] = {"type": "object", "properties": {}, "required": []}
+
+        async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
+            assert ctx.progress is not None
+            ctx.progress(Notice("info", "inner"))
+            return ToolResult("ok", False, "ok")
+
+    provider = ScriptedProvider(
+        [[ToolCallEvent(ToolCall("c9", "reporter", {})), Done(1, 1)], [TextDelta("done"), Done(1, 1)]]
+    )
+    agent = Agent(provider, [Reporter()], RecordingApprover(), ctx, 5)
+    events: list[AgentEvent] = []
+    await agent.run_turn("go", events.append)
+
+    assert TaskProgress("c9", Notice("info", "inner")) in events

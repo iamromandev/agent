@@ -23,6 +23,10 @@ class Settings(BaseSettings):
     ]
     max_steps: Annotated[int, Field(default=25, gt=0, description="Maximum model calls in one turn")]
 
+    task_max_steps: Annotated[
+        int, Field(default=15, gt=0, description="Maximum model calls of one task subagent")
+    ]
+
     sessions_dir: Annotated[
         str | None, Field(default=None, description="Where saved sessions live; unset means the XDG data folder")
     ]

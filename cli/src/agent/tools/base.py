@@ -6,9 +6,12 @@ from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, ClassVar, Literal, Protocol
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
 from src.agent.provider.base import ToolSpec
+
+if TYPE_CHECKING:
+    from src.agent.events import AgentEvent
 
 
 class FileJournal(Protocol):
@@ -26,6 +29,7 @@ class ToolContext:
     workspace: Path  # resolved absolute path
     bash_timeout: float
     journal: FileJournal | None = None  # told about each file write/edit changes
+    progress: Callable[[AgentEvent], None] | None = None  # set per call by the loop; only the task tool uses it
 
 
 @dataclass(frozen=True)

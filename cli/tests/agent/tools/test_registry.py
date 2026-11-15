@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from src.agent.tools import default_tools
+from src.agent.tools import default_tools, read_only_tools
+
+from tests.fakes import FakeFetcher
 
 
 def test_default_tools_are_exactly_the_six_in_order() -> None:
@@ -43,3 +45,14 @@ def test_web_fetch_is_added_last_only_with_a_fetcher() -> None:
     assert web.needs_approval and not web.mutating
     assert web.spec().parameters["required"] == ["url"]
     assert "web_fetch" not in [t.name for t in default_tools()]
+
+
+def test_read_only_tools_are_read_glob_grep_and_web_fetch_with_a_fetcher() -> None:
+    assert [t.name for t in read_only_tools()] == ["read", "glob", "grep"]
+    assert [t.name for t in read_only_tools(FakeFetcher())] == ["read", "glob", "grep", "web_fetch"]
+
+
+def test_no_read_only_tool_mutates_or_runs_commands() -> None:
+    tools = read_only_tools(FakeFetcher())
+    assert not any(t.mutating for t in tools)
+    assert {t.name for t in tools}.isdisjoint({"write", "edit", "bash", "task"})

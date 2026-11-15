@@ -21,6 +21,7 @@ def test_defaults() -> None:
     assert settings.num_ctx == 8192
     assert settings.bash_timeout == 120.0
     assert settings.max_steps == 25
+    assert settings.task_max_steps == 15
     assert settings.mcp_timeout == 60.0
     assert settings.mcp_start_timeout == 120.0
 
@@ -33,7 +34,7 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.num_ctx == 4096
 
 
-@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT"])
+@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_TASK_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT"])
 def test_non_positive_values_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setenv(name, "0")
     with pytest.raises(ValidationError):
