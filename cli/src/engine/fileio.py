@@ -10,16 +10,17 @@ from pathlib import Path
 MAX_FILE_BYTES = 1 << 20  # a settings file is a few lines: more than 1 MiB is not one
 
 
-def read_regular(path: Path, limit: int = MAX_FILE_BYTES, *, follow: bool = True) -> bytes:
+def read_regular(path: Path, limit: int = MAX_FILE_BYTES, *, follow: bool = True, dir_fd: int | None = None) -> bytes:
     """The bytes of the regular file at `path`.
 
     Raises `FileNotFoundError` when it is missing and `OSError` when it is anything but a regular file (a FIFO
     would block the read forever, a device never ends) or is larger than `limit`. The type is checked on the open
     file, so nothing can swap in a FIFO between the check and the read. With `follow=False` a symlink is refused
-    by the open itself (`O_NOFOLLOW`), so it cannot be swapped in after a check either.
+    by the open itself (`O_NOFOLLOW`), so it cannot be swapped in after a check either. With `dir_fd` a relative
+    `path` is opened inside that already opened directory, so a parent swapped for a symlink does not matter.
     """
     flags = os.O_RDONLY | os.O_NONBLOCK | (0 if follow else os.O_NOFOLLOW)
-    fd = os.open(path, flags)  # NONBLOCK: opening a FIFO must not wait for a writer
+    fd = os.open(path, flags, dir_fd=dir_fd)  # NONBLOCK: opening a FIFO must not wait for a writer
     with os.fdopen(fd, "rb") as handle:
         info = os.fstat(handle.fileno())
         if not stat.S_ISREG(info.st_mode):

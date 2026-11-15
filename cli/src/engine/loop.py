@@ -58,6 +58,7 @@ from src.engine.text import escape
 from src.engine.todo import INTERRUPTED, NOT_COMPLETED, SKIPPED, TodoItem, active, current_todos, render_note
 from src.engine.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
 from src.engine.tools.paths import InvalidPath, resolve_path
+from src.engine.tools.skill import SkillTool
 from src.engine.tools.text import truncate, truncate_ansi
 from src.engine.undo import (
     NOTHING_TO_UNDO,
@@ -255,11 +256,14 @@ class Agent:
     def _system(self, mode: Mode, instructions: Instructions | None = None) -> Message:
         """The system message; reads the files fresh (R4) unless the caller passes what it has."""
         loaded = instructions if instructions is not None else self.instructions()
+        skill_tool = next((t for t in self.tools if isinstance(t, SkillTool)), None)
+        skills = skill_tool.skills.section() if skill_tool is not None else None
         if self.role == "task":
-            return Message("system", build_task_prompt(self.ctx.workspace, self.today(), platform.system(), loaded))
+            prompt = build_task_prompt(self.ctx.workspace, self.today(), platform.system(), loaded, skills=skills)
+            return Message("system", prompt)
         todo = any(t.name == "todo" for t in self.tools)
         prompt = build_system_prompt(
-            self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded, todo=todo
+            self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded, todo=todo, skills=skills
         )
         return Message("system", prompt)
 

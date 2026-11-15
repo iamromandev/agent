@@ -55,8 +55,9 @@ from src.engine.session import (
     SessionStore,
     SessionWriteError,
 )
+from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalError, TerminalManager
-from src.engine.text import escape
+from src.engine.text import escape, escape_display
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
@@ -96,7 +97,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
+    "/skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
 # Built-in commands and what `/` suggests for them. Must equal the cases of `AgentApp._command` (a test checks).
@@ -107,6 +108,7 @@ BUILTINS: dict[str, str] = {
     "sessions": "switch session",
     "mcp": "MCP servers and their tools",
     "permissions": "saved permission rules",
+    "skills": "loaded skills",
     "compact": "shrink the context",
     "init": "write AGENTS.md",
     "undo": "undo the last turn",
@@ -151,6 +153,7 @@ class AgentApp(App[None]):
         permissions: Rules | None = None,
         permission_warnings: Sequence[str] = (),
         commands: Commands | None = None,
+        skills: Skills | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -160,6 +163,7 @@ class AgentApp(App[None]):
         self.permissions = permissions if permissions is not None else Rules.empty()
         self._permission_warnings = tuple(permission_warnings)
         self.commands = commands if commands is not None else Commands({}, ())
+        self.skills = skills if skills is not None else Skills({}, ())
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -242,6 +246,7 @@ class AgentApp(App[None]):
         if (
             self._permission_warnings
             or self.commands.warnings
+            or self.skills.warnings
             or self.permissions.untrusted_allow
             or (self.mcp is not None and self.mcp.untrusted())
         ):
@@ -249,7 +254,7 @@ class AgentApp(App[None]):
 
     async def _ask_trust(self) -> None:
         transcript = self.query_one(Transcript)
-        for warning in (*self._permission_warnings, *self.commands.warnings):
+        for warning in (*self._permission_warnings, *self.commands.warnings, *self.skills.warnings):
             await transcript.add_notice("warn", warning)
         if self.mcp is not None and self.mcp.untrusted():
             await self._ask_mcp_trust()
@@ -370,6 +375,14 @@ class AgentApp(App[None]):
     def _busy_text(self, command: str) -> str:
         hint = "a session is loading" if self._switching and not self._turn_active else f"press Esc to interrupt, then {command}"
         return f"busy — {hint}"
+
+    def _skills_summary(self) -> str:
+        """`<name> (<source>): <description>` per skill, then the launch warnings (file text, so escaped)."""
+        lines = [
+            f"{escape(s.name)} ({s.source}): {escape_display(' '.join(s.description.split()))}" for s in self.skills.sorted()
+        ]
+        lines.extend(self.skills.warnings)
+        return "\n".join(lines) if lines else "No skills."
 
     def _mcp_summary(self) -> str:
         """`<name> (<source>) <status>[: reason]` per server, the tool names of a ready one indented below it."""
@@ -698,6 +711,8 @@ class AgentApp(App[None]):
             case "/permissions":
                 lines = self.permissions.listing()
                 await transcript.add_notice("info", "\n".join(lines) if lines else "no permission rules")
+            case "/skills":
+                await transcript.add_notice("info", self._skills_summary())
             case "/quit":
                 self.exit()
             case "/sessions":

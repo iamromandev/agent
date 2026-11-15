@@ -22,6 +22,7 @@ from src.engine.session import (
     sessions_root,
     workspace_dir,
 )
+from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalManager
 from src.engine.tools import default_tools, read_only_tools
 from src.engine.tools.base import ToolContext
@@ -100,6 +101,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         task: bool = False,
         task_fetcher: Fetcher | None = None,
         commands: Commands | None = None,
+        skills: Skills | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -119,7 +121,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         def factory(approver: Approver) -> Agent:
             return Agent(
                 provider,
-                default_tools(manager) if tools else [],
+                default_tools(manager, skills=skills) if tools else [],
                 approver,
                 ToolContext(root, 5.0),
                 max_steps,
@@ -145,6 +147,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             permissions=permissions,
             permission_warnings=permission_warnings,
             commands=commands,
+            skills=skills,
         )
 
     return build
