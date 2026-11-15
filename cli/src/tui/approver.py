@@ -6,7 +6,7 @@ import asyncio
 import contextlib
 from typing import TYPE_CHECKING
 
-from src.agent.approval import ApprovalRequest, Choice, Decision
+from src.engine.approval import ApprovalRequest, Choice, Decision
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import Transcript
 

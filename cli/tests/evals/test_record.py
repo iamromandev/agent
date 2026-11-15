@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from evals.record import RunRecord, sink
-from src.agent.events import (
+from src.engine.events import (
     AssistantText,
     Notice,
     TaskProgress,
@@ -12,7 +12,7 @@ from src.agent.events import (
     TurnEnded,
     UsageUpdate,
 )
-from src.agent.tools.base import ToolResult
+from src.engine.tools.base import ToolResult
 
 
 def test_steps_and_tokens_count_only_real_usage_counts() -> None:

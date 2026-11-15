@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from src.agent.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import ToolMeta
+from src.engine.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import ToolMeta
 from src.tui import StartChoice
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput

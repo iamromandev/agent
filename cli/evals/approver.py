@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from src.agent.approval import ApprovalRequest, Choice, Decision
+from src.engine.approval import ApprovalRequest, Choice, Decision
 
 from evals.record import RunRecord
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.agent.provider.base import Done, Message, ProviderError, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import ToolMeta
-from src.agent.web import FetchResponse
+from src.engine.provider.base import Done, Message, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import ToolMeta
+from src.engine.web import FetchResponse
 from src.tui import StartChoice
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.status import StatusBar

@@ -8,12 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from src.agent.approval import ApprovalRequest, Choice, Decision
-from src.agent.mcp.config import ServerConfig
-from src.agent.mcp.contract import CallResult, ToolInfo
-from src.agent.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
-from src.agent.session import SessionWriteError, ToolMeta
-from src.agent.web import FetchResponse
+from src.engine.approval import ApprovalRequest, Choice, Decision
+from src.engine.mcp.config import ServerConfig
+from src.engine.mcp.contract import CallResult, ToolInfo
+from src.engine.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
+from src.engine.session import SessionWriteError, ToolMeta
+from src.engine.web import FetchResponse
 
 
 @dataclass

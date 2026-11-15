@@ -8,7 +8,7 @@ from importlib.metadata import PackageNotFoundError, version
 
 import httpx
 
-from src.agent.web import FetchError, FetchResponse, FetchTooLarge
+from src.engine.web import FetchError, FetchResponse, FetchTooLarge
 
 MAX_REDIRECTS = 5
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
@@ -38,7 +38,7 @@ def _is_local(host: str) -> bool:
 
 
 class WebClient:
-    """Implements `src.agent.web.Fetcher`: GET with redirects, a timeout and a byte cap."""
+    """Implements `src.engine.web.Fetcher`: GET with redirects, a timeout and a byte cap."""
 
     def __init__(
         self, timeout: float, max_bytes: int, transport: httpx.AsyncBaseTransport | None = None

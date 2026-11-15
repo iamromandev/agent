@@ -14,8 +14,8 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from src.agent.approval import ApprovalRequest, Choice, Decision
-from src.agent.text import escape
+from src.engine.approval import ApprovalRequest, Choice, Decision
+from src.engine.text import escape
 from src.tui.styles import TOOL_NAME, diff_theme
 
 

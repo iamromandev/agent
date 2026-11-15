@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import pytest
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.styles import diff_theme
 from src.tui.widgets.status import StatusBar
@@ -386,8 +386,8 @@ async def test_the_transcript_diff_uses_the_theme_matching_the_app_theme(
 
 
 def _rules(tmp_path: Path):
-    from src.agent.mcp.trust import TrustStore
-    from src.agent.permissions.setup import prepare
+    from src.engine.mcp.trust import TrustStore
+    from src.engine.permissions.setup import prepare
 
     workspace = tmp_path.resolve()
     return prepare(workspace, tmp_path / "global.json", TrustStore(tmp_path.parent / f"{tmp_path.name}-store.json")).rules

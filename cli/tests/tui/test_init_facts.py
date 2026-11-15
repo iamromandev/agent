@@ -7,14 +7,14 @@ import threading
 from pathlib import Path
 
 import src.tui.app as app_module
-from src.agent.facts import INTRO
-from src.agent.mode import Mode
-from src.agent.prompt import build_init_prompt
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.facts import INTRO
+from src.engine.mode import Mode
+from src.engine.prompt import build_init_prompt
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
-from tests.agent.facts_fixtures import CI_YML, ROOT_MAKEFILE
+from tests.engine.facts_fixtures import CI_YML, ROOT_MAKEFILE
 from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, choose, reached, scripted, settled, type_and_send, until
 

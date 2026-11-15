@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from evals.approver import AutoApprover
 from evals.record import RunRecord
-from src.agent.approval import ApprovalRequest, Choice
+from src.engine.approval import ApprovalRequest, Choice
 
 
 def _request(tool: str, label: str) -> ApprovalRequest:

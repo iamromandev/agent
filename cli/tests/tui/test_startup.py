@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.agent.provider.base import Done, TextDelta
+from src.engine.provider.base import Done, TextDelta
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, UserEntry

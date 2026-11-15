@@ -5,7 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-AGENT_SRC = Path(__file__).parent.parent / "src" / "agent"
+AGENT_SRC = Path(__file__).parent.parent / "src" / "engine"
 FORBIDDEN = {"textual", "httpx", "rich", "pyte", "mcp"}
 
 

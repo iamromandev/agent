@@ -13,9 +13,9 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
-from src.agent.session import TranscriptItem
-from src.agent.text import escape
-from src.agent.tools.base import Preview, ToolResult
+from src.engine.session import TranscriptItem
+from src.engine.text import escape
+from src.engine.tools.base import Preview, ToolResult
 from src.tui.styles import Outcome, ansi_output, diff_theme, notice_text, tool_title
 
 REPLAY_BATCH = 500  # entries mounted at once when a saved conversation is redrawn

@@ -7,10 +7,10 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
-from src.agent.session import FileRecorder, SessionError, SessionStore, SessionWriteError, ToolMeta, sessions_root
-from src.agent.session.paths import workspace_dir
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
+from src.engine.session import FileRecorder, SessionError, SessionStore, SessionWriteError, ToolMeta, sessions_root
+from src.engine.session.paths import workspace_dir
 from src.tui import StartChoice
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.styles import ICONS
@@ -99,7 +99,7 @@ async def test_resume_by_a_unique_id_prefix(
     make_app: AppFactory, save_session: SaveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids = iter(["01JF3KAAAAAAAAAAAAAAAAAAAA", "01JF3MBBBBBBBBBBBBBBBBBBBB"])
-    monkeypatch.setattr("src.agent.session.recorder.new_ulid", lambda: next(ids))
+    monkeypatch.setattr("src.engine.session.recorder.new_ulid", lambda: next(ids))
     save_session(chat("other", "other"), age=100)
     save_session(chat("wanted", "reply"), age=200)
     app = make_app(start=StartChoice("resume", "01jf3m"))  # any case, a prefix of one id only
@@ -133,7 +133,7 @@ async def test_an_ambiguous_id_shows_an_error_and_starts_a_new_session(
     make_app: AppFactory, save_session: SaveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids = iter(["01JF3KAAAAAAAAAAAAAAAAAAAA", "01JF3KBBBBBBBBBBBBBBBBBBBB"])
-    monkeypatch.setattr("src.agent.session.recorder.new_ulid", lambda: next(ids))
+    monkeypatch.setattr("src.engine.session.recorder.new_ulid", lambda: next(ids))
     save_session(chat("a", "a"), age=1)
     save_session(chat("b", "b"), age=2)
     app = make_app(start=StartChoice("resume", "01JF3K"))

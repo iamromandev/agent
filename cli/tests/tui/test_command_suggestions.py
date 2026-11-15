@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import time
 
-from src.agent.commands.loader import Command, Commands
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from src.engine.commands.loader import Command, Commands
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.app import BUILTINS
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput

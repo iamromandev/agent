@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from src.agent.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from src.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
 
 from tests.fakes import Gate
 

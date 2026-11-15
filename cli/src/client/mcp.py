@@ -26,8 +26,8 @@ import mcp_types as types
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
 
-from src.agent.mcp.config import ServerConfig
-from src.agent.mcp.contract import CallResult, McpConnection, McpError, McpExited, McpTimeout, ToolInfo
+from src.engine.mcp.config import ServerConfig
+from src.engine.mcp.contract import CallResult, McpConnection, McpError, McpExited, McpTimeout, ToolInfo
 
 # The SDK logs a line it cannot parse with logger.exception; with no handler, logging would print that
 # to stderr, over the full-screen UI. A parse failure is reported through the exit reason instead.

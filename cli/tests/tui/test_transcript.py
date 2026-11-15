@@ -7,8 +7,8 @@ from typing import Any, Literal, cast
 import pytest
 from rich.style import Style
 from rich.text import Text
-from src.agent.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
-from src.agent.tools.base import ToolResult
+from src.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from src.engine.tools.base import ToolResult
 from src.tui.app import AgentApp
 from src.tui.styles import ACCENT, DIM, ERROR, ICONS, NOTICE, OK, TOOL_NAME
 from src.tui.widgets.status import StatusBar
@@ -365,8 +365,8 @@ async def _bash_result(command: str) -> ToolResult:
     import os
     from pathlib import Path
 
-    from src.agent.tools.base import Prepared, ToolContext
-    from src.agent.tools.shell import BashTool
+    from src.engine.tools.base import Prepared, ToolContext
+    from src.engine.tools.shell import BashTool
 
     os.environ.setdefault("SHELL", "/bin/sh")
     prepared = await BashTool().prepare({"command": command}, ToolContext(Path.cwd(), 5.0))

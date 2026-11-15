@@ -3,8 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.agent.mode import Mode
-from src.agent.provider.base import Done, TextDelta
+from src.engine.mode import Mode
+from src.engine.provider.base import Done, TextDelta
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar, display_path
 

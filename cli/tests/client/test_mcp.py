@@ -10,9 +10,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 
 import pytest
-from src.agent.mcp.config import ServerConfig
-from src.agent.mcp.contract import McpError, McpExited, McpTimeout
 from src.client.mcp import SdkConnection, SdkConnector
+from src.engine.mcp.config import ServerConfig
+from src.engine.mcp.contract import McpError, McpExited, McpTimeout
 
 from tests.conftest import FIXTURES
 from tests.helpers import assert_all_gone, gone, wait_until
@@ -276,7 +276,7 @@ async def test_kill_all_kills_the_whole_group_of_a_running_server(tmp_path: Path
 async def test_a_server_that_never_answers_initialize_fails_in_the_hub_and_its_process_is_gone(
     tmp_path: Path,
 ) -> None:
-    from src.agent.mcp.hub import McpHub
+    from src.engine.mcp.hub import McpHub
 
     connector = SdkConnector()
     hub = McpHub(connector, tmp_path, [fake_config("hang_init")], 20.0, start_timeout=1.0)
@@ -294,7 +294,7 @@ async def test_a_server_that_never_answers_initialize_fails_in_the_hub_and_its_p
 async def test_the_dup_server_offers_two_tools_that_clean_to_one_name_and_the_hub_keeps_the_first(
     tmp_path: Path,
 ) -> None:
-    from src.agent.mcp.hub import McpHub
+    from src.engine.mcp.hub import McpHub
 
     hub = McpHub(SdkConnector(), tmp_path, [fake_config("dup")], 20.0)
     events: list[tuple[str, str, str]] = []
@@ -344,7 +344,7 @@ def test_the_non_json_hint_only_applies_shortly_after_the_server_wrote_it(monkey
 
 
 async def test_cancelling_a_hanging_call_leaves_the_server_ready_and_working(tmp_path: Path) -> None:
-    from src.agent.mcp.hub import McpHub
+    from src.engine.mcp.hub import McpHub
 
     hub = McpHub(SdkConnector(), tmp_path, [fake_config()], 30.0)
     events: list[tuple[str, str, str]] = []

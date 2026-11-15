@@ -7,14 +7,14 @@ import time
 from pathlib import Path
 
 import pytest
-from src.agent.mcp.hub import McpHub
-from src.agent.mcp.setup import prepare as prepare_mcp
-from src.agent.mcp.trust import TrustStore, trust_store_path
-from src.agent.permissions.config import RuleFile, project_settings_path
-from src.agent.permissions.rules import parse_rule
-from src.agent.permissions.setup import PermissionSetup, Rules, prepare
-from src.agent.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
 from src.config import get_settings
+from src.engine.mcp.hub import McpHub
+from src.engine.mcp.setup import prepare as prepare_mcp
+from src.engine.mcp.trust import TrustStore, trust_store_path
+from src.engine.permissions.config import RuleFile, project_settings_path
+from src.engine.permissions.rules import parse_rule
+from src.engine.permissions.setup import PermissionSetup, Rules, prepare
+from src.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
 from src.tui.app import HELP, AgentApp
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
@@ -104,7 +104,7 @@ async def _answer(pilot, option_id: str) -> None:
 
 
 def _tool_results(app: AgentApp) -> list[str]:
-    from src.agent.provider.base import Message
+    from src.engine.provider.base import Message
 
     return [m.content for m in app.agent.history if isinstance(m, Message) and m.role == "tool"]
 

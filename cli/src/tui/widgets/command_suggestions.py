@@ -8,7 +8,7 @@ from rich.text import Text
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
-from src.agent.text import escape
+from src.engine.text import escape
 
 
 class CommandSuggestions(OptionList, can_focus=False):
