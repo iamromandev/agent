@@ -8,7 +8,7 @@ from pathlib import Path
 
 from src.agent.instructions import AGENTS_MD_LIMIT
 from src.agent.mode import Mode
-from src.agent.prompt import build_init_prompt, build_system_prompt
+from src.agent.prompt import build_init_prompt, build_system_prompt, build_task_prompt
 
 TODAY = date(2026, 11, 12)
 
@@ -232,3 +232,14 @@ def test_facts_keep_steps_2_to_5_intact(tmp_path: Path) -> None:
     assert with_facts[3 : len(plain)] == plain[3:]
     assert with_facts[-2:] == ["", "F"]
     assert "5. The instructions in AGENTS.md, x/AGENTS.md are already loaded" in "\n".join(with_facts)
+
+
+def test_task_prompt_has_the_role_workspace_and_agents_md(tmp_path: Path) -> None:
+    (tmp_path / "AGENTS.md").write_text("Project rules here.")
+    prompt = build_task_prompt(tmp_path, TODAY, "Linux", None)
+    assert "You are a research subagent." in prompt
+    assert "You cannot change files or run commands." in prompt
+    assert f"Workspace: {tmp_path}" in prompt
+    assert "Date: 2026-11-12" in prompt
+    assert "Project rules here." in prompt
+    assert "Mode:" not in prompt

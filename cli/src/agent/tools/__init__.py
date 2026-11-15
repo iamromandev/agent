@@ -14,6 +14,14 @@ if TYPE_CHECKING:
     from src.agent.web import Fetcher
 
 
+def read_only_tools(fetcher: Fetcher | None = None) -> list[Tool]:
+    """What a `task` child may use: reading and searching, and web_fetch when there is a fetcher."""
+    tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool()]
+    if fetcher is not None:
+        tools.append(WebFetch(fetcher))
+    return tools
+
+
 def default_tools(terminals: TerminalManager | None = None, fetcher: Fetcher | None = None) -> list[Tool]:
     """The built-in tools; the terminal and web tools only when there is a manager or fetcher to use."""
     tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool(), WriteTool(), EditTool(), BashTool()]

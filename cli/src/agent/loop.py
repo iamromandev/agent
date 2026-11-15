@@ -8,6 +8,7 @@ import dataclasses
 import platform
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
+from typing import Literal
 
 from src.agent.approval import ApprovalRequest, Approver, Choice, Grants
 from src.agent.compaction import (
@@ -28,6 +29,7 @@ from src.agent.events import (
     Compacting,
     EventSink,
     Notice,
+    TaskProgress,
     ToolFinished,
     ToolStarted,
     TurnEnded,
@@ -35,7 +37,7 @@ from src.agent.events import (
 )
 from src.agent.instructions import Instructions, load_instructions
 from src.agent.mode import Mode
-from src.agent.prompt import build_system_prompt
+from src.agent.prompt import build_system_prompt, build_task_prompt
 from src.agent.provider.base import (
     Done,
     Message,
@@ -47,6 +49,7 @@ from src.agent.provider.base import (
 )
 from src.agent.session import NullRecorder, Recorder, ToolMeta
 from src.agent.session.records import compaction_notice
+from src.agent.task import TaskTool
 from src.agent.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
 from src.agent.tools.text import truncate, truncate_ansi
 from src.agent.undo import (
@@ -109,9 +112,15 @@ class Agent:
         undo_file_limit: int = SNAPSHOT_FILE_LIMIT,
         undo_total_limit: int = SNAPSHOT_TOTAL_LIMIT,
         extra_tools: Callable[[], Sequence[Tool]] | None = None,
+        task_tools: Sequence[Tool] | None = None,
+        task_max_steps: int = 15,
+        role: Literal["main", "task"] = "main",
     ) -> None:
         self.provider = provider
+        self.role = role
         self.tools = list(tools)
+        if task_tools is not None and role == "main":
+            self.tools.append(TaskTool(self, list(task_tools), task_max_steps))
         self._extra_tools = extra_tools  # asked at every use: tools that come and go while the agent runs (MCP)
         self._granted_extra: dict[str, Tool] = {}  # "Always" given to an extra tool, to revoke it when that tool is gone
         self.approver = approver
@@ -211,13 +220,10 @@ class Agent:
 
     def _system(self, mode: Mode, instructions: Instructions | None = None) -> Message:
         """The system message; reads the files fresh (R4) unless the caller passes what it has."""
-        prompt = build_system_prompt(
-            self.ctx.workspace,
-            mode,
-            self.today(),
-            platform.system(),
-            instructions=instructions if instructions is not None else self.instructions(),
-        )
+        loaded = instructions if instructions is not None else self.instructions()
+        if self.role == "task":
+            return Message("system", build_task_prompt(self.ctx.workspace, self.today(), platform.system(), loaded))
+        prompt = build_system_prompt(self.ctx.workspace, mode, self.today(), platform.system(), instructions=loaded)
         return Message("system", prompt)
 
     def _record(self, message: Message, meta: ToolMeta | None = None) -> None:
@@ -391,7 +397,7 @@ class Agent:
             self._record(Message("user", text))
             try:
                 self._flush_save_error(emit)
-                if (notice := self.instructions_notice()) is not None:
+                if self.role == "main" and (notice := self.instructions_notice()) is not None:
                     try:
                         emit(notice)
                     except BaseException:
@@ -567,7 +573,7 @@ class Agent:
         tool = next((t for t in self.all_tools() if t.name == call.name), None)
         self._inflight = call.id
         label = tool.label(call.arguments) if tool else call.name
-        emit(ToolStarted(call.id, label))
+        emit(ToolStarted(call.id, label, task=tool is not None and tool.name == "task"))
         preview: Preview | None = None
         applied = False
         cancel: asyncio.CancelledError | None = None
@@ -579,7 +585,10 @@ class Agent:
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
             else:
-                prepared = await tool.prepare(call.arguments, self.ctx)
+                call_ctx = dataclasses.replace(
+                    self.ctx, progress=lambda event: emit(TaskProgress(call.id, event))
+                )
+                prepared = await tool.prepare(call.arguments, call_ctx)
                 if isinstance(prepared, ToolResult):
                     result = prepared
                 else:

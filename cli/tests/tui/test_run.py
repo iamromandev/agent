@@ -31,6 +31,7 @@ def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setenv("AGENT_MODEL", "foo")
     monkeypatch.setenv("AGENT_NUM_CTX", "4096")
     monkeypatch.setenv("AGENT_MAX_STEPS", "7")
+    monkeypatch.setenv("AGENT_TASK_MAX_STEPS", "3")
     get_settings.cache_clear()
     ran: list[AgentApp] = []
     monkeypatch.setattr(AgentApp, "run", lambda self, **_: ran.append(self))
@@ -52,7 +53,11 @@ def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_pa
         *("read", "glob", "grep", "write", "edit", "bash"),
         *("term_start", "term_read", "term_stop"),
         "web_fetch",
+        "task",
     }
+    task = next(t for t in agent.tools if t.name == "task")
+    assert task._max_steps == 3  # ty: ignore[unresolved-attribute]
+    assert [t.name for t in task._tools] == ["read", "glob", "grep", "web_fetch"]  # ty: ignore[unresolved-attribute]
 
 
 def test_run_gives_the_app_the_terminal_manager_the_tools_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

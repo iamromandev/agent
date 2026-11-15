@@ -21,6 +21,12 @@ _GUIDANCE = (
     "Be concise."
 )
 
+_TASK_ROLE = (
+    "You are a research subagent. Investigate the task with the read-only tools you have. "
+    "You cannot change files or run commands. Finish with a concise report for another agent: "
+    "what you found, with file paths, function names and line numbers; say what you could not find."
+)
+
 _PLAN = "You are in PLAN mode: do not modify files; write/edit are unavailable. Explore, then propose a plan."
 
 
@@ -34,6 +40,16 @@ def build_system_prompt(
     ]
     if mode is Mode.PLAN:
         parts.append(_PLAN)
+    if instructions is None:
+        instructions = load_instructions(workspace, None)
+    if instructions.text:
+        parts.append(instructions.text)
+    return "\n\n".join(parts)
+
+
+def build_task_prompt(workspace: Path, today: date, os_name: str, instructions: Instructions | None) -> str:
+    """The system prompt of a `task` child: a research role, the workspace facts and the AGENTS.md text."""
+    parts = [_TASK_ROLE, f"Workspace: {workspace}\nOS: {os_name}\nDate: {today.isoformat()}"]
     if instructions is None:
         instructions = load_instructions(workspace, None)
     if instructions.text:

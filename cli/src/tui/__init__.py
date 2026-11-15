@@ -30,7 +30,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.agent.provider.ollama import OllamaProvider
     from src.agent.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.agent.terminal.manager import TerminalManager
-    from src.agent.tools import default_tools
+    from src.agent.tools import default_tools, read_only_tools
     from src.agent.tools.base import ToolContext
     from src.client import OllamaClient, WebClient
     from src.client.mcp import SdkConnector
@@ -74,6 +74,8 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 compact_keep_turns=settings.compact_keep_turns,
                 instructions_share=settings.instructions_share,
                 extra_tools=mcp.tools,
+                task_tools=read_only_tools(web),
+                task_max_steps=settings.task_max_steps,
             )
 
         async def close() -> None:

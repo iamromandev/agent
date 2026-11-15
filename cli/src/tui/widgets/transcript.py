@@ -65,21 +65,51 @@ def _title(text: Text) -> str:
     return cast("str", Content.from_rich_text(text))
 
 
+def _child_line(label: str, summary: str, outcome: Outcome) -> Text:
+    line = Text("  ")
+    if outcome is None:
+        line.append("⋯ ")
+    line.append_text(tool_title(label, summary, outcome))
+    return line
+
+
 class ToolEntry(Collapsible):
     """One tool call: `label · summary`, with the output (and the applied diff) inside."""
 
-    def __init__(self, label: str, summary: str | None = None) -> None:
-        """`summary` given: a finished call that is only shown (a replayed one), with nothing inside."""
-        super().__init__(title=_title(tool_title(label, summary or "", None)), collapsed=True)
+    def __init__(self, label: str, summary: str | None = None, task: bool = False) -> None:
+        """`summary` given: a finished call that is only shown (a replayed one), with nothing inside.
+
+        `task`: a running `task` call, open while it runs and folded when it ends."""
+        running_task = task and summary is None
+        super().__init__(title=_title(tool_title(label, summary or "", None)), collapsed=not running_task)
         self.label = label
         self.finished = summary is not None
+        self.is_task = running_task
         self.detail = ""
+        self._children: dict[str, tuple[Static, str]] = {}  # a task's child calls: line and label, by child call id
+
+    async def add_child(self, call_id: str, label: str) -> None:
+        """A tool call of a task's child, as a line inside the block."""
+        if (earlier := self._children.get(call_id)) is not None and earlier[1]:
+            earlier[0].update(_child_line(earlier[1], "ended", "ended"))  # the id was reused before it finished
+        line = Static(_child_line(label, "", None))
+        self._children[call_id] = (line, label)
+        await self.query_one(Collapsible.Contents).mount(line)
+
+    async def finish_child(self, call_id: str, result: ToolResult) -> None:
+        if (child := self._children.get(call_id)) is not None:
+            line, label = child
+            line.update(_child_line(label, result.summary, "error" if result.is_error else "ok"))
+            self._children[call_id] = (line, "")  # finished: the interrupt pass leaves it alone
 
     async def finish(self, result: ToolResult | None, preview: Preview | None, applied: bool, note: str = "") -> None:
         self.finished = True
         summary = note or (result.summary if result else "")
         outcome: Outcome = "ended" if note or result is None else ("error" if result.is_error else "ok")
         self.title = _title(tool_title(self.label, summary, outcome))
+        for line, child_label in self._children.values():
+            if child_label:  # a child call that never finished (the task was interrupted)
+                line.update(_child_line(child_label, note or "ended", "ended"))
         parts: list[Text | Syntax] = []
         details: list[str] = []
         if result is not None and applied and preview is not None and preview.kind in ("diff", "content"):
@@ -94,6 +124,8 @@ class ToolEntry(Collapsible):
         contents = self.query_one(Collapsible.Contents)
         for part in parts:
             await contents.mount(Static(part))
+        if self.is_task:
+            self.collapsed = True  # a finished task folds; its lines and report stay inside
 
 
 class Transcript(VerticalScroll):
@@ -135,9 +167,9 @@ class Transcript(VerticalScroll):
             entry, self._assistant = self._assistant, None
             await entry.finish()
 
-    async def add_tool(self, call_id: str, label: str) -> ToolEntry:
+    async def add_tool(self, call_id: str, label: str, task: bool = False) -> ToolEntry:
         await self.end_assistant()
-        entry = ToolEntry(label)
+        entry = ToolEntry(label, task=task)
         self._tools[call_id] = entry
         await self._add(entry)
         return entry
