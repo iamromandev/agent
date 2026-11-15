@@ -101,6 +101,10 @@ agent                   # workspace is the current folder
 - Upgrading: the install is editable, so `git pull` is enough. Rerun `make cli-tool-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout (a moved or deleted checkout breaks `agent`).
 - Uninstall: `make cli-tool-uninstall`.
 
+### Real-model smoke test
+
+`make -C cli eval` (or `make cli-eval`) runs four fixed tasks (`find`, `rename`, `rules`, `command`) against the configured Ollama model, each in a throwaway copy of `cli/evals/fixtures/sample` with its own config and data folders. It prints pass counts and median steps, tokens and time per task, and saves a JSON report to `cli/.eval/<UTC timestamp>.json` (gitignored) to compare runs over time. Settings: the usual `AGENT_*` variables, plus `EVAL_RUNS` (default 3), `EVAL_TASKS` (comma-separated), `EVAL_TIMEOUT` (seconds per run, default 300) and `EVAL_KEEP=1` (keep the temp folders and print their paths). Without Ollama it prints a skip line and exits 0. Isolation covers the agent's config, data and sessions folders and the workspace copy only: `bash` commands run with your real environment and `HOME`, so every task allows just fixed commands (exact `python -m pytest` rules, everything else refused). It is not part of `make test` or CI.
+
 ### Open the agent in another project
 
 The agent's workspace is the folder it is launched from. To work on another project, run it from that project's folder:
