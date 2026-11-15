@@ -124,3 +124,21 @@ def test_the_two_mcp_timeouts_are_separate_settings(monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("AGENT_MCP_START_TIMEOUT", "300")
     settings = Settings(_env_file=None)
     assert (settings.mcp_timeout, settings.mcp_start_timeout) == (5.0, 300.0)
+
+
+def test_search_url_is_unset_by_default_and_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).search_url is None
+    monkeypatch.setenv("AGENT_SEARCH_URL", "http://localhost:8888")
+    assert Settings(_env_file=None).search_url == "http://localhost:8888"
+    monkeypatch.setenv("AGENT_SEARCH_URL", "")
+    assert Settings(_env_file=None).search_url is None
+
+
+@pytest.mark.parametrize("value", ["searx.local:8888", "ftp://searx.local", "http://", "file:///etc/passwd", "not a url"])
+def test_search_url_needs_an_http_scheme_and_a_host(value: str) -> None:
+    with pytest.raises(ValidationError, match="AGENT_SEARCH_URL"):
+        Settings(_env_file=None, search_url=value)
+
+
+def test_search_url_accepts_http_and_https() -> None:
+    assert Settings(_env_file=None, search_url="https://searx.local/base").search_url == "https://searx.local/base"

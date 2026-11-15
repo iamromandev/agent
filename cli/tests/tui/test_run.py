@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 import src.tui
 import src.tui.app as tui_app
-from src.client import OllamaClient, WebClient
+from src.client import OllamaClient, SearxClient, WebClient
 from src.config.settings import get_settings
 from src.engine import Agent
 from src.engine.mcp.hub import McpHub
@@ -58,6 +58,48 @@ def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_pa
     task = next(t for t in agent.tools if t.name == "task")
     assert task._max_steps == 3  # ty: ignore[unresolved-attribute]
     assert [t.name for t in task._tools] == ["read", "glob", "grep", "web_fetch"]  # ty: ignore[unresolved-attribute]
+
+
+def test_run_offers_web_search_to_the_agent_and_the_task_only_when_the_url_is_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.delenv("AGENT_SEARCH_URL", raising=False)
+    get_settings.cache_clear()
+    off = _run_app(monkeypatch, tmp_path).agent
+    monkeypatch.setenv("AGENT_SEARCH_URL", "http://localhost:8888")
+    get_settings.cache_clear()
+    try:
+        on = _run_app(monkeypatch, tmp_path).agent
+    finally:
+        get_settings.cache_clear()
+
+    assert "web_search" not in {t.name for t in off.tools}
+    assert "web_search" in {t.name for t in on.tools}
+    task = next(t for t in on.tools if t.name == "task")
+    assert [t.name for t in task._tools] == ["read", "glob", "grep", "web_fetch", "web_search"]  # ty: ignore[unresolved-attribute]
+
+
+def test_the_search_client_is_closed_on_quit_and_if_setup_fails(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    closed: list[str] = []
+
+    async def search_aclose(self: SearxClient) -> None:
+        closed.append("search")
+
+    monkeypatch.setenv("AGENT_SEARCH_URL", "http://localhost:8888")
+    get_settings.cache_clear()
+    monkeypatch.setattr(SearxClient, "aclose", search_aclose)
+
+    def failing_app(*args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("no app")
+
+    monkeypatch.setattr(tui_app, "AgentApp", failing_app)
+    try:
+        with pytest.raises(RuntimeError, match="no app"):
+            src.tui.run(tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert closed == ["search"]
 
 
 def test_run_gives_the_app_the_terminal_manager_the_tools_use(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

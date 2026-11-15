@@ -77,3 +77,23 @@ def test_todo_items_schema_is_an_array_of_objects_with_content_and_status() -> N
     assert items["items"]["required"] == ["content", "status"]
     assert items["items"]["properties"]["content"]["type"] == "string"
     assert items["items"]["properties"]["status"] == {"type": "string", "enum": ["pending", "in_progress", "done"]}
+
+
+def test_web_search_is_added_last_only_with_a_searcher() -> None:
+    from tests.fakes import FakeSearcher
+
+    assert "web_search" not in [t.name for t in default_tools(fetcher=FakeFetcher())]
+    tools = default_tools(fetcher=FakeFetcher(), searcher=FakeSearcher())
+    assert [t.name for t in tools][-2:] == ["web_fetch", "web_search"]
+    search = tools[-1]
+    assert not search.needs_approval and not search.mutating
+    assert search.spec().parameters["required"] == ["query"]
+
+
+def test_read_only_tools_include_web_search_with_a_searcher() -> None:
+    from tests.fakes import FakeSearcher
+
+    assert [t.name for t in read_only_tools()] == ["read", "glob", "grep"]
+    names = [t.name for t in read_only_tools(searcher=FakeSearcher())]
+    assert names == ["read", "glob", "grep", "web_search"]
+    assert [t.name for t in read_only_tools(FakeFetcher(), FakeSearcher())][-2:] == ["web_fetch", "web_search"]
