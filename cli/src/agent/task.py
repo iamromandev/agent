@@ -70,6 +70,7 @@ class TaskTool(Tool):
             compact_keep_turns=parent.compact_keep_turns,
             instructions_share=parent.instructions_share,
             role="task",
+            rules=parent.rules,  # one set of rules for both: a deny on `read` stops the subagent too
         )
         child.mode = parent.mode
         child.grants = parent.grants  # one set of "Always" answers for both

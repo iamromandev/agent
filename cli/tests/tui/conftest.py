@@ -11,6 +11,7 @@ import pytest
 from src.agent import Agent
 from src.agent.approval import Approver
 from src.agent.mcp.hub import McpHub
+from src.agent.permissions.setup import Rules
 from src.agent.provider.base import Message, ProviderEvent
 from src.agent.session import (
     FileRecorder,
@@ -93,6 +94,8 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         terminals: bool | TerminalManager = False,
         mcp: McpHub | None = None,
         mcp_trust: Callable[[], None] | None = None,
+        permissions: Rules | None = None,
+        permission_warnings: Sequence[str] = (),
         task: bool = False,
         task_fetcher: Fetcher | None = None,
     ) -> AgentApp:
@@ -123,6 +126,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 compact_keep_turns=compact_keep_turns,
                 extra_tools=mcp.tools if mcp is not None else None,
                 task_tools=read_only_tools(task_fetcher) if task else None,
+                rules=permissions,
             )
 
         return AgentApp(
@@ -136,6 +140,8 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             terminals=manager,
             mcp=mcp,
             mcp_trust=mcp_trust,
+            permissions=permissions,
+            permission_warnings=permission_warnings,
         )
 
     return build

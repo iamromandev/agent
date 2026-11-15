@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -379,3 +380,112 @@ async def test_the_transcript_diff_uses_the_theme_matching_the_app_theme(
         (diff, *_) = tool.query(Collapsible.Contents).first().query(Static)
         assert isinstance(diff.visual, RichVisual)
         assert asked == [expected]
+
+
+# "Always here"
+
+
+def _rules(tmp_path: Path):
+    from src.agent.mcp.trust import TrustStore
+    from src.agent.permissions.setup import prepare
+
+    workspace = tmp_path.resolve()
+    return prepare(workspace, tmp_path / "global.json", TrustStore(tmp_path.parent / f"{tmp_path.name}-store.json")).rules
+
+
+async def test_always_here_is_offered_after_always_when_rules_can_be_saved(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script(), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _option_ids(screen) == ["once", "always", "project", "deny"]
+        assert _highlighted_id(screen) == "deny"  # a stray Enter still never approves
+
+
+async def test_always_here_is_not_offered_in_plan_mode(make_app: AppFactory, tmp_path: Path) -> None:
+    call = ToolCall("b1", "bash", {"command": "ls"})
+    app = make_app([[ToolCallEvent(call), Done(1, 1)]], permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        await pilot.press("tab")
+        screen = await _open_dialog(app, pilot)
+
+        assert _option_ids(screen) == ["once", "deny"]
+
+
+async def test_choosing_always_here_applies_the_edit_grants_it_and_saves_the_rule(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    from tests.tui.conftest import choose
+
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script(), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        await _open_dialog(app, pilot)
+        await choose(pilot, "project")
+        await settled(app)
+
+        assert (tmp_path / "a.py").read_text() == "new\n"
+        assert "edit" in app.agent.grants.tools
+    saved = json.loads((tmp_path / ".agent" / "settings.json").read_text())
+    assert saved == {"permissions": {"allow": ["edit"]}}
+
+
+def _label(screen: ApprovalScreen, option_id: str) -> str:
+    options = screen.query_one(OptionList)
+    return str(options.get_option(option_id).prompt)
+
+
+def _bash_script(command: str) -> list[list]:
+    return [[ToolCallEvent(ToolCall("b1", "bash", {"command": command})), Done(1, 1)], [TextDelta("done"), Done(1, 1)]]
+
+
+async def test_always_here_says_which_rule_it_saves(make_app: AppFactory, tmp_path: Path) -> None:
+    app = make_app(_bash_script("uv run pytest -q"), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _label(screen, "project") == "Always here: bash(uv run pytest -q)"
+
+
+async def test_always_here_for_a_tool_without_a_key_argument_says_every_call(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script(), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _label(screen, "project") == "Always here: every edit call"
+
+
+async def test_the_rule_in_the_always_here_label_is_escaped(make_app: AppFactory, tmp_path: Path) -> None:
+    app = make_app(_bash_script("echo [bold]\x1b[2J\nx"), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        label = _label(screen, "project")
+        assert label == "Always here: bash(echo [bold]\\x1b[2J\\x0ax)"
+
+
+async def test_always_here_is_not_offered_for_a_command_no_rule_can_say_exactly(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    app = make_app(_bash_script("ls *.py"), permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _option_ids(screen) == ["once", "always", "deny"]
+
+
+async def test_a_write_to_the_agent_settings_file_offers_neither_always_nor_always_here(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    call = ToolCall("w1", "write", {"path": ".agent/settings.json", "content": "{}"})
+    app = make_app([[ToolCallEvent(call), Done(1, 1)]], permissions=_rules(tmp_path))
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+
+        assert _option_ids(screen) == ["once", "deny"]

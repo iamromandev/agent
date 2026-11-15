@@ -11,6 +11,7 @@ from src.agent.tools.base import Preview
 class Choice(StrEnum):
     ONCE = "once"
     ALWAYS = "always"
+    PROJECT = "project"  # "Always here": also saved as a rule in the project settings file
     DENY = "deny"
 
 
@@ -26,6 +27,11 @@ class ApprovalRequest:
     label: str
     preview: Preview | None
     allow_always: bool  # False for bash in plan mode
+    save_rule: str | None = None  # "Always here" would save this rule to the project settings file; None: not offered
+
+    @property
+    def allow_save(self) -> bool:
+        return self.save_rule is not None
 
 
 class Approver(Protocol):

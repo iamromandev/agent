@@ -185,3 +185,58 @@ def test_a_project_server_that_replaces_a_global_one_says_so() -> None:
     assert merged["db"].overrides_global is True
     assert merged["web"].overrides_global is False
     assert merged["notes"].overrides_global is False
+
+
+def test_deeply_nested_json_is_a_warning_not_a_crash(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_bytes(b"[" * 200_000 + b"]" * 200_000)
+
+    loaded = load_file(path, "project")
+
+    assert loaded.servers == []
+    assert len(loaded.warnings) == 1
+    assert loaded.warnings[0].startswith(f"{path}: invalid JSON")
+
+
+def test_a_file_over_the_size_cap_is_a_warning(tmp_path: Path) -> None:
+    path = tmp_path / "mcp.json"
+    path.write_bytes(b'{"servers": {}, "pad": "' + b"x" * (1 << 20) + b'"}')
+
+    loaded = load_file(path, "project")
+
+    assert loaded.servers == []
+    assert "larger than" in loaded.warnings[0]
+
+
+def test_a_fifo_is_a_warning_and_is_not_read(tmp_path: Path) -> None:
+    import os
+
+    path = tmp_path / "mcp.json"
+    os.mkfifo(path)
+
+    loaded = load_file(path, "project")
+
+    assert loaded.servers == []
+    assert "regular file" in loaded.warnings[0]
+
+
+def test_a_server_name_that_could_pose_as_another_servers_tools_is_skipped_with_a_warning(tmp_path: Path) -> None:
+    """`mcp__gh__*` is a string prefix: a server `gh__evil` would put its tools under it."""
+    names = ["gh__evil", "gh..evil", "gh_", "gh.", "ok", "a_b", "my-srv"]
+    path = write(tmp_path / "mcp.json", {"servers": {name: {"command": "x"} for name in names}})
+
+    loaded = load_file(path, "project")
+
+    assert [s.name for s in loaded.servers] == ["ok", "a_b", "my-srv"]
+    assert len(loaded.warnings) == 4
+    assert all('must not contain "__" or end with "_"' in w for w in loaded.warnings)
+    assert 'server "gh__evil"' in loaded.warnings[0]
+
+
+def test_a_server_name_in_a_warning_is_escaped(tmp_path: Path) -> None:
+    path = write(tmp_path / "mcp.json", {"servers": {"a\x1b[2J\nb": {"args": []}}})
+
+    (warning,) = load_file(path, "project").warnings
+
+    assert warning.isprintable()
+    assert 'server "a\\x1b[2J\\x0ab"' in warning

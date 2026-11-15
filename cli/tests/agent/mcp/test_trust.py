@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 import pytest
 from src.agent.mcp.trust import TrustStore, trust_store_path
@@ -163,3 +164,31 @@ def test_a_store_next_to_the_workspace_is_fine(tmp_path: Path) -> None:
     workspace.mkdir()
 
     assert TrustStore(tmp_path / "trust.json").inside(workspace) is False
+
+
+def test_the_store_file_name_can_be_chosen_and_stays_under_xdg_data_home() -> None:
+    assert trust_store_path({"XDG_DATA_HOME": "/xdg"}, name="permission-trust.json") == Path(
+        "/xdg/agent/permission-trust.json"
+    )
+
+
+def test_the_default_name_is_the_mcp_one() -> None:
+    assert trust_store_path({"XDG_DATA_HOME": "/xdg"}).name == "mcp-trust.json"
+
+
+def test_the_temp_file_is_named_after_the_store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import tempfile
+
+    prefixes: list[str] = []
+    real = tempfile.mkstemp
+
+    def spy(**kwargs: Any) -> tuple[int, str]:
+        prefixes.append(kwargs["prefix"])
+        return real(**kwargs)
+
+    monkeypatch.setattr(tempfile, "mkstemp", spy)
+
+    TrustStore(tmp_path / "permission-trust.json").trust(tmp_path / "ws", CONTENT)
+    TrustStore(tmp_path / "mcp-trust.json").trust(tmp_path / "ws", CONTENT)
+
+    assert prefixes == [".permission-trust-", ".mcp-trust-"]
