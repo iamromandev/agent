@@ -7,8 +7,11 @@ import itertools
 from pathlib import Path
 from typing import Any, ClassVar
 
+from src.engine.guardrails.setup import guard_of
+
 from .base import Prepared, Preview, Tool, ToolContext, ToolResult
 from .paths import InvalidPath, inside_workspace, invalid_path_result, resolve_path
+from .protected import NotRegular, ProtectedFile, open_text_checked, refuse_protected
 from .text import is_binary, unified_diff
 
 READ_MAX_LINES = 2000
@@ -38,10 +41,10 @@ class ReadTool(Tool):
             path = resolve_path(ctx, raw)
         except InvalidPath as exc:
             return invalid_path_result(exc)
-        return await asyncio.to_thread(_read, path, raw, offset, limit)
+        return await asyncio.to_thread(_read, path, raw, offset, limit, ctx)
 
 
-def _read(path: Path, raw: str, offset: int, limit: int) -> ToolResult:
+def _read(path: Path, raw: str, offset: int, limit: int, ctx: ToolContext) -> ToolResult:
     if path.is_dir():
         return ToolResult(f"{raw} is a directory", is_error=True, summary="directory")
     if not path.exists():
@@ -49,16 +52,22 @@ def _read(path: Path, raw: str, offset: int, limit: int) -> ToolResult:
     if not path.is_file():  # a FIFO or device would block the read forever
         return ToolResult(f"{raw} is not a regular file", is_error=True, summary="not a regular file")
     try:
-        if is_binary(path):
-            return ToolResult(f"{raw} is binary or not UTF-8", is_error=True, summary="binary")
-        with path.open(encoding="utf-8") as handle:
+        # One open, and the open file is what gets checked: the path check in the loop is not enough on its own.
+        handle, binary = open_text_checked(path, ctx)
+        with handle:
+            if binary:
+                return ToolResult(f"{raw} is binary or not UTF-8", is_error=True, summary="binary")
             window = itertools.islice(handle, offset - 1, offset - 1 + limit)
             lines = [f"{n:>6}\t{line.rstrip('\r\n')}" for n, line in enumerate(window, start=offset)]
-        if not lines and offset > 1:
-            with path.open(encoding="utf-8") as handle:
+            if not lines and offset > 1:
+                handle.seek(0)
                 total = sum(1 for _ in handle)
-            message = f"offset {offset} is past the end of the file ({total} lines)"
-            return ToolResult(message, summary="0 lines")
+                message = f"offset {offset} is past the end of the file ({total} lines)"
+                return ToolResult(message, summary="0 lines")
+    except ProtectedFile:
+        return refuse_protected()
+    except NotRegular:
+        return ToolResult(f"{raw} is not a regular file", is_error=True, summary="not a regular file")
     except UnicodeDecodeError:  # invalid UTF-8 past the first 8 KB
         return ToolResult(f"{raw} is binary or not UTF-8", is_error=True, summary="binary")
     except OSError as exc:
@@ -105,6 +114,8 @@ class WriteTool(Tool):
             return invalid_path_result(exc)
         if not inside_workspace(path, ctx):
             return _refuse_outside()
+        if guard_of(ctx).paths.is_protected(path):
+            return refuse_protected()
         if path.is_dir():
             return ToolResult(f"{raw} is a directory", is_error=True, summary="directory")
         if path.exists() and not path.is_file():
@@ -181,6 +192,8 @@ class EditTool(Tool):
             return invalid_path_result(exc)
         if not inside_workspace(path, ctx):
             return _refuse_outside()
+        if guard_of(ctx).paths.is_protected(path):
+            return refuse_protected()
         if path.is_dir():
             return ToolResult(f"{raw} is a directory", is_error=True, summary="directory")
         if not path.exists():

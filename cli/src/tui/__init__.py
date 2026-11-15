@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -27,12 +29,13 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.engine import Agent
     from src.engine.approval import Approver
     from src.engine.commands.loader import load_commands
+    from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
     from src.engine.mcp.trust import TrustStore, trust_store_path
     from src.engine.permissions import setup as permission_setup
-    from src.engine.permissions.config import global_settings_path
+    from src.engine.permissions.config import global_settings_path, project_settings_path
     from src.engine.provider.ollama import OllamaProvider
     from src.engine.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.engine.skills.loader import load_skills
@@ -45,14 +48,12 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     root = workspace.resolve()
     client = OllamaClient(settings.ollama_url)
     provider = OllamaProvider(client, settings.model, settings.num_ctx)
-    ctx = ToolContext(root, settings.bash_timeout)
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
     web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
     search: SearxClient | None = None
     try:
         search = SearxClient(settings.search_url, settings.fetch_timeout) if settings.search_url else None
-        terminals = TerminalManager(root)  # lives for the whole run; /new and session switches do not touch it
         # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
@@ -61,11 +62,24 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             root,
             global_settings_path(),
             TrustStore(trust_store_path(name="permission-trust.json")),
-            permission_setup.tool_keys(default_tools(terminals, fetcher=web, searcher=search, skills=skills)),  # to warn about rules that never apply
+            # to warn about rules that never apply; the manager is only asked for its tools' names, it starts nothing
+            permission_setup.tool_keys(default_tools(TerminalManager(root), fetcher=web, searcher=search, skills=skills)),
         )
+        # Guardrails come from the same two settings files, already parsed: protected paths, the child environment.
+        guard = prepare_guardrails(
+            root,
+            permissions.global_data,
+            permissions.project_data,
+            os.environ,
+            platform.system(),
+            global_path=global_settings_path(),
+            project_path=project_settings_path(root),
+        )
+        ctx = ToolContext(root, settings.bash_timeout, guard=guard)
+        terminals = TerminalManager(root, guard=guard)  # lives for the whole run; /new and session switches do not touch it
         commands = load_commands(root, BUILTINS)  # read once, like the settings files
         mcp = McpHub(  # nothing starts yet
-            SdkConnector(),
+            SdkConnector(guard=guard),
             root,
             setup.servers,
             settings.mcp_timeout,
@@ -123,9 +137,10 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             mcp=mcp,
             mcp_trust=setup.remember,
             permissions=permissions.rules,
-            permission_warnings=permissions.warnings,
+            permission_warnings=(*permissions.warnings, *guard.warnings),
             commands=commands,
             skills=skills,
+            guard=guard,
         )
     except BaseException:
         try:  # setup failed before the app could close them (no loop is running here)

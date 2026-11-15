@@ -364,3 +364,30 @@ async def test_cancelling_a_hanging_call_leaves_the_server_ready_and_working(tmp
         assert [e[0] for e in events] == ["ready"]  # no exit or warning came of the cancel
     finally:
         await hub.close_all()
+
+
+async def test_the_server_does_not_get_secret_variables_of_the_agent_but_keeps_its_own_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.engine.guardrails.setup import prepare
+
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
+    monkeypatch.setenv("KEPT_TOKEN", "kept-value")
+    monkeypatch.setenv("AWS_REGION", "eu-west-1")
+    guard = prepare(tmp_path, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+    config = fake_config(API_TOKEN="from-entry")  # an entry's own env always passes (R9)
+
+    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(config, tmp_path), 15)
+    try:
+        assert isinstance(connection, SdkConnection)
+        values = {
+            name: (await connection.call_tool("env", {"name": name}, 10)).parts
+            for name in ("GITHUB_TOKEN", "KEPT_TOKEN", "AWS_REGION", "API_TOKEN")
+        }
+    finally:
+        await connection.aclose()
+
+    assert values["KEPT_TOKEN"] == ["kept-value"]
+    assert values["AWS_REGION"] == ["eu-west-1"]
+    assert values["API_TOKEN"] == ["from-entry"]
+    assert "ghp_agentsecret1234" not in str(values["GITHUB_TOKEN"])

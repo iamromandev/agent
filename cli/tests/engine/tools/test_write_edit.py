@@ -423,3 +423,42 @@ async def test_edit_refuses_an_existing_fifo_without_hanging(workspace: Path, ct
     )
 
     assert result.output == "pipe is not a regular file"
+
+
+# --- protected paths (guardrails AC7) -------------------------------------------------
+
+
+async def test_write_refuses_a_protected_path_with_no_change_on_disk(workspace: Path, ctx: ToolContext) -> None:
+    result = await _refused(WriteTool(), ctx, path=".env", content="X=1\n")
+
+    assert result.output == "protected path"
+    assert result.summary == "refused: protected path"
+    assert not (workspace / ".env").exists()
+
+
+async def test_edit_refuses_a_protected_path_with_no_change_on_disk(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "certs").mkdir()
+    pem = workspace / "certs" / "server.pem"
+    pem.write_text("old\n")
+
+    result = await _refused(EditTool(), ctx, path="certs/server.pem", old_string="old", new_string="new")
+
+    assert result.output == "protected path"
+    assert pem.read_text() == "old\n"
+
+
+async def test_write_refuses_a_symlink_that_points_at_a_protected_file(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / ".env").write_text("X=1\n")
+    (workspace / "innocent.txt").symlink_to(workspace / ".env")
+
+    result = await _refused(WriteTool(), ctx, path="innocent.txt", content="x")
+
+    assert result.output == "protected path"
+    assert (workspace / ".env").read_text() == "X=1\n"
+
+
+async def test_write_still_allows_a_template_env_file(workspace: Path, ctx: ToolContext) -> None:
+    prepared = await _prepared(WriteTool(), ctx, path=".env.example", content="X=\n")
+
+    assert not (await prepared.execute()).is_error
+    assert (workspace / ".env.example").read_text() == "X=\n"

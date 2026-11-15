@@ -145,6 +145,8 @@ class Rules:
 class PermissionSetup:
     rules: Rules
     warnings: tuple[str, ...]
+    global_data: Mapping[str, object] | None = None  # each file's parsed top-level object, for the other settings keys
+    project_data: Mapping[str, object] | None = None
 
 
 _URL_HOST = re.compile(r"[a-z][a-z0-9+.-]*://[^/]*$", re.IGNORECASE)
@@ -217,4 +219,4 @@ def prepare(
     if len(warnings) > MAX_WARNINGS:
         more = len(warnings) - MAX_WARNINGS
         warnings = [*warnings[:MAX_WARNINGS], f"and {more} more warnings"]
-    return PermissionSetup(rules, tuple(warnings))
+    return PermissionSetup(rules, tuple(warnings), global_file.data, project_file.data)

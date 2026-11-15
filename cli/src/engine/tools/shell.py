@@ -12,6 +12,7 @@ from collections import deque
 from typing import Any, ClassVar
 
 from src.engine.env import child_environment
+from src.engine.guardrails.setup import guard_of
 
 from .base import Prepared, Preview, Tool, ToolContext, ToolResult
 from .text import DANGLING, ESCAPE, SGR, keep_sgr, strip_ansi
@@ -179,7 +180,7 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
             stdout=PIPE,
             stderr=STDOUT,
             start_new_session=True,  # own session + process group, so we can kill the whole tree
-            env=child_environment(),
+            env=guard_of(ctx).env.filter(child_environment()),
         )
     except OSError as exc:  # missing shell, missing or unreadable workspace
         return ToolResult(f"Could not start shell: {exc}", is_error=True, summary="failed to start")

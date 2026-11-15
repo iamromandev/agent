@@ -278,3 +278,21 @@ async def test_without_usage_steps_come_from_the_history_and_tokens_stay_unknown
     record = await run_task(TASKS["command"], 1, ScriptedProvider([[TextDelta("average"), Done(0, 0)]]), _settings(), timeout=30, keep=False)
     assert record.steps == 1
     assert record.tokens is None
+
+
+def test_the_eval_agent_gets_a_real_guard_built_from_the_isolated_home(tmp_path: Path) -> None:
+    from evals.record import RunRecord
+    from evals.runner import _build_agent, _prepare
+
+    task = TASKS["find"]
+    record = RunRecord(task.name, 1)
+    workspace, env = _prepare(task, tmp_path, record)
+
+    agent = _build_agent(task, ScriptedProvider([]), _settings(), workspace, env, record)
+
+    guard = agent.ctx.guard
+    assert guard is not None
+    home = Path(env["HOME"])
+    assert guard.paths.home_folders == [home]  # the isolated home, not the real one
+    assert guard.paths.is_protected(home / ".ssh" / "id_rsa")
+    assert guard.paths.is_protected(workspace / ".env")

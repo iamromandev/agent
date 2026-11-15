@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 import pytest
+from src.engine.guardrails.paths import ProtectedPaths
 from src.engine.instructions import (
     AGENTS_MD_LIMIT,
     MIN_KEPT,
@@ -187,12 +188,65 @@ async def test_a_bad_level_is_skipped_within_100_ms(tmp_path: Path, kind: str) -
     assert [f.label for f in result.files] == ["cli/AGENTS.md"]
 
 
-def test_a_symlink_to_a_regular_file_is_read(tmp_path: Path) -> None:
+def test_a_symlinked_file_is_refused_and_named(tmp_path: Path) -> None:
     ws = tmp_path / "ws"
     ws.mkdir()
     (ws / "real.md").write_text("linked")
     (ws / "AGENTS.md").symlink_to("real.md")
-    assert load_instructions(ws, None).text == "## AGENTS.md\nlinked"
+    result = load_instructions(ws, None)
+    assert result.text == ""
+    assert result.files == ()
+    assert result.refused == ("AGENTS.md (symlink)",)
+    assert result.notice() == ("warn", "Instructions refused: AGENTS.md (symlink)")
+
+
+def test_a_symlink_to_a_credentials_file_never_reaches_the_prompt(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("aws_secret_access_key = TOPSECRETVALUE\n")
+    root = _root(tmp_path / "repo")
+    (root / "cli").mkdir()
+    (root / "AGENTS.md").symlink_to(home / ".aws" / "credentials")
+    _write(root / "cli", "cli rules")
+    result = load_instructions(root / "cli", None, ProtectedPaths(home, ()))
+    assert "TOPSECRETVALUE" not in result.text
+    assert result.text == "## cli/AGENTS.md\ncli rules"
+    assert result.refused == ("AGENTS.md (symlink)",)
+    notice = result.notice()
+    assert notice is not None and notice[0] == "warn"
+
+
+def test_a_hard_link_to_a_credentials_file_is_refused_as_protected(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("aws_secret_access_key = TOPSECRETVALUE\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    os.link(home / ".aws" / "credentials", ws / "AGENTS.md")
+    result = load_instructions(ws, None, ProtectedPaths(home, ()))
+    assert result.text == ""
+    assert result.refused == ("AGENTS.md (protected path)",)
+
+
+def test_a_file_in_a_protected_folder_is_refused(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    ws = home / "priv" / "ws"
+    _write(ws, "rules")
+    result = load_instructions(ws, None, ProtectedPaths(home, ["~/priv/**"]))
+    assert result.text == ""
+    assert result.refused == ("AGENTS.md (protected path)",)
+
+
+def test_the_refusals_are_part_of_the_key_and_the_notice_follows_the_files(tmp_path: Path) -> None:
+    ws = _repo_with_cli(tmp_path, "root", "cli")
+    (ws.parent / "AGENTS.md").unlink()
+    (ws.parent / "real.md").write_text("x")
+    (ws.parent / "AGENTS.md").symlink_to("real.md")
+    result = load_instructions(ws, None)
+    assert result.key == (("cli/AGENTS.md", "whole"), ("AGENTS.md (symlink)", "refused"))
+    level, text = result.notice() or ("", "")
+    assert level == "warn"
+    assert text.startswith("Instructions: cli/AGENTS.md (~") and text.endswith("; refused: AGENTS.md (symlink)")
 
 
 def test_invalid_utf8_is_replaced(tmp_path: Path) -> None:

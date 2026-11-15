@@ -63,6 +63,9 @@ class ApprovalScreen(ModalScreen[Decision | None]):
         request, preview = self.request, self.request.preview
         with Vertical():
             yield Label(_title(preview.title if preview else request.label), id="title")
+            if request.protected:
+                # The path was resolved from the call's argument: escaped, never read as markup.
+                yield Static(Text(f"Protected path: {escape(request.protected_path)}", "bold"), id="protected")
             if preview is not None:
                 theme = diff_theme(self.app.current_theme.dark)
                 body = (

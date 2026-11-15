@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Literal
 
 from src.engine.env import child_environment
+from src.engine.guardrails.setup import Guardrails
 
 from .buffer import LineBuffer
 from .pty import PtyProcess
@@ -238,8 +239,10 @@ class TerminalManager:
         rows: int = 24,
         grace: float = GRACE,
         scrollback: int = 5_000,
+        guard: Guardrails | None = None,
     ) -> None:
         self._workspace = workspace
+        self._guard = guard if guard is not None else Guardrails.off(workspace)
         self._cols = cols
         self._rows = rows
         self._grace = grace
@@ -262,7 +265,7 @@ class TerminalManager:
         loop = asyncio.get_running_loop()  # before the spawn: without a loop no child or pty may be left behind
         shell = _shell()
         argv = [shell, "-i"] if command is None else [shell, "-c", command]
-        env = {k: v for k, v in child_environment().items() if k not in ("COLUMNS", "LINES")}
+        env = {k: v for k, v in self._guard.env.filter(child_environment()).items() if k not in ("COLUMNS", "LINES")}
         env["TERM"] = "xterm-256color"
         try:
             process = PtyProcess.spawn(argv, self._workspace, env, self._cols, self._rows)

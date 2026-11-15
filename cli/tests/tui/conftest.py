@@ -11,6 +11,7 @@ import pytest
 from src.engine import Agent
 from src.engine.approval import Approver
 from src.engine.commands.loader import Commands
+from src.engine.guardrails.setup import Guardrails
 from src.engine.mcp.hub import McpHub
 from src.engine.permissions.setup import Rules
 from src.engine.provider.base import Message, ProviderEvent
@@ -102,6 +103,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         task_fetcher: Fetcher | None = None,
         commands: Commands | None = None,
         skills: Skills | None = None,
+        guard: Guardrails | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -123,7 +125,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 provider,
                 default_tools(manager, skills=skills) if tools else [],
                 approver,
-                ToolContext(root, 5.0),
+                ToolContext(root, 5.0, guard=guard),
                 max_steps,
                 recorder=new_recorder(),
                 compact_at=compact_at,
@@ -148,6 +150,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             permission_warnings=permission_warnings,
             commands=commands,
             skills=skills,
+            guard=guard,
         )
 
     return build

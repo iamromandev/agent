@@ -4,18 +4,20 @@ from __future__ import annotations
 
 import os
 import subprocess
+from collections.abc import Mapping
 from pathlib import Path
 
 
-def list_files(root: Path) -> list[Path]:
-    """Sorted absolute paths of the files under `root` (blocking: call via to_thread)."""
-    listed = _git_files(root)
+def list_files(root: Path, env: Mapping[str, str] | None = None) -> list[Path]:
+    """Sorted absolute paths of the files under `root` (blocking: call via to_thread). `env` is what git runs
+    with; None inherits the agent's own."""
+    listed = _git_files(root, env)
     if listed is None:
         listed = _walk_files(root)
     return sorted(listed)
 
 
-def _git_files(root: Path) -> list[Path] | None:
+def _git_files(root: Path, env: Mapping[str, str] | None) -> list[Path] | None:
     try:
         inside = subprocess.run(
             ["git", "-C", str(root), "rev-parse", "--is-inside-work-tree"],
@@ -23,6 +25,7 @@ def _git_files(root: Path) -> list[Path] | None:
             text=True,
             check=False,
             stdin=subprocess.DEVNULL,
+            env=None if env is None else dict(env),
         )
         if inside.returncode != 0 or inside.stdout.strip() != "true":
             return None
@@ -31,6 +34,7 @@ def _git_files(root: Path) -> list[Path] | None:
             capture_output=True,
             check=False,
             stdin=subprocess.DEVNULL,
+            env=None if env is None else dict(env),
         )
     except OSError:  # git is not installed or cannot run
         return None

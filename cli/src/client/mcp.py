@@ -26,6 +26,7 @@ import mcp_types as types
 from mcp import ClientSession, StdioServerParameters, stdio_client
 from mcp.shared.exceptions import MCPError
 
+from src.engine.guardrails.setup import Guardrails
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import CallResult, McpConnection, McpError, McpExited, McpTimeout, ToolInfo
 
@@ -276,7 +277,8 @@ class SdkConnection:
 
 
 class SdkConnector:
-    def __init__(self) -> None:
+    def __init__(self, guard: Guardrails | None = None) -> None:
+        self._guard = guard if guard is not None else Guardrails.off(Path("."))
         self._pids: set[int] = set()  # servers spawned and not yet ended, also those still connecting
 
     def kill_all(self) -> None:
@@ -288,7 +290,7 @@ class SdkConnector:
         params = StdioServerParameters(
             command=config.command,
             args=list(config.args),
-            env=dict(os.environ) | dict(config.env),
+            env=self._guard.env.filter(os.environ) | dict(config.env),  # an entry's own env always passes
             cwd=cwd,
         )
         connection = SdkConnection(params, self._pids)

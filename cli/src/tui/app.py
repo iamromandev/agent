@@ -38,6 +38,14 @@ from src.engine.approval import Approver
 from src.engine.commands.loader import Commands
 from src.engine.compaction import CHARS_PER_TOKEN
 from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
+from src.engine.guardrails.paths import (
+    BUILTIN_HOME,
+    BUILTIN_NAMES,
+    MAX_TRACKED_DEPTH,
+    MAX_TRACKED_DIRS,
+    MAX_TRACKED_FILES,
+)
+from src.engine.guardrails.setup import Guardrails
 from src.engine.instructions import fingerprint, levels
 from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
@@ -97,7 +105,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
 # Built-in commands and what `/` suggests for them. Must equal the cases of `AgentApp._command` (a test checks).
@@ -108,6 +116,7 @@ BUILTINS: dict[str, str] = {
     "sessions": "switch session",
     "mcp": "MCP servers and their tools",
     "permissions": "saved permission rules",
+    "guardrails": "sandbox, protected paths and redaction",
     "skills": "loaded skills",
     "compact": "shrink the context",
     "init": "write AGENTS.md",
@@ -154,6 +163,7 @@ class AgentApp(App[None]):
         permission_warnings: Sequence[str] = (),
         commands: Commands | None = None,
         skills: Skills | None = None,
+        guard: Guardrails | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -164,6 +174,7 @@ class AgentApp(App[None]):
         self._permission_warnings = tuple(permission_warnings)
         self.commands = commands if commands is not None else Commands({}, ())
         self.skills = skills if skills is not None else Skills({}, ())
+        self.guard = guard if guard is not None else Guardrails.off(workspace)
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -383,6 +394,32 @@ class AgentApp(App[None]):
         ]
         lines.extend(self.skills.warnings)
         return "\n".join(lines) if lines else "No skills."
+
+    def _guardrails_summary(self) -> str:
+        """What the guardrails do in this run. Names and paths only, never a value; all of it escaped."""
+        guard = self.guard
+        sandbox = guard.sandbox
+        lines = [f"Sandbox: {escape(sandbox.reason)}" + (f", network {'allowed' if sandbox.network else 'off'}" if sandbox.profile else "")]
+        if sandbox.profile:
+            lines.append("Writable: " + ", ".join(escape(str(path)) for path in sandbox.writable))
+        # `.env` and `.env.*` are shown as one `.env*` (matching is unchanged: the template files stay unprotected)
+        names = [".env*" if name == ".env" else name for name in BUILTIN_NAMES if name != ".env.*"]
+        builtin = [pattern.removesuffix("/**") for pattern in BUILTIN_HOME] + names
+        extra = guard.paths.extra_count
+        lines.append("Protected: " + ", ".join(builtin) + (f" (+{extra} from settings)" if extra else ""))
+        homes = guard.paths.home_folders
+        if len(homes) > 1:  # `$HOME` and the account's recorded home differ: `~` in a pattern means both
+            lines.append("Home folders: " + ", ".join(escape(str(home)) for home in homes))
+        if guard.paths.tracking_truncated:
+            lines.append(
+                f"Hard links to protected files are tracked for the first {MAX_TRACKED_FILES:,} files only "
+                f"(and {MAX_TRACKED_DEPTH} folder levels, {MAX_TRACKED_DIRS:,} folders) under protected folders "
+                "and, for protected names, in the workspace"
+            )
+        removed = ", ".join(escape(name) for name in guard.removed_env) or "none"
+        lines.append(f"Removed from child environment: {removed}")
+        lines.append(f"Redacted this run: {guard.redactions}")
+        return "\n".join(lines)
 
     def _mcp_summary(self) -> str:
         """`<name> (<source>) <status>[: reason]` per server, the tool names of a ready one indented below it."""
@@ -711,6 +748,8 @@ class AgentApp(App[None]):
             case "/permissions":
                 lines = self.permissions.listing()
                 await transcript.add_notice("info", "\n".join(lines) if lines else "no permission rules")
+            case "/guardrails":
+                await transcript.add_notice("info", self._guardrails_summary())
             case "/skills":
                 await transcript.add_notice("info", self._skills_summary())
             case "/quit":

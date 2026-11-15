@@ -1,11 +1,19 @@
 from __future__ import annotations
 
+import dataclasses
+import os
 import subprocess
 from pathlib import Path
+from typing import Any
 
 import pytest
+from src.engine.guardrails.setup import Guardrails, prepare
 from src.engine.tools.base import Prepared, ToolContext, ToolResult
 from src.engine.tools.search import GlobTool, GrepTool
+
+
+def prepare_guard(home: Path) -> Guardrails:
+    return prepare(home / "ws", None, None, {}, "Darwin", home=home)
 
 
 async def _run(tool: GlobTool | GrepTool, ctx: ToolContext, **args: object) -> ToolResult:
@@ -231,3 +239,125 @@ async def test_grep_searches_an_untracked_nested_repo(nested_repo: Path, ctx: To
     result = await _run(GrepTool(), ctx, pattern="inner")
 
     assert result.output == "nested/in.py:1: inner"
+
+
+# --- protected paths (guardrails AC6) -------------------------------------------------
+
+
+@pytest.fixture
+def secrets(workspace: Path) -> Path:
+    (workspace / ".env").write_text("password=hunter2\n")
+    (workspace / "app.py").write_text("password = os.environ['P']\n")
+    (workspace / "server.pem").write_text("password\n")
+    (workspace / ".env.example").write_text("password=\n")
+    return workspace
+
+
+async def test_ac6_grep_over_a_folder_leaves_out_protected_files_and_says_how_many(secrets: Path, ctx: ToolContext) -> None:
+    result = await _run(GrepTool(), ctx, pattern="password")
+
+    lines = result.output.splitlines()
+    assert lines[:-1] == [".env.example:1: password=", "app.py:1: password = os.environ['P']"]
+    assert lines[-1] == "2 protected files skipped"
+    assert "hunter2" not in result.output
+    assert result.summary == "2 matches"
+
+
+async def test_grep_with_nothing_else_to_find_still_reports_the_skipped_files(secrets: Path, ctx: ToolContext) -> None:
+    result = await _run(GrepTool(), ctx, pattern="hunter2")
+
+    assert result.output == "No matches\n2 protected files skipped"
+
+
+async def test_grep_counts_only_protected_files_its_include_filter_would_search(secrets: Path, ctx: ToolContext) -> None:
+    result = await _run(GrepTool(), ctx, pattern="password", include="*.py")
+
+    assert result.output == "app.py:1: password = os.environ['P']"
+
+
+async def test_grep_of_one_given_file_searches_it_the_loop_asked_first(secrets: Path, ctx: ToolContext) -> None:
+    asked = dataclasses.replace(ctx, protected_ok=True)  # what the loop sets once the user said yes
+
+    result = await _run(GrepTool(), asked, pattern="password", path=".env")
+
+    assert result.output == ".env:1: password=hunter2"
+
+
+async def test_glob_leaves_out_protected_files_and_says_how_many(secrets: Path, ctx: ToolContext) -> None:
+    result = await _run(GlobTool(), ctx, pattern="*")
+
+    assert result.output.splitlines() == [".env.example", "app.py", "2 protected files skipped"]
+
+
+async def test_glob_with_a_wildcard_free_pattern_names_a_protected_file_after_the_loop_asked(
+    secrets: Path, ctx: ToolContext
+) -> None:
+    result = await _run(GlobTool(), ctx, pattern=".env")
+
+    assert result.output == ".env"
+
+
+async def test_a_symlinked_protected_file_in_the_workspace_is_skipped(workspace: Path, ctx: ToolContext, tmp_path: Path) -> None:
+    secret = tmp_path / "home" / ".aws" / "credentials"
+    secret.parent.mkdir(parents=True)
+    secret.write_text("aws_secret=1\n")
+    (workspace / "creds.txt").symlink_to(secret)
+    (workspace / "ok.txt").write_text("aws_secret=2\n")
+    guarded = ToolContext(workspace, 5.0, guard=prepare_guard(tmp_path / "home"))
+
+    result = await _run(GrepTool(), guarded, pattern="aws_secret")
+
+    assert result.output == "ok.txt:1: aws_secret=2\n1 protected files skipped"
+
+
+async def test_files_under_a_symlinked_folder_pointing_at_a_protected_one_are_skipped(
+    workspace: Path, tmp_path: Path
+) -> None:
+    home = tmp_path / "home"
+    (home / ".ssh").mkdir(parents=True)
+    (home / ".ssh" / "config").write_text("Host x\n")
+    (workspace / "linked").symlink_to(home / ".ssh")
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True)  # git lists the link; a plain walk would not enter it
+    guarded = ToolContext(workspace, 5.0, guard=prepare_guard(home))
+
+    result = await _run(GrepTool(), guarded, pattern="Host")
+
+    assert result.output == "No matches\n1 protected files skipped"
+
+
+@pytest.mark.parametrize("tool,args", [(GlobTool, {"pattern": "**/*.py"}), (GrepTool, {"pattern": "def"})])
+async def test_git_listing_gets_the_filtered_environment(
+    tree: Path, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch, tool: type, args: dict
+) -> None:
+    monkeypatch.setenv("GITHUB_TOKEN", "ghp_secretvalue0123")
+    monkeypatch.setenv("KEEP_ME", "1")
+    seen: list[Any] = []
+    real_run: Any = subprocess.run
+
+    def spy(*a: Any, **kw: Any) -> Any:
+        if a and isinstance(a[0], list) and a[0][0] == "git":
+            seen.append(kw.get("env"))
+        return real_run(*a, **kw)
+
+    monkeypatch.setattr("src.engine.tools.listing.subprocess.run", spy)
+
+    await _run(tool(), ctx, **args)
+
+    assert len(seen) == 2  # rev-parse and ls-files
+    for env in seen:
+        assert env is not None
+        assert "GITHUB_TOKEN" not in env
+        assert env["KEEP_ME"] == "1"
+
+
+async def test_a_hard_link_to_a_protected_file_in_the_workspace_is_skipped(workspace: Path, tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    (home / ".aws").mkdir(parents=True)
+    (home / ".aws" / "credentials").write_text("aws_secret=1\n")
+    os.link(home / ".aws" / "credentials", workspace / "notes.txt")
+    (workspace / "ok.txt").write_text("aws_secret=2\n")
+    guarded = ToolContext(workspace, 5.0, guard=prepare_guard(home))
+
+    result = await _run(GrepTool(), guarded, pattern="aws_secret")
+
+    assert result.output == "ok.txt:1: aws_secret=2\n1 protected files skipped"

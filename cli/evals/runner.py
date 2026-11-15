@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import shutil
 import subprocess
 import sys
@@ -19,9 +20,10 @@ from src.client import OllamaClient, OllamaError
 from src.config.settings import Settings
 from src.engine import Agent
 from src.engine.commands.loader import load_commands
+from src.engine.guardrails.setup import prepare as prepare_guardrails
 from src.engine.mcp.trust import TrustStore, trust_store_path
 from src.engine.permissions import setup as permission_setup
-from src.engine.permissions.config import global_settings_path
+from src.engine.permissions.config import global_settings_path, project_settings_path
 from src.engine.provider.base import Provider
 from src.engine.provider.ollama import OllamaProvider
 from src.engine.session import NullRecorder
@@ -105,7 +107,6 @@ def _prepare(task: Task, tmp: Path, record: RunRecord) -> tuple[Path, dict[str, 
 
 
 def _build_agent(task: Task, provider: Provider, settings: Settings, workspace: Path, env: Mapping[str, str], record: RunRecord) -> Agent:
-    ctx = ToolContext(workspace, settings.bash_timeout)
     tools = default_tools(terminals=None, fetcher=None)
     permissions = permission_setup.prepare(
         workspace,
@@ -113,6 +114,19 @@ def _build_agent(task: Task, provider: Provider, settings: Settings, workspace: 
         TrustStore(trust_store_path(env, name="permission-trust.json")),
         permission_setup.tool_keys(tools),
     )
+    # The same guardrails a real launch builds, from the eval's isolated settings and home folder: the file tools
+    # must behave as they do for a user (protected paths), not as they do without a guard.
+    guard = prepare_guardrails(
+        workspace,
+        permissions.global_data,
+        permissions.project_data,
+        os.environ,
+        platform.system(),
+        home=Path(env["HOME"]),
+        global_path=global_settings_path(env),
+        project_path=project_settings_path(workspace),
+    )
+    ctx = ToolContext(workspace, settings.bash_timeout, guard=guard)
     return Agent(
         provider,
         tools,
