@@ -35,6 +35,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.engine.permissions.config import global_settings_path
     from src.engine.provider.ollama import OllamaProvider
     from src.engine.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
+    from src.engine.skills.loader import load_skills
     from src.engine.terminal.manager import TerminalManager
     from src.engine.tools import default_tools, read_only_tools
     from src.engine.tools.base import ToolContext
@@ -55,11 +56,12 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
         # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
+        skills = load_skills(root)  # read once, like the commands
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
             TrustStore(trust_store_path(name="permission-trust.json")),
-            permission_setup.tool_keys(default_tools(terminals, fetcher=web, searcher=search)),  # to warn about rules that never apply
+            permission_setup.tool_keys(default_tools(terminals, fetcher=web, searcher=search, skills=skills)),  # to warn about rules that never apply
         )
         commands = load_commands(root, BUILTINS)  # read once, like the settings files
         mcp = McpHub(  # nothing starts yet
@@ -78,7 +80,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
         def agent_factory(approver: Approver) -> Agent:
             return Agent(
                 provider,
-                default_tools(terminals, fetcher=web, searcher=search),
+                default_tools(terminals, fetcher=web, searcher=search, skills=skills),
                 approver,
                 ctx,
                 settings.max_steps,
@@ -87,7 +89,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 compact_keep_turns=settings.compact_keep_turns,
                 instructions_share=settings.instructions_share,
                 extra_tools=mcp.tools,
-                task_tools=read_only_tools(web, search),
+                task_tools=read_only_tools(web, search, skills),
                 task_max_steps=settings.task_max_steps,
                 rules=permissions.rules,
             )
@@ -123,6 +125,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             permissions=permissions.rules,
             permission_warnings=permissions.warnings,
             commands=commands,
+            skills=skills,
         )
     except BaseException:
         try:  # setup failed before the app could close them (no loop is running here)

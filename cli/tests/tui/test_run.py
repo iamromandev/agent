@@ -377,6 +377,20 @@ def test_run_reads_the_permission_rules_and_gives_the_same_ones_to_the_agent_and
     assert any("bash(a*b)" in w for w in app._permission_warnings)
 
 
+def test_a_skill_rule_with_a_value_is_not_called_keyless_when_no_skills_are_loaded(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    config = tmp_path / "config"
+    (config / "agent").mkdir(parents=True)
+    (config / "agent" / "settings.json").write_text('{"permissions": {"allow": ["skill(release)"], "deny": ["read(x)"]}}')
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(config))
+
+    app = _run_app(monkeypatch, tmp_path / "w")
+
+    assert not any("skill(release)" in w for w in app._permission_warnings)
+    assert any("read(x)" in w for w in app._permission_warnings)  # control: a keyless tool still warns
+
+
 def test_run_keeps_the_permission_trust_in_its_own_store_file(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     workspace = tmp_path / "w"
     (workspace / ".agent").mkdir(parents=True)

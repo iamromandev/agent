@@ -63,8 +63,11 @@ def project_commands_dir(workspace: Path) -> Path:
     return workspace / ".agent" / "commands"
 
 
-def parse(text: str) -> tuple[str | None, str]:
-    """`(description, body)` of a command file. Raises `ValueError` when front matter is opened and never closed."""
+def front_matter(text: str) -> tuple[dict[str, str] | None, str]:
+    """`(keys, body)`: the `name:` and `description:` lines of a leading `---` block. `None` keys when there is no block.
+
+    Raises `ValueError` when the block is opened and never closed.
+    """
     lines = text.removeprefix("\ufeff").replace("\r\n", "\n").split("\n")
     if lines[0].rstrip() != "---":
         return None, "\n".join(lines)
@@ -72,11 +75,18 @@ def parse(text: str) -> tuple[str | None, str]:
         end = next(i for i in range(1, len(lines)) if lines[i].rstrip() == "---")
     except StopIteration:
         raise ValueError("front matter is not closed") from None
-    description: str | None = None
+    keys: dict[str, str] = {}
     for line in lines[1:end]:
-        if line.startswith("description:"):
-            description = line[len("description:") :].strip()
-    return description, "\n".join(lines[end + 1 :])
+        for key in ("name", "description"):
+            if line.startswith(f"{key}:"):
+                keys[key] = line[len(key) + 1 :].strip()
+    return keys, "\n".join(lines[end + 1 :])
+
+
+def parse(text: str) -> tuple[str | None, str]:
+    """`(description, body)` of a command file. Raises `ValueError` when front matter is opened and never closed."""
+    keys, body = front_matter(text)
+    return (keys or {}).get("description"), body
 
 
 def _read(path: Path, name: str, source: Source) -> Command:

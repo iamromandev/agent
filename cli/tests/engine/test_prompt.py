@@ -253,3 +253,27 @@ def test_todo_guidance_appears_only_when_todo_is_offered(tmp_path: Path) -> None
     )
     assert guidance in build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Linux", todo=True)
     assert "checklist" not in _prompt(tmp_path)
+
+
+SECTION = "Available skills (call the skill tool ...):\n- a: does a"
+
+
+def test_ac7_system_prompt_has_skills_section_only_when_given(tmp_path: Path) -> None:
+    assert "Available skills" not in build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Linux")
+    assert SECTION in build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Linux", skills=SECTION)
+
+
+def test_skills_section_comes_before_the_instructions_text(tmp_path: Path) -> None:
+    from src.engine.instructions import Instructions
+
+    instructions = Instructions("RULES-TEXT", (), None)
+    prompt = build_system_prompt(tmp_path, Mode.PLAN, TODAY, "Linux", instructions=instructions, skills=SECTION)
+    assert prompt.index("PLAN mode") < prompt.index(SECTION) < prompt.index("RULES-TEXT")
+
+
+def test_task_prompt_has_skills_section_only_when_given(tmp_path: Path) -> None:
+    from src.engine.instructions import Instructions
+
+    empty = Instructions("", (), None)
+    assert "Available skills" not in build_task_prompt(tmp_path, TODAY, "Linux", empty)
+    assert SECTION in build_task_prompt(tmp_path, TODAY, "Linux", empty, skills=SECTION)
