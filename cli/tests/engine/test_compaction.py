@@ -10,6 +10,7 @@ from src.engine.compaction import (
     MESSAGE_OVERHEAD,
     MIN_SUMMARY_GAIN,
     OMITTED_NOTE,
+    STOP_NOTE_PREFIX,
     SUMMARIZER_INSTRUCTIONS,
     SUMMARY_PREFIX,
     SUMMARY_TRUNCATED,
@@ -130,6 +131,14 @@ def test_a_real_user_message_that_starts_with_the_prefix_counts_as_a_turn() -> N
 
     assert turn_starts(history) == [0, 2, 4]
     assert cut_index(history, 2) == 2
+
+
+def test_stop_hook_notes_are_not_turn_starts() -> None:
+    note = Message("user", f"{STOP_NOTE_PREFIX}run the tests")
+    history = [*turns(1), note, Message("assistant", "ok"), note, Message("assistant", "ok"), *turns(1)]
+
+    assert turn_starts(history) == [0, 6]
+    assert cut_index(history, 1) == 6 and cut_index(history, 2) == 0
 
 
 def test_turn_starts_of_an_empty_history_is_empty() -> None:

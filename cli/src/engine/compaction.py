@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from src.engine.provider.base import Message, ToolSpec
 from src.engine.session.records import ToolMeta
 
+STOP_NOTE_PREFIX = "[hook Stop] "  # starts the user message a `Stop` hook block records: it continues a turn, it is not one
 SUMMARY_PREFIX = "Summary of the earlier conversation:\n"
 CHARS_PER_TOKEN = 4
 MESSAGE_OVERHEAD = 4  # tokens per message for role/formatting
@@ -78,8 +79,13 @@ def cap_summary(text: str, window: int) -> str:
 
 
 def turn_starts(history: Sequence[Message]) -> list[int]:
-    """Indices of the real user messages: each starts a turn. A summary stands in for old turns, so it is not one."""
-    return [i for i, m in enumerate(history) if m.role == "user" and not is_summary(history, i)]
+    """Indices of the real user messages: each starts a turn. A summary stands in for old turns, and a `Stop` hook's
+    note continues the turn before it, so neither is one."""
+    return [
+        i
+        for i, m in enumerate(history)
+        if m.role == "user" and not is_summary(history, i) and not m.content.startswith(STOP_NOTE_PREFIX)
+    ]
 
 
 def cut_index(history: Sequence[Message], keep_turns: int) -> int:

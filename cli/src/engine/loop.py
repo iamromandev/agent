@@ -14,6 +14,7 @@ from typing import Literal
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
 from src.engine.compaction import (
     MIN_SUMMARY_GAIN,
+    STOP_NOTE_PREFIX,
     SUMMARY_PREFIX,
     Reported,
     cap_summary,
@@ -39,7 +40,7 @@ from src.engine.events import (
 )
 from src.engine.guardrails.redact import drop_partial_tail
 from src.engine.guardrails.setup import REDACTION_FAILED, guard_of
-from src.engine.hooks.setup import Hooks, notice_text
+from src.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed
 from src.engine.instructions import Instructions, load_instructions
 from src.engine.mode import Mode
 from src.engine.permissions.config import agent_config_files
@@ -85,6 +86,8 @@ PARTIAL_MARK = "\n[interrupted by user]"
 NOTHING_TO_COMPACT = "Nothing to compact"
 NOT_SUMMARIZED = "Could not summarize the earlier conversation; continuing with pruned history"
 STILL_FULL = "Context is still full \u2014 start a new session with /new"
+HOOK_CONTEXT_LIMIT = 4_000  # characters of hook context one request carries; the rest is cut
+HOOK_CONTEXT_CUT = "\n[hook context cut]"
 SUMMARY_BUDGET = 0.6  # of the window: how much older conversation one summary request may carry
 
 
@@ -199,6 +202,7 @@ class Agent:
         self._inflight: str | None = None  # id of the tool call being run, for the interrupt repair
         self._summary_failed = False  # a summary failed in this turn: automatic compaction does not retry it
         self._warned_full = False  # "still full" was shown in this turn
+        self._hook_notes: list[str] = []  # redacted context from hooks, for the next request only
 
     def set_mode(self, mode: Mode) -> None:
         """Takes effect from the next model request; a step already running keeps its snapshot."""
@@ -236,6 +240,7 @@ class Agent:
         self._save_error = None
         self._save_failing = False
         self._summary_failed = self._warned_full = False
+        self._hook_notes.clear()  # context for the old session: the new one's SessionStart hook adds its own
         self._undo.clear()
         return old
 
@@ -259,6 +264,15 @@ class Agent:
             return None
         return Message("system", render_note(todos))
 
+    def _hook_note(self) -> Message | None:
+        """The context hooks added for the next request (already redacted), as one system message."""
+        if not self._hook_notes:
+            return None
+        text = "\n\n".join(self._hook_notes)
+        if len(text) > HOOK_CONTEXT_LIMIT:
+            text = text[:HOOK_CONTEXT_LIMIT] + HOOK_CONTEXT_CUT
+        return Message("system", "[hook context]\n" + text)
+
     def close(self) -> None:
         """Release the recorder (one last attempt to write what is queued). Never raises."""
         close_recorder(self._recorder)
@@ -268,6 +282,9 @@ class Agent:
         specs = [t.spec() for t in self.tools_for(self.mode)]
         loaded = self._loaded if self._loaded is not None else self.instructions()
         total = estimate_tokens(self._system(self.mode, loaded), self.history, self._reported, specs)
+        hook = self._hook_note()  # not sent yet, so never in the model's count
+        if hook is not None:
+            total += message_tokens(hook)
         if self._reported is not None:
             return total  # the model's count already includes the note it was sent
         note = self._todo_note()
@@ -475,7 +492,10 @@ class Agent:
     def tools_for(self, mode: Mode) -> list[Tool]:
         return [t for t in self.all_tools() if not (mode is Mode.PLAN and t.mutating)]
 
-    async def run_turn(self, text: str, emit: EventSink, *, draft: str | None = None) -> None:
+    async def run_turn(
+        self, text: str, emit: EventSink, *, draft: str | None = None, context: Sequence[str] = ()
+    ) -> None:
+        """Run one user turn. `context` is what the `UserPromptSubmit` hooks added: a system note for the first request."""
         if self._busy:
             raise AgentBusy("a turn is already running")
         if not text.strip():
@@ -483,9 +503,12 @@ class Agent:
         self._busy = True
         self._summary_failed = self._warned_full = False  # per turn: one retry of a summary, one warning
         self._undo.begin(len(self.history), draft if draft is not None else text)
+        kept = len(self._hook_notes)  # what stands before this turn's own context (SessionStart's)
         try:
             self._record(Message("user", text))
             try:
+                for notice in self._add_hook_context("UserPromptSubmit", context):
+                    emit(notice)
                 self._flush_save_error(emit)
                 if self.role == "main" and (notice := self.instructions_notice()) is not None:
                     try:
@@ -495,6 +518,7 @@ class Agent:
                         raise
                 await self._run_steps(emit)
             except asyncio.CancelledError:
+                del self._hook_notes[kept:]  # the cancelled prompt's context must not go with the next prompt
                 # Esc cancels the worker running this coroutine. Leave a history the model can be
                 # asked again with: every tool call answered, the UI told, then let the cancel go on.
                 self._answer_unanswered_calls(INTERRUPTED, SKIPPED, "interrupted", "skipped")
@@ -590,7 +614,8 @@ class Agent:
             return call.name
 
     async def _run_steps(self, emit: EventSink) -> None:
-        for _ in range(self.max_steps):
+        continuations = 0  # times a `Stop` hook sent this user turn on
+        for step in range(self.max_steps):
             await self._maybe_compact(emit)
             mode = self.mode  # snapshot: a Tab press mid-step applies from the next request
             requested = await self._request(mode, emit)
@@ -601,8 +626,19 @@ class Agent:
             self._anchor(total)
             self._flush_save_error(emit)
             if not assistant.tool_calls:
-                emit(TurnEnded("done"))
-                return
+                # On the last step there is none left to continue with: the turn simply ends.
+                if step + 1 < self.max_steps:
+                    reason = await self._stop_hooks(continuations, emit)
+                else:
+                    reason = None
+                    if self.hooks.has("Stop"):
+                        emit(Notice("info", "Stop hooks skipped: no step left"))
+                if reason is None:
+                    emit(TurnEnded("done"))
+                    return
+                continuations += 1
+                self._record(Message("user", f"{STOP_NOTE_PREFIX}{reason}"))  # counts as a step: the loop goes on
+                continue
             for tool_call in assistant.tool_calls:
                 await self._run_tool_call(tool_call, mode, emit)
         emit(Notice("warn", f"Step limit ({self.max_steps}) reached"))
@@ -623,12 +659,13 @@ class Agent:
         system = self._system(mode)
         specs = [t.spec() for t in self.tools_for(mode)]
         messages = [system, *self.history]
-        if (note := self._todo_note()) is not None:
+        notes = [n.content for n in (self._hook_note(), self._todo_note()) if n is not None]
+        if notes:
             # Just before the latest user message: the model reads it next to what it is asked now.
             # Trade-off: the note changes the request prefix after it, so a provider's prompt cache
             # is reused only up to here; placing it last would keep the cache but sit apart from the question.
             last_user = max((i for i, m in enumerate(messages) if m.role == "user"), default=len(messages))
-            messages.insert(last_user, note)
+            messages.insert(last_user, Message("system", "\n\n".join(notes)))
         parts: list[str] = []
         calls: list[ToolCall] = []
         # aclosing so that leaving the loop early (cancel, error) closes the provider stream now
@@ -637,6 +674,8 @@ class Agent:
         try:
             async with contextlib.aclosing(self.provider.stream(messages, specs)) as events:
                 async for event in events:
+                    if not isinstance(event, ProviderError):
+                        self._hook_notes.clear()  # the model is answering: this request has it (one request only)
                     match event:
                         case TextDelta(text):
                             parts.append(text)
@@ -724,7 +763,7 @@ class Agent:
             except asyncio.CancelledError as exc:  # Esc during a hook: the call did finish, so its result is kept
                 cancel = cancel or exc
             except Exception as exc:  # a broken hook step never costs the result the tool produced
-                emit(Notice("warn", f"hook PostToolUse failed: {notice_text(str(exc))}"))
+                emit(hook_failed("PostToolUse", exc))
         self._record(
             Message("tool", result.output, tool_call_id=call.id, name=call.name), ToolMeta(label, result.summary)
         )
@@ -748,6 +787,70 @@ class Agent:
             return guard_of(self.ctx).redactor.redact(text)[0]
         except Exception:
             return ""
+
+    def _add_hook_context(self, event: str, texts: Sequence[str]) -> list[Notice]:
+        """Keep a hook's context for the next request, redacted (fail closed: nothing of it when redaction fails).
+        Returns the notices to show: a warning when the text was withheld."""
+        if not texts:
+            return []
+        guard = guard_of(self.ctx)
+        try:
+            text, count = guard.redactor.redact("\n\n".join(texts))
+        except Exception:
+            return [Notice("warn", f"hook {event}: its text was withheld (redaction failed)")]
+        guard.redactions += count
+        if text:
+            self._hook_notes.append(text)
+        return []
+
+    async def prompt_hooks(self, text: str, emit: EventSink) -> HookDecision:
+        """Run the `UserPromptSubmit` hooks for a prompt before it is recorded; the app sends `decision.context` to
+        `run_turn` and, on a block, drops the prompt. Never raises (but for a cancel); the notices go to `emit`."""
+        if not self.hooks.has("UserPromptSubmit"):
+            return HookDecision(False, "", [], [])
+        decision = HookDecision(False, "", [], [])
+        try:
+            decision = await self.hooks.run("UserPromptSubmit", self._hook_payload(prompt=text))
+            for notice in self.hooks.notices(decision, self._redact_hook_text):
+                emit(notice)
+        except Exception as exc:  # a broken hook step never costs the user's prompt
+            with contextlib.suppress(Exception):
+                emit(hook_failed("UserPromptSubmit", exc))
+        return decision
+
+    async def session_started(self, source: Literal["startup", "resume", "new", "switch"], emit: EventSink) -> None:
+        """Run the `SessionStart` hooks once the session is ready; their context goes to the next request. Never raises
+        (but for a cancel). `reset` drops context kept for the session that ended, so call this after it."""
+        if not self.hooks.has("SessionStart"):
+            return
+        try:
+            decision = await self.hooks.run("SessionStart", self._hook_payload(source=source))
+            notices = [*self.hooks.notices(decision, self._redact_hook_text), *self._add_hook_context("SessionStart", decision.context)]
+            for notice in notices:
+                emit(notice)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                emit(hook_failed("SessionStart", exc))
+
+    async def _stop_hooks(self, continuations: int, emit: EventSink) -> str | None:
+        """Run the `Stop` hooks when a turn would end: the reason (redacted) to continue with, or None to end it.
+        At most `STOP_CONTINUATIONS` per user turn, then a warning and no more hook runs."""
+        if not self.hooks.has("Stop"):
+            return None
+        if continuations >= STOP_CONTINUATIONS:
+            emit(Notice("warn", "Stop hook limit reached"))
+            return None
+        try:
+            decision = await self.hooks.run("Stop", self._hook_payload(continuations=continuations))
+            for notice in self.hooks.notices(decision, self._redact_hook_text):
+                emit(notice)
+        except Exception as exc:  # a broken hook step never costs the finished turn
+            with contextlib.suppress(Exception):
+                emit(hook_failed("Stop", exc))
+            return None
+        if not decision.blocked:
+            return None
+        return self._redact_hook_text(decision.reason) or DEFAULT_REASON
 
     async def _pre_hooks(self, tool: Tool, call: ToolCall, mode: Mode, emit: EventSink) -> ToolResult | None:
         """Run the `PreToolUse` hooks for a call; the refusal when one blocks, else None. Before every dialog."""
