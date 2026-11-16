@@ -9,6 +9,7 @@ import re
 import signal
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
@@ -60,6 +61,7 @@ from src.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
     ModelCatalog,
+    ModelInfo,
     installed_name,
     resolve_window,
     shown_name,
@@ -81,6 +83,7 @@ from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
+from src.tui.screens.models import ModelPicker
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
@@ -90,7 +93,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, McpTrustScreen, PermissionTrustScreen)  # modal screens: the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen)  # modal screens: the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -543,7 +546,63 @@ class AgentApp(App[None]):
         finally:
             self._switching = False
 
-    async def _switch_model(self, name: str) -> None:
+    def _picking(self) -> bool:
+        """A bare `/model` is loading or its picker is open."""
+        return any(w.group == "model-pick" and not w.is_finished for w in self.workers) or any(
+            isinstance(screen, ModelPicker) for screen in self.screen_stack
+        )
+
+    async def _pick_model(self) -> None:
+        """The bare `/model` worker: list, read the lengths, pick, then switch. The input stays usable until the
+        switch itself, which takes the claim."""
+        transcript = self.query_one(Transcript)
+        try:
+            if self.catalog is None:
+                await transcript.add_notice("error", "No model catalog is available")
+                return
+            try:
+                infos = await self.catalog.list()
+            except CatalogError as error:
+                await transcript.add_notice("error", f"Could not list the installed models: {error}")
+                return
+            if not infos:
+                await transcript.add_notice("info", "No models installed.")
+                return
+            catalog = self.catalog
+
+            async def look(info: ModelInfo) -> tuple[ModelInfo, tuple[int | None, str | None]]:
+                try:
+                    async with asyncio.timeout(SHOW_TIMEOUT):
+                        length = await catalog.context_length(info.name)
+                    return replace(info, context_length=length), (length, None)
+                except CatalogError as error:
+                    return info, (None, str(error))
+                except TimeoutError:
+                    return info, (None, f"Ollama did not answer within {SHOW_TIMEOUT:g} s")
+
+            looked = await asyncio.gather(*(look(info) for info in infos))
+            known = {info.name: result for info, (_, result) in zip(infos, looked, strict=True)}
+            if self._turn_active or self._switching:
+                await transcript.add_notice("warn", self._busy_text("/model"))
+                return
+            if len(self.screen_stack) > 1:  # another dialog came up while the list loaded
+                await transcript.add_notice("warn", "Another dialog is open; run /model again after closing it")
+                return
+            current = installed_name(self.provider.model, [i.name for i in infos])
+            chosen = await self.push_screen_wait(ModelPicker([info for info, _ in looked], current))
+            if chosen is None:
+                return
+            if not self._begin_switch():
+                await transcript.add_notice("warn", self._busy_text("/model"))
+                return
+            try:
+                await self._switch_model(chosen, known.get(chosen))
+            finally:
+                self._switching = False
+        except Exception as error:  # a bug must not kill the app
+            await transcript.add_notice("error", f"Model switch failed: {escape(str(error))}")
+
+    async def _switch_model(self, name: str, looked: tuple[int | None, str | None] | None = None) -> None:
         """Make `name` (an installed model) the one every later request uses, with a window that fits it, and
         remember it for the project. Ollama failing leaves the old model and window in place."""
         transcript, status = self.query_one(Transcript), self.query_one(StatusBar)
@@ -565,13 +624,16 @@ class AgentApp(App[None]):
             return
         length: int | None = None
         failed: str | None = None
-        try:
-            async with asyncio.timeout(SHOW_TIMEOUT):
-                length = await self.catalog.context_length(target)
-        except CatalogError as error:
-            failed = str(error)
-        except TimeoutError:
-            failed = f"Ollama did not answer within {SHOW_TIMEOUT:g} s"
+        if looked is not None:  # the picker already asked
+            length, failed = looked
+        else:
+            try:
+                async with asyncio.timeout(SHOW_TIMEOUT):
+                    length = await self.catalog.context_length(target)
+            except CatalogError as error:
+                failed = str(error)
+            except TimeoutError:
+                failed = f"Ollama did not answer within {SHOW_TIMEOUT:g} s"
         window = resolve_window(length, self.window_cap)
         self.provider.switch(target, window)
         status.model = escape_display(target)
@@ -825,6 +887,7 @@ class AgentApp(App[None]):
             return
         self.workers.cancel_group(self, "turn")
         self.workers.cancel_group(self, "session-start")
+        self.workers.cancel_group(self, "model-pick")  # only while the list loads: an open picker takes Esc itself
         if self._turn_active and not self._turn_entered:
             # Cancelled before its first line ran: the `finally` in `_turn` never will.
             self._end_turn()
@@ -962,7 +1025,13 @@ class AgentApp(App[None]):
                 await self._undo_command()
             case "/model":
                 if not rest.strip():
-                    await transcript.add_notice("info", "Usage: /model <name> (the installed models: ollama list)")
+                    if self._turn_active or self._switching:
+                        await transcript.add_notice("warn", self._busy_text("/model"))
+                        return
+                    if self._picking():
+                        await transcript.add_notice("warn", "The model list is already open or loading")
+                        return
+                    self.run_worker(self._pick_model, group="model-pick", exit_on_error=False)
                     return
                 if not self._begin_switch():
                     await transcript.add_notice("warn", self._busy_text("/model"))

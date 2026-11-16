@@ -404,16 +404,6 @@ async def test_help_lists_model() -> None:
     assert "/model" in HELP
 
 
-async def test_a_bare_model_command_says_how_to_use_it(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog(["fake", "b"]))
-    async with app.run_test() as pilot:
-        await type_and_send(pilot, "/model")
-        await pilot.pause()
-
-        assert any("/model <name>" in n for n in _notices(app))
-        assert scripted(app).model == "fake"
-
-
 def test_a_custom_command_named_model_is_skipped_with_a_warning(tmp_path: Path) -> None:
     from src.engine.commands.loader import load_commands
     from src.tui.app import BUILTINS
