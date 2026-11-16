@@ -39,6 +39,7 @@ from src.engine.events import (
 )
 from src.engine.guardrails.redact import drop_partial_tail
 from src.engine.guardrails.setup import REDACTION_FAILED, guard_of
+from src.engine.hooks.setup import Hooks, notice_text
 from src.engine.instructions import Instructions, load_instructions
 from src.engine.mode import Mode
 from src.engine.permissions.config import agent_config_files
@@ -157,8 +158,10 @@ class Agent:
         task_max_steps: int = 15,
         role: Literal["main", "task"] = "main",
         rules: Rules | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         self.provider = provider
+        self.hooks = hooks if hooks is not None else Hooks.empty()  # the `task` child never gets any
         self.rules = rules if rules is not None else Rules.empty()  # not part of `Grants`: `reset()` leaves it alone
         self.role = role
         self.tools = list(tools)
@@ -672,6 +675,7 @@ class Agent:
         emit(ToolStarted(call.id, label, task=tool is not None and tool.name == "task"))
         preview: Preview | None = None
         applied = False
+        ran = False  # did the tool itself do its work? (not refused, denied or blocked first)
         cancel: asyncio.CancelledError | None = None
         try:
             if tool is None:
@@ -684,6 +688,8 @@ class Agent:
                 result = ToolResult(f"refused: {call.name} is unavailable in plan mode", True, "refused: plan mode")
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
+            elif (refused := await self._pre_hooks(tool, call, mode, emit)) is not None:
+                result = refused
             elif isinstance(gate := await self._confirm_protected(tool, call), ToolResult):
                 result = gate
             else:
@@ -694,12 +700,12 @@ class Agent:
                 )
                 prepared = await tool.prepare(call.arguments, call_ctx)
                 if isinstance(prepared, ToolResult):
-                    result = prepared
+                    result, ran = prepared, True  # the tool did its work (and failed, or finished) while preparing
                 else:
                     preview = guard_of(self.ctx).redact_preview(prepared.preview)
-                    result, applied = await self._approve_and_run(tool, call, prepared, mode, emit)
+                    result, applied, ran = await self._approve_and_run(tool, call, prepared, mode, emit)
         except _Landed as landed:
-            result, applied, cancel = landed.result, landed.applied, landed.cancel
+            result, applied, cancel = landed.result, landed.applied, landed.cancel  # not `ran`: a cancel is on its way
         except Exception as exc:  # NFR4: a failing tool is an error result, never a crashed turn
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
             applied = False
@@ -712,6 +718,13 @@ class Agent:
         result = dataclasses.replace(result, output=_truncate(result.output, hidden))
         if result.display is not None:
             result = dataclasses.replace(result, display=truncate_ansi(result.display))
+        if ran and self.hooks.has("PostToolUse", call.name):
+            try:
+                result = await self._post_hooks(call, result, emit)
+            except asyncio.CancelledError as exc:  # Esc during a hook: the call did finish, so its result is kept
+                cancel = cancel or exc
+            except Exception as exc:  # a broken hook step never costs the result the tool produced
+                emit(Notice("warn", f"hook PostToolUse failed: {notice_text(str(exc))}"))
         self._record(
             Message("tool", result.output, tool_call_id=call.id, name=call.name), ToolMeta(label, result.summary)
         )
@@ -722,6 +735,54 @@ class Agent:
             emit(TodosChanged(self.todos))
         if cancel is not None:
             raise cancel
+
+    def _hook_payload(self, **fields: object) -> dict[str, object]:
+        """What every hook gets besides the event's own fields: the session and the workspace."""
+        session_id = getattr(self._recorder, "session_id", "")
+        return {**fields, "session_id": session_id if isinstance(session_id, str) else "", "cwd": str(self.ctx.workspace)}
+
+    def _redact_hook_text(self, text: str) -> str:
+        """Secrets out of text a hook produced, before it is shown. Fails closed: nothing of it when redaction fails.
+        Not counted: the same text is counted when it reaches the model."""
+        try:
+            return guard_of(self.ctx).redactor.redact(text)[0]
+        except Exception:
+            return ""
+
+    async def _pre_hooks(self, tool: Tool, call: ToolCall, mode: Mode, emit: EventSink) -> ToolResult | None:
+        """Run the `PreToolUse` hooks for a call; the refusal when one blocks, else None. Before every dialog."""
+        if not self.hooks.has("PreToolUse", call.name):
+            return None
+        payload = self._hook_payload(tool=call.name, args=call.arguments, mode=mode.value)
+        decision = await self.hooks.run("PreToolUse", payload, tool=call.name)
+        for notice in self.hooks.notices(decision, self._redact_hook_text):
+            emit(notice)
+        if not decision.blocked:
+            return None
+        return ToolResult(f"blocked by hook: {decision.reason}", True, "blocked by hook")
+
+    async def _post_hooks(self, call: ToolCall, result: ToolResult, emit: EventSink) -> ToolResult:
+        """Run the `PostToolUse` hooks on a finished call (`result` is redacted and cut already) and append what they
+        add, redacted, to the output the model sees: the tool's own output is kept, the hook's text is cut to fit."""
+        payload = self._hook_payload(tool=call.name, args=call.arguments, result=result.output, is_error=result.is_error)
+        decision = await self.hooks.run("PostToolUse", payload, tool=call.name)
+        for notice in self.hooks.notices(decision, self._redact_hook_text):
+            emit(notice)
+        if not decision.context:
+            return result
+        guard = guard_of(self.ctx)
+        try:
+            text, count = guard.redactor.redact("\n\n".join(decision.context))
+        except Exception:  # fail closed, like a tool's output: nothing of the hook's text
+            emit(Notice("warn", "hook PostToolUse: its text was withheld (redaction failed)"))
+            return result
+        guard.redactions += count
+        prefix = "\n[hook PostToolUse] "
+        room = TOOL_OUTPUT_LIMIT - len(result.output) - len(prefix)
+        if room <= 0 or not text:
+            return result
+        # The hook's text changes the output: the display copy (colours) would no longer match it.
+        return dataclasses.replace(result, output=result.output + prefix + text[:room], display=None)
 
     def _rule_to_save(self, tool: Tool, call: ToolCall) -> str:
         """The exact rule for this call (what "Always here" saves). Raises `RuleError` when there is none."""
@@ -805,7 +866,8 @@ class Agent:
 
     async def _approve_and_run(
         self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode, emit: EventSink
-    ) -> tuple[ToolResult, bool]:
+    ) -> tuple[ToolResult, bool, bool]:
+        """The result, whether it changed something, and whether the tool ran (False: the user said no)."""
         # Order: deny rules (in `_run_tool_call`), allow rules, this launch's "Always", then the dialog. Neither
         # rules nor grants approve anything in plan mode, nor a change to the agent's own settings files.
         guarded = tool.needs_approval and self._edits_agent_config(tool, call)
@@ -824,7 +886,7 @@ class Agent:
             decision = await self.approver.ask(request)
             if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no
                 note = f" Note: {decision.note}" if decision.note else ""
-                return ToolResult(f"User denied this call.{note}", True, "denied"), False
+                return ToolResult(f"User denied this call.{note}", True, "denied"), False, False
             if decision.choice in (Choice.ALWAYS, Choice.PROJECT) and allow_always:
                 self.grants.add(call.name, call.arguments, tool.grant_arg)  # for this run, even if saving fails
                 if not any(tool is t for t in self.tools):
@@ -835,7 +897,7 @@ class Agent:
             self._undo.note_bash()
         if not tool.runs_to_completion():
             result = await prepared.execute()  # cancellable at once; bash kills its process group
-            return result, not result.is_error
+            return result, not result.is_error, True
         # A write or edit runs in a thread that a cancel cannot stop. Let it finish so history
         # and the UI report what happened to the file, then hand the cancel on.
         task = asyncio.ensure_future(prepared.execute())
@@ -854,4 +916,4 @@ class Agent:
         applied = not result.is_error
         if cancel is not None:
             raise _Landed(result, applied, cancel)
-        return result, applied
+        return result, applied, True

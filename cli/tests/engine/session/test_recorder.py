@@ -813,3 +813,13 @@ def test_a_failed_newline_repair_is_retried_before_any_record(
     resumed.close()
     assert path.read_bytes().count(b"\n") == 4  # header, repaired line, "new", "again"
     assert [json.loads(line)["content"] for line in path.read_bytes().decode().splitlines()[2:]] == ["new", "again"]
+
+
+def test_the_session_id_is_empty_until_the_first_record_then_the_file_name(recorder: FileRecorder, workspace: Path) -> None:
+    assert recorder.session_id == ""
+
+    recorder.message(Message("user", "hi"), None)
+
+    assert recorder.path is not None
+    assert recorder.session_id == recorder.path.stem and recorder.session_id != ""
+    assert FileRecorder.resume(recorder.path, workspace).session_id == recorder.path.stem

@@ -30,6 +30,8 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.engine.approval import Approver
     from src.engine.commands.loader import load_commands
     from src.engine.guardrails.setup import prepare as prepare_guardrails
+    from src.engine.hooks.runner import ProcessRunner
+    from src.engine.hooks.setup import prepare as prepare_hooks
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
@@ -76,6 +78,9 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             project_path=project_settings_path(root),
             sessions=sessions,  # the sandbox never lets a command write it
         )
+        # Hooks too: both files already parsed; project hooks stay off until the same trust as the allow rules.
+        hook_runner = ProcessRunner(root, guard)
+        hooks = prepare_hooks(permissions, root, hook_runner)
         ctx = ToolContext(root, settings.bash_timeout, guard=guard)
         terminals = TerminalManager(root, guard=guard)  # lives for the whole run; /new and session switches do not touch it
         commands = load_commands(root, BUILTINS)  # read once, like the settings files
@@ -107,9 +112,11 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
                 task_tools=read_only_tools(web, search, skills),
                 task_max_steps=settings.task_max_steps,
                 rules=permissions.rules,
+                hooks=hooks,
             )
 
         async def close() -> None:
+            hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
             try:
                 await mcp.close_all()  # no server process outlives the agent
             finally:
@@ -138,10 +145,11 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             mcp=mcp,
             mcp_trust=setup.remember,
             permissions=permissions.rules,
-            permission_warnings=(*permissions.warnings, *guard.warnings),
+            permission_warnings=(*permissions.warnings, *guard.warnings, *hooks.warnings),
             commands=commands,
             skills=skills,
             guard=guard,
+            hooks=hooks,
         )
     except BaseException:
         try:  # setup failed before the app could close them (no loop is running here)
@@ -153,6 +161,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     try:
         app.run()
     finally:
+        hook_runner.kill_all()  # nor a hook (a no-op once the app closed them)
         mcp.kill_all()  # a server still running means the app failed before it could close it, and its loop is gone
         if terminals.names():  # none when the app closed them; else it failed before it could, and its loop is gone
             terminals.kill_all()

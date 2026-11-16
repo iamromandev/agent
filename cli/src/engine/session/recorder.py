@@ -148,6 +148,11 @@ class FileRecorder:
     def path(self) -> Path | None:
         return self._path
 
+    @property
+    def session_id(self) -> str:
+        """The session's id (its file name), or "" while nothing was recorded yet."""
+        return self._path.stem if self._path is not None else ""
+
     def message(self, message: Message, meta: ToolMeta | None) -> None:
         stamp = _stamp(self._now())
         line = _encode({**message_to_obj(message, meta), "at": stamp})  # build everything before changing state

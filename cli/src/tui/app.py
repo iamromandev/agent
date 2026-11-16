@@ -46,6 +46,7 @@ from src.engine.guardrails.paths import (
     MAX_TRACKED_FILES,
 )
 from src.engine.guardrails.setup import Guardrails
+from src.engine.hooks.setup import Hooks
 from src.engine.instructions import fingerprint, levels
 from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
@@ -105,7 +106,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
 # Built-in commands and what `/` suggests for them. Must equal the cases of `AgentApp._command` (a test checks).
@@ -117,6 +118,7 @@ BUILTINS: dict[str, str] = {
     "mcp": "MCP servers and their tools",
     "permissions": "saved permission rules",
     "guardrails": "sandbox, protected paths and redaction",
+    "hooks": "configured hooks",
     "skills": "loaded skills",
     "compact": "shrink the context",
     "init": "write AGENTS.md",
@@ -164,6 +166,7 @@ class AgentApp(App[None]):
         commands: Commands | None = None,
         skills: Skills | None = None,
         guard: Guardrails | None = None,
+        hooks: Hooks | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -175,6 +178,7 @@ class AgentApp(App[None]):
         self.commands = commands if commands is not None else Commands({}, ())
         self.skills = skills if skills is not None else Skills({}, ())
         self.guard = guard if guard is not None else Guardrails.off(workspace)
+        self.hooks = hooks if hooks is not None else Hooks.empty()
         self.store = store
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
@@ -260,6 +264,7 @@ class AgentApp(App[None]):
             or self.commands.warnings
             or self.skills.warnings
             or self.permissions.untrusted_allow
+            or self.hooks.untrusted()
             or (self.mcp is not None and self.mcp.untrusted())
         ):
             self.run_worker(self._ask_trust(), group="trust")
@@ -275,15 +280,23 @@ class AgentApp(App[None]):
         await self._ask_permission_trust()
 
     async def _ask_permission_trust(self) -> None:
-        """Ask once whether to trust the project's allow rules; only a yes turns them on."""
+        """Ask once whether to trust the project's allow rules and hooks (one decision for the file's bytes); only a
+        yes turns them on."""
         rules = self.permissions.untrusted_allow
-        if not rules:
+        hooks = self.hooks.untrusted()
+        if not rules and not hooks:
             return
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
-        trusted = await self.push_screen_wait(PermissionTrustScreen(rules))
+        trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks))
         transcript = self.query_one(Transcript)
         if not trusted:
-            await transcript.add_notice("info", "project permission rules not trusted: allow rules are off for this run")
+            if rules and hooks:
+                text = "project permission rules and hooks not trusted: allow rules and hooks are off for this run"
+            elif hooks:
+                text = "project hooks not trusted: hooks are off for this run"
+            else:
+                text = "project permission rules not trusted: allow rules are off for this run"
+            await transcript.add_notice("info", text)
             return
         try:
             await asyncio.to_thread(self.permissions.trust_project)  # writes the trust store: not on the event loop
@@ -753,6 +766,9 @@ class AgentApp(App[None]):
                 await transcript.add_notice("info", "\n".join(lines) if lines else "no permission rules")
             case "/guardrails":
                 await transcript.add_notice("info", self._guardrails_summary())
+            case "/hooks":
+                lines = self.hooks.listing()
+                await transcript.add_notice("info", "\n".join(lines) if lines else "No hooks.")
             case "/skills":
                 await transcript.add_notice("info", self._skills_summary())
             case "/quit":

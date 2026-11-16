@@ -6,7 +6,7 @@ import re
 import time
 
 import pytest
-from src.engine.permissions.rules import Rule, RuleError, exact_rule_text, parse_rule
+from src.engine.permissions.rules import Rule, RuleError, exact_rule_text, name_matcher, parse_rule
 
 OPS = [";", "&&", "||", "|", "`", "$(", ">", "<", "&", "\n"]  # the shell operators of the spec (R4)
 
@@ -262,3 +262,25 @@ def test_a_value_a_rule_cannot_express_exactly_has_no_rule(value: str) -> None:
     """`bash(rm x*)` would be a prefix rule, broader than the one command the user approved."""
     with pytest.raises(RuleError):
         exact_rule_text("bash", value)
+
+
+@pytest.mark.parametrize(
+    ("matcher", "tool", "expected"),
+    [
+        ("edit", "edit", True),
+        ("edit", "editor", False),
+        ("te*", "term_start", True),
+        ("te*", "write", False),
+        ("mcp__gh__*", "mcp__gh__issue", True),
+        ("mcp__gh__*", "mcp__ghost__issue", False),
+        ("*", "anything", True),
+    ],
+)
+def test_name_matcher_tests_the_tool_name_only(matcher: str, tool: str, expected: bool) -> None:
+    assert name_matcher(matcher)(tool) is expected
+
+
+@pytest.mark.parametrize("text", ["", "bash(ls)", "bash(ls*)", "a*b", "bad name", "(x)"])
+def test_name_matcher_rejects_text_that_names_more_than_a_tool(text: str) -> None:
+    with pytest.raises(RuleError):
+        name_matcher(text)

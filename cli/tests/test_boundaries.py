@@ -113,3 +113,10 @@ def test_the_boundary_scan_catches_a_rich_import(tmp_path: Path) -> None:
     module = tmp_path / "m.py"
     module.write_text("from rich.text import Text\nimport rich\n")
     assert _imported_roots(module) & FORBIDDEN == {"rich"}
+
+
+def test_the_scan_covers_the_hooks_modules_and_they_import_no_ui_library() -> None:
+    hooks = {path.name: _imported_roots(path) for path in (AGENT_SRC / "hooks").glob("*.py")}
+
+    assert {"config.py", "runner.py", "setup.py"} <= set(hooks)
+    assert all(not roots & FORBIDDEN for roots in hooks.values())

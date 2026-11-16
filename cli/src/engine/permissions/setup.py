@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from src.engine.hooks.config import read_hooks
 from src.engine.mcp.trust import TrustStore
 from src.engine.permissions.config import RuleFile, add_allow, project_settings_path, read_rules
 from src.engine.permissions.rules import Rule, Source, parse_rule, resolve_key
@@ -38,15 +39,17 @@ class Rules:
         project_trusted: bool,
         save: Callable[[str], bytes | None] | None = None,
         trust: Callable[[bytes], None] | None = None,
+        project_hooks: bool = False,
     ) -> None:
         """`save(rule_text)` writes the rule to the project file and returns the new bytes when they may be trusted
         (None: written, but the file was changed since launch, so its content is not vouched for). `trust(bytes)`
-        remembers bytes as trusted."""
+        remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust."""
         self._global = global_file
         self._project = project_file
         self._trusted = project_trusted
         self._save = save
         self._trust = trust
+        self._project_hooks = project_hooks
         self._added: list[Rule] = []  # saved with "Always here" in this run: active at once
         self._deny: tuple[tuple[Rule, Source], ...] = (*((r, "global") for r in global_file.deny), *((r, "project") for r in project_file.deny))
         self._global_allow: tuple[Rule, ...] = global_file.allow
@@ -64,6 +67,16 @@ class Rules:
     def untrusted_allow(self) -> tuple[Rule, ...]:
         """The project file's allow rules that wait for the user's trust (empty once trusted, or when it has none)."""
         return () if self._trusted else self._project.allow
+
+    @property
+    def project_trusted(self) -> bool:
+        """Is the project file's content trusted (so its allow rules and hooks are active)?"""
+        return self._trusted
+
+    @property
+    def pending_trust(self) -> bool:
+        """Does the project file hold allow rules or hooks that wait for the user's trust?"""
+        return not self._trusted and (bool(self._project.allow) or self._project_hooks)
 
     def deny(self, tool: str, args: Mapping[str, Any], key: str | None) -> Verdict | None:
         """A deny rule that matches, from either file. Project deny rules need no trust: they only refuse."""
@@ -93,7 +106,7 @@ class Rules:
     def save_project(self, rule_text: str) -> None:
         """Add the exact rule to the project file ("Always here"); it applies at once.
 
-        The new bytes become trusted only when the file's rules were already trusted (or it had no allow rules) and
+        The new bytes become trusted only when the file's rules and hooks were already trusted (or it had none) and
         nobody changed it since launch: choosing "Always here" for one call must not also trust the rest of a file
         the user has not accepted. Raises `OSError` / `ValueError` when it cannot be saved (then nothing changes), and
         `RuleSavedNotTrusted` when it was saved but the trust store refused the new bytes (the rule is active now).
@@ -101,7 +114,7 @@ class Rules:
         rule = parse_rule(rule_text)
         if self._save is None:
             raise OSError("there is no project settings file to save to")
-        pending = bool(self.untrusted_allow)
+        pending = self.pending_trust
         new = self._save(rule_text)
         if rule not in self._added and rule not in self._project.allow:
             self._added.append(rule)
@@ -134,7 +147,7 @@ class Rules:
             return []
         if self._project.error is not None:
             state = "unusable"
-        elif self.untrusted_allow:
+        elif self.pending_trust:
             state = "untrusted"
         else:
             state = "trusted" if (self._project.raw is not None or self._added) else "none"
@@ -191,7 +204,8 @@ def prepare(
     global_file = read_rules(global_path, follow_symlink=True)  # the user's own file: dotfile setups link it
     project_file = read_rules(project_path)
     raw = project_file.raw
-    needs_trust = bool(project_file.allow) and raw is not None and not store.is_trusted(workspace, raw)
+    project_hooks = bool(read_hooks(project_file.data, "project")[0])  # valid hooks run commands: they wait for the same trust
+    needs_trust = (bool(project_file.allow) or project_hooks) and raw is not None and not store.is_trusted(workspace, raw)
     warnings = [
         escape(w)
         for w in (
@@ -201,7 +215,7 @@ def prepare(
     ]
     if needs_trust and store.inside(workspace):  # a repository's own "trust": never honoured, never written
         warnings.append(
-            escape(f"permissions: the trust store {store.path} is inside the workspace, so project allow rules stay untrusted")
+            escape(f"permissions: the trust store {store.path} is inside the workspace, so project allow rules and hooks stay untrusted")
         )
     seen = {"raw": raw}  # what the file held when it was last read or written here
 
@@ -215,7 +229,7 @@ def prepare(
     def trust(content: bytes) -> None:
         store.trust(workspace, content)
 
-    rules = Rules(global_file, project_file, not needs_trust, save, trust)
+    rules = Rules(global_file, project_file, not needs_trust, save, trust, project_hooks)
     if len(warnings) > MAX_WARNINGS:
         more = len(warnings) - MAX_WARNINGS
         warnings = [*warnings[:MAX_WARNINGS], f"and {more} more warnings"]

@@ -6,6 +6,7 @@ import dataclasses
 from typing import TYPE_CHECKING, Any, ClassVar
 
 from src.engine.events import AgentEvent, AssistantText, Notice, TurnEnded, UsageUpdate
+from src.engine.hooks.setup import Hooks
 from src.engine.tools.base import Prepared, Tool, ToolContext, ToolResult
 
 if TYPE_CHECKING:
@@ -71,6 +72,7 @@ class TaskTool(Tool):
             instructions_share=parent.instructions_share,
             role="task",
             rules=parent.rules,  # one set of rules for both: a deny on `read` stops the subagent too
+            hooks=Hooks.empty(),  # the child's own calls are not hooked; the parent's `task` call is
         )
         child.mode = parent.mode
         child.grants = parent.grants  # one set of "Always" answers for both
