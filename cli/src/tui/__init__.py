@@ -65,7 +65,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             # to warn about rules that never apply; the manager is only asked for its tools' names, it starts nothing
             permission_setup.tool_keys(default_tools(TerminalManager(root), fetcher=web, searcher=search, skills=skills)),
         )
-        # Guardrails come from the same two settings files, already parsed: protected paths, the child environment.
+        # Guardrails come from the same two settings files, already parsed: protected paths, the child environment, the sandbox.
         guard = prepare_guardrails(
             root,
             permissions.global_data,
@@ -74,6 +74,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             platform.system(),
             global_path=global_settings_path(),
             project_path=project_settings_path(root),
+            sessions=sessions,  # the sandbox never lets a command write it
         )
         ctx = ToolContext(root, settings.bash_timeout, guard=guard)
         terminals = TerminalManager(root, guard=guard)  # lives for the whole run; /new and session switches do not touch it

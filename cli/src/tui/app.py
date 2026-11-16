@@ -256,6 +256,7 @@ class AgentApp(App[None]):
         the permission prompt. One after the other, so two prompts never overlap."""
         if (
             self._permission_warnings
+            or self.guard.info
             or self.commands.warnings
             or self.skills.warnings
             or self.permissions.untrusted_allow
@@ -267,6 +268,8 @@ class AgentApp(App[None]):
         transcript = self.query_one(Transcript)
         for warning in (*self._permission_warnings, *self.commands.warnings, *self.skills.warnings):
             await transcript.add_notice("warn", warning)
+        for line in self.guard.info:
+            await transcript.add_notice("info", escape(line))
         if self.mcp is not None and self.mcp.untrusted():
             await self._ask_mcp_trust()
         await self._ask_permission_trust()

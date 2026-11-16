@@ -169,18 +169,28 @@ async def _drain(proc: Process, capture: _Capture) -> None:
     await proc.wait()
 
 
+SANDBOX_NOTE = "[sandbox: a write or read outside the allowed paths was blocked]"
+
+
+def _with_note(text: str, plain: str, sandboxed: bool) -> str:
+    """`text` with the sandbox note after it when the sandbox is on and `plain` (what the model sees) shows a denial.
+    A command that fails with this message for another reason gets the note too (accepted, R12)."""
+    return f"{text}\n{SANDBOX_NOTE}" if sandboxed and "Operation not permitted" in plain else text
+
+
 async def _run(command: str, ctx: ToolContext) -> ToolResult:
+    guard = guard_of(ctx)
+    argv = guard.sandbox.wrap([os.environ.get("SHELL") or "/bin/sh", "-c", command])
+    sandboxed = guard.sandbox.profile is not None
     try:
         proc = await asyncio.create_subprocess_exec(
-            os.environ.get("SHELL") or "/bin/sh",
-            "-c",
-            command,
+            *argv,
             cwd=ctx.workspace,
             stdin=DEVNULL,  # a command that reads stdin gets EOF instead of hanging
             stdout=PIPE,
             stderr=STDOUT,
             start_new_session=True,  # own session + process group, so we can kill the whole tree
-            env=guard_of(ctx).env.filter(child_environment()),
+            env=guard.env.filter(child_environment()),
         )
     except OSError as exc:  # missing shell, missing or unreadable workspace
         return ToolResult(f"Could not start shell: {exc}", is_error=True, summary="failed to start")
@@ -193,8 +203,11 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
         text = capture.text()
         raw = capture.raw()
         display = (f"{raw}\n{message}" if raw else message) if raw != text else None
+        output = f"{text}\n{message}" if text else message
+        if display is not None:
+            display = _with_note(display, text, sandboxed)
         return ToolResult(
-            f"{text}\n{message}" if text else message, is_error=True, summary="timed out", display=display
+            _with_note(output, text, sandboxed), is_error=True, summary="timed out", display=display
         )
     except BaseException:  # CancelledError (Esc) or anything unexpected: never leave a process behind
         await _kill_group(proc)
@@ -204,7 +217,9 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
     output = f"{text}\nexit {code}" if text else f"exit {code}"
     raw = capture.raw()
     display = (f"{raw}\nexit {code}" if raw else f"exit {code}") if raw != text else None
-    return ToolResult(output, summary=f"exit {code}", display=display)
+    if display is not None:
+        display = _with_note(display, text, sandboxed)
+    return ToolResult(_with_note(output, text, sandboxed), summary=f"exit {code}", display=display)
 
 
 async def _kill_group(proc: Process) -> None:

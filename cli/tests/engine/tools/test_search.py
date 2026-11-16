@@ -13,7 +13,7 @@ from src.engine.tools.search import GlobTool, GrepTool
 
 
 def prepare_guard(home: Path) -> Guardrails:
-    return prepare(home / "ws", None, None, {}, "Darwin", home=home)
+    return prepare(home / "ws", None, None, {}, "Linux", home=home)
 
 
 async def _run(tool: GlobTool | GrepTool, ctx: ToolContext, **args: object) -> ToolResult:

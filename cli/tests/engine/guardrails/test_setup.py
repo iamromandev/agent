@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from src.engine.guardrails import sandbox as sandbox_module
 from src.engine.guardrails import setup as guard_setup
 from src.engine.guardrails.setup import Guardrails, guard_of, prepare
 from src.engine.tools.base import ToolContext, ToolResult
@@ -14,7 +15,7 @@ from src.engine.tools.base import ToolContext, ToolResult
 def make(tmp_path: Path, global_data: dict | None = None, project_data: dict | None = None, env: dict | None = None) -> Guardrails:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    return prepare(tmp_path / "ws", global_data, project_data, env or {}, "Darwin", home=home)
+    return prepare(tmp_path / "ws", global_data, project_data, env or {}, "Linux", home=home)  # no sandbox: one platform
 
 
 def test_prepare_builds_paths_from_the_settings_patterns(tmp_path: Path) -> None:
@@ -41,16 +42,74 @@ def test_prepare_filters_the_environment_with_keep_env_and_lists_removed_names(t
 def test_prepare_passes_the_settings_warnings_on(tmp_path: Path) -> None:
     guard = make(tmp_path, {"guardrails": {"protected": 5}})
 
-    assert len(guard.warnings) == 1
-    assert "guardrails.protected" in guard.warnings[0]
+    assert [w for w in guard.warnings if "guardrails.protected" in w] != []
+    assert len(guard.warnings) == 2  # the other one: the sandbox is not available on this system
 
 
-def test_the_stub_sandbox_does_not_wrap_and_says_why(tmp_path: Path) -> None:
+def test_off_has_no_sandbox_and_says_so(tmp_path: Path) -> None:
+    guard = Guardrails.off(tmp_path)
+
+    assert guard.sandbox.profile is None
+    assert guard.sandbox.reason == "off: not configured"
+    assert guard.sandbox.wrap(["sh", "-c", "true"]) == ["sh", "-c", "true"]
+
+
+def test_prepare_on_another_system_warns_once_and_runs_unsandboxed(tmp_path: Path) -> None:
     guard = make(tmp_path)
 
     assert guard.sandbox.profile is None
-    assert guard.sandbox.wrap(["sh", "-c", "true"]) == ["sh", "-c", "true"]
-    assert guard.sandbox.reason == "not built yet"
+    assert guard.sandbox.reason == "unavailable: not macOS"
+    assert len(guard.warnings) == 1 and "not macOS" in guard.warnings[0]
+    assert guard.info == ()
+
+
+def test_prepare_builds_the_sandbox_with_the_settings_and_the_sessions_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exe = tmp_path / "sandbox-exec"
+    exe.write_text("")
+    monkeypatch.setattr(sandbox_module, "SANDBOX_EXEC", exe)
+    home = tmp_path / "home"
+    home.mkdir()
+    seen: list[list[str]] = []
+
+    guard = prepare(
+        tmp_path / "ws",
+        {"guardrails": {"sandbox": {"network": False}, "protected": ["~/secrets/**"]}},
+        None,
+        {},
+        "Darwin",
+        lambda argv: seen.append(argv) or True,
+        home=home,
+        sessions=tmp_path / "sessions",
+    )
+
+    assert guard.warnings == ()
+    assert guard.sandbox.profile is not None
+    assert guard.sandbox.reason == "on (macOS sandbox-exec)"
+    assert guard.sandbox.network is False
+    assert str(home / "secrets") in guard.sandbox.profile  # the same protected paths as the file tools
+    assert f'(subpath "{(tmp_path / "sessions").resolve()}")' in guard.sandbox.profile
+    assert len(seen) == 1
+
+
+def test_a_sandbox_disabled_in_the_global_settings_is_an_info_line_not_a_warning(tmp_path: Path) -> None:
+    guard = make(tmp_path, {"guardrails": {"sandbox": {"enabled": False}}})
+
+    assert guard.warnings == ()
+    assert guard.info == ("sandbox: off: disabled in settings",)
+    assert guard.sandbox.profile is None
+
+
+def test_a_failing_probe_is_a_launch_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    exe = tmp_path / "sandbox-exec"
+    exe.write_text("")
+    monkeypatch.setattr(sandbox_module, "SANDBOX_EXEC", exe)
+    home = tmp_path / "home"
+    home.mkdir()
+
+    guard = prepare(tmp_path / "ws", None, None, {}, "Darwin", lambda argv: False, home=home)
+
+    assert guard.sandbox.profile is None
+    assert len(guard.warnings) == 1 and "test command" in guard.warnings[0]
 
 
 def test_the_empty_redactor_changes_nothing(tmp_path: Path) -> None:

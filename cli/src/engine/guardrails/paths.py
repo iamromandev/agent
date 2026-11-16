@@ -109,9 +109,9 @@ class ProtectedPaths:
             homes.extend([folder] if folder.resolve() == folder else [folder.resolve(), folder])
         self._homes = [_canonical(str(h)) for h in homes]
         self._path_patterns: list[str] = []
-        self._builtin_name_patterns = [name.lower() for name in BUILTIN_NAMES]
-        self._extra_name_patterns: list[str] = []
-        self._exempt_names = frozenset(name.lower() for name in NAME_EXCEPTIONS)
+        self.builtin_name_patterns = [name.lower() for name in BUILTIN_NAMES]  # lower case, for the sandbox profile
+        self.extra_name_patterns: list[str] = []
+        self.exempt_names = frozenset(name.lower() for name in NAME_EXCEPTIONS)
         for pattern in (*BUILTIN_HOME, *self._extra):
             self._add(_canonical(pattern))
         self._file_ids: set[FileId] = set()
@@ -126,7 +126,7 @@ class ProtectedPaths:
         if not pattern:
             return
         if "/" not in pattern:
-            self._extra_name_patterns.append(pattern.lower())
+            self.extra_name_patterns.append(pattern.lower())
             return
         if ".." in pattern.split("/"):  # `config.py` warns; here it is never matched
             return
@@ -167,10 +167,10 @@ class ProtectedPaths:
 
         def wanted(name: str) -> bool:
             lowered = name.lower()
-            if any(fnmatch.fnmatchcase(lowered, pattern) for pattern in self._extra_name_patterns):
+            if any(fnmatch.fnmatchcase(lowered, pattern) for pattern in self.extra_name_patterns):
                 return True
-            return lowered not in self._exempt_names and any(
-                fnmatch.fnmatchcase(lowered, pattern) for pattern in self._builtin_name_patterns
+            return lowered not in self.exempt_names and any(
+                fnmatch.fnmatchcase(lowered, pattern) for pattern in self.builtin_name_patterns
             )
 
         self._scan(workspace, wanted, _Budget(), SCAN_SKIP, MAX_WORKSPACE_DEPTH)
@@ -225,9 +225,9 @@ class ProtectedPaths:
         do not keep one across calls, a folder can be moved."""
         pure = PurePath(_canonical(str(path)))
         name = pure.name.lower()
-        if any(fnmatch.fnmatchcase(name, pattern) for pattern in self._extra_name_patterns):
+        if any(fnmatch.fnmatchcase(name, pattern) for pattern in self.extra_name_patterns):
             return True
-        if name not in self._exempt_names and any(fnmatch.fnmatchcase(name, p) for p in self._builtin_name_patterns):
+        if name not in self.exempt_names and any(fnmatch.fnmatchcase(name, p) for p in self.builtin_name_patterns):
             return True
         if any(pure.full_match(pattern, case_sensitive=False) for pattern in self._path_patterns):
             return True
@@ -271,6 +271,18 @@ class ProtectedPaths:
     def patterns(self) -> list[str]:
         """Every pattern as written (built-in first), for `/guardrails`."""
         return [*BUILTIN_HOME, *BUILTIN_NAMES, *self._extra]
+
+    def glob_patterns(self) -> list[str]:
+        """The path patterns `home_roots` cannot express (a wildcard before the end, or a relative one that applies
+        under any folder: `**/secrets/**`), as absolute or `**/`-led globs, for the sandbox's regex rules."""
+        found: list[str] = []
+        for pattern in self._path_patterns:
+            base = pattern.removesuffix("/**")
+            if pattern.startswith("/") and base and not _WILDCARDS.intersection(base):
+                continue
+            if pattern not in found:
+                found.append(pattern)
+        return found
 
     def home_roots(self) -> list[Path]:
         """The absolute folders and files the path patterns name (a trailing `/**` removed), for the sandbox.

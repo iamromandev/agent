@@ -11,10 +11,12 @@ from pathlib import Path
 
 import pytest
 from src.client.mcp import SdkConnection, SdkConnector
+from src.engine.guardrails.setup import Guardrails
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import McpError, McpExited, McpTimeout
 
 from tests.conftest import FIXTURES
+from tests.fakes import FAKE_PROFILE, recording_sandbox
 from tests.helpers import assert_all_gone, gone, wait_until
 
 SERVER = FIXTURES / "fake_mcp_server.py"
@@ -374,7 +376,7 @@ async def test_the_server_does_not_get_secret_variables_of_the_agent_but_keeps_i
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
     monkeypatch.setenv("KEPT_TOKEN", "kept-value")
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    guard = prepare(tmp_path, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+    guard = prepare(tmp_path, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Linux", home=tmp_path)
     config = fake_config(API_TOKEN="from-entry")  # an entry's own env always passes (R9)
 
     connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(config, tmp_path), 15)
@@ -391,3 +393,30 @@ async def test_the_server_does_not_get_secret_variables_of_the_agent_but_keeps_i
     assert values["AWS_REGION"] == ["eu-west-1"]
     assert values["API_TOKEN"] == ["from-entry"]
     assert "ghp_agentsecret1234" not in str(values["GITHUB_TOKEN"])
+
+
+async def test_the_server_command_starts_behind_the_sandbox_with_the_entrys_arguments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard, log = recording_sandbox(tmp_path, monkeypatch)
+
+    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(fake_config(API_TOKEN="from-entry"), tmp_path), 15)
+    try:
+        assert isinstance(connection, SdkConnection)
+        result = await connection.call_tool("env", {"name": "API_TOKEN"}, 10)
+    finally:
+        await connection.aclose()
+
+    assert result.parts == ["from-entry"]
+    assert log.read_text().splitlines() == [FAKE_PROFILE]
+
+
+async def test_the_server_without_a_sandbox_starts_directly(tmp_path: Path) -> None:
+    guard = Guardrails.off(tmp_path)
+
+    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(fake_config(), tmp_path), 15)
+    try:
+        assert isinstance(connection, SdkConnection)
+        assert (await connection.call_tool("echo", {"text": "hi"}, 10)).parts == ["hi"]
+    finally:
+        await connection.aclose()

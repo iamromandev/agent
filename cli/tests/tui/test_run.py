@@ -629,3 +629,32 @@ def test_run_builds_one_guard_from_both_settings_files_and_shares_it(
     (warning,) = [w for w in app._permission_warnings if "guardrails" in w]
     assert "guardrails.sandbox.enabled can only be set in the global settings" in warning
     assert "ghp_agentsecret1234" not in " ".join(app._permission_warnings)
+
+
+def test_run_gives_the_sandbox_the_sessions_folder_and_the_same_guard_to_the_mcp_connector(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from src.engine.guardrails import sandbox as sandbox_module
+    from src.engine.guardrails import setup as guard_setup
+
+    exe = tmp_path / "sandbox-exec"
+    exe.write_text("")
+    monkeypatch.setattr(sandbox_module, "SANDBOX_EXEC", exe)
+    monkeypatch.setattr(guard_setup, "default_probe", lambda argv: True)
+    monkeypatch.setattr("platform.system", lambda: "Darwin")
+    sessions = tmp_path / "saved"
+    monkeypatch.setenv("AGENT_SESSIONS_DIR", str(sessions))
+    get_settings.cache_clear()
+    workspace = tmp_path / "w"
+    workspace.mkdir()
+
+    try:
+        app = _run_app(monkeypatch, workspace)
+    finally:
+        get_settings.cache_clear()
+
+    profile = app.guard.sandbox.profile
+    assert profile is not None
+    assert f'(subpath "{sessions.resolve()}")' in profile
+    assert app.mcp is not None
+    assert app.mcp._connector._guard is app.guard  # ty: ignore[unresolved-attribute]

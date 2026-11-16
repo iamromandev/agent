@@ -13,12 +13,12 @@ from src.engine.guardrails.config import GuardConfig, read_guardrails
 from src.engine.guardrails.env import EnvFilter
 from src.engine.guardrails.paths import ProtectedPaths, login_home
 from src.engine.guardrails.redact import Redactor
-from src.engine.guardrails.sandbox import Sandbox
+from src.engine.guardrails.sandbox import Sandbox, default_probe, make_sandbox
 
 if TYPE_CHECKING:
     from src.engine.tools.base import ToolContext, ToolResult
 
-STUB_SANDBOX_REASON = "not built yet"
+NO_SANDBOX_REASON = "off: not configured"  # `Guardrails.off`: tests and a context without a guard
 
 
 @dataclass
@@ -28,6 +28,7 @@ class Guardrails:
     sandbox: Sandbox
     redactor: Redactor
     warnings: tuple[str, ...] = ()
+    info: tuple[str, ...] = ()  # launch lines that are not warnings (the sandbox switched off in the settings)
     removed_env: tuple[str, ...] = ()  # names only, never values
     redactions: int = 0  # how many secrets were replaced in this run, for /guardrails
 
@@ -63,15 +64,26 @@ def _build(
     warnings: tuple[str, ...] = (),
     workspace: Path | None = None,
     also_home: Path | None = None,
+    sandbox_for: Callable[[ProtectedPaths], tuple[Sandbox, str | None]] | None = None,
 ) -> Guardrails:
     env_filter = EnvFilter(config.keep_env)
-    sandbox = Sandbox(None, STUB_SANDBOX_REASON, config.network, ())
+    paths = ProtectedPaths(home, config.extra_protected, workspace, also_home=also_home)
+    info: tuple[str, ...] = ()
+    if sandbox_for is None:
+        sandbox = Sandbox(None, NO_SANDBOX_REASON, config.network, ())
+    else:
+        sandbox, warning = sandbox_for(paths)
+        if warning is not None:
+            warnings = (*warnings, *warning.split("\n"))
+        if not config.sandbox_enabled:
+            info = (f"sandbox: {sandbox.reason}",)
     return Guardrails(
-        ProtectedPaths(home, config.extra_protected, workspace, also_home=also_home),
+        paths,
         env_filter,
         sandbox,
         Redactor(env_filter.secret_values(env)),
         warnings,
+        info,
         tuple(env_filter.removed(env)),
     )
 
@@ -87,21 +99,23 @@ def prepare(
     home: Path | None = None,
     global_path: Path | str = "global settings",
     project_path: Path | str = ".agent/settings.json",
+    sessions: Path | None = None,
 ) -> Guardrails:
     """Build the launch's `Guardrails` from both settings files' parsed data and the agent's own environment.
 
-    `system` (`platform.system()`) and `probe` are for the sandbox, which a later phase adds."""
+    `system` (`platform.system()`) and `probe` (runs the sandboxed trivial command; the real one by default) decide
+    whether the sandbox is on; `sessions` is the sessions folder, which the sandbox never lets a command write."""
     config, warnings = read_guardrails(global_data, project_data, global_path=global_path, project_path=project_path)
     # A `home` given by the caller is used as it is; otherwise both `Path.home()` (from `$HOME`) and the account's
     # recorded home count, because `$HOME` can name any folder.
-    return _build(
-        config,
-        home if home is not None else Path.home(),
-        env,
-        tuple(warnings),
-        workspace,
-        login_home() if home is None else None,
-    )
+    home_folder = home if home is not None else Path.home()
+
+    def sandbox_for(paths: ProtectedPaths) -> tuple[Sandbox, str | None]:
+        return make_sandbox(
+            config, workspace, home_folder, env, system, probe or default_probe, sessions=sessions, protected=paths
+        )
+
+    return _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None, sandbox_for)
 
 
 def guard_of(ctx: ToolContext) -> Guardrails:

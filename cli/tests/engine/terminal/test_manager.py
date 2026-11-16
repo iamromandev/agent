@@ -14,6 +14,7 @@ from src.engine.terminal import manager as manager_module
 from src.engine.terminal import pty as pty_module
 from src.engine.terminal.manager import GRACE, MAX_TERMINALS, Terminal, TerminalError, TerminalManager
 
+from tests.fakes import FAKE_PROFILE, recording_sandbox
 from tests.helpers import assert_all_gone, wait_for_pids, wait_until
 from tests.helpers import gone as gone_pid
 
@@ -769,7 +770,7 @@ async def test_ac10_a_terminal_gets_the_same_filtered_environment_as_bash(
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
     monkeypatch.setenv("KEPT_TOKEN", "kept-value")
     monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    guard = prepare(workspace, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+    guard = prepare(workspace, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Linux", home=tmp_path)
     terminals = TerminalManager(workspace, grace=0.3, guard=guard)
     try:
         terminal = terminals.start("a", 'echo "[${GITHUB_TOKEN-unset}][${KEPT_TOKEN-unset}][${AWS_REGION-unset}]"')
@@ -783,3 +784,43 @@ async def test_a_terminal_without_a_guard_still_filters_secrets(manager: Termina
     terminal = manager.start("a", 'echo "[${GITHUB_TOKEN-unset}]"')
 
     await wait_until(lambda: "[unset]" in _text(terminal))
+
+
+async def test_a_terminal_command_starts_behind_the_sandbox(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    guard, log = recording_sandbox(tmp_path, monkeypatch, workspace)
+    terminals = TerminalManager(workspace, grace=0.3, guard=guard)
+    try:
+        terminal = terminals.start("a", "echo from-the-sandbox; pwd -P")
+
+        await wait_until(lambda: str(workspace) in _text(terminal) and "from-the-sandbox" in _text(terminal))
+    finally:
+        await terminals.close_all()
+
+    assert log.read_text().splitlines() == [FAKE_PROFILE]
+
+
+async def test_the_users_shell_tab_starts_behind_the_sandbox(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    guard, log = recording_sandbox(tmp_path, monkeypatch, workspace)
+    terminals = TerminalManager(workspace, grace=0.3, guard=guard)
+    try:
+        terminal = terminals.start("shell", None)
+        terminal.write(b"echo interactive-$((40 + 2))\n")  # the answer differs from the echo of the typed line
+
+        await wait_until(lambda: "interactive-42" in _text(terminal))
+    finally:
+        await terminals.close_all()
+
+    assert log.read_text().splitlines() == [FAKE_PROFILE]
+
+
+async def test_a_terminal_without_a_sandbox_starts_the_shell_directly(manager: TerminalManager, tmp_path: Path) -> None:
+    terminal = manager.start("a", "echo direct")
+
+    await wait_until(lambda: "direct" in _text(terminal))
+    assert not (tmp_path / "sandbox.log").exists()
