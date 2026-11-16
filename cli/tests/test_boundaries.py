@@ -120,3 +120,24 @@ def test_the_scan_covers_the_hooks_modules_and_they_import_no_ui_library() -> No
 
     assert {"config.py", "runner.py", "setup.py"} <= set(hooks)
     assert all(not roots & FORBIDDEN for roots in hooks.values())
+
+
+def test_runtime_and_headless_import_no_ui_or_http_library_and_the_scan_sees_them() -> None:
+    paths = [SRC / "runtime.py", *sorted((SRC / "headless").glob("*.py"))]
+
+    assert {p.name for p in paths} >= {"runtime.py", "run.py", "approver.py", "output.py", "__init__.py"}
+    offenders = {p.name: sorted(_imported_roots(p) & FORBIDDEN) for p in paths if _imported_roots(p) & FORBIDDEN}
+    assert offenders == {}  # they reach HTTP only through `src.client`, and never import `src.tui`
+
+
+def test_headless_never_imports_the_tui_package() -> None:
+    paths = [SRC / "runtime.py", *sorted((SRC / "headless").glob("*.py"))]
+    offenders = []
+    for path in paths:
+        for node in ast.walk(ast.parse(path.read_text())):
+            names = [a.name for a in node.names] if isinstance(node, ast.Import) else []
+            if isinstance(node, ast.ImportFrom) and node.module:
+                names.append(node.module)
+            if any(n == "src.tui" or n.startswith("src.tui.") for n in names):
+                offenders.append(path.name)
+    assert offenders == []

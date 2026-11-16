@@ -191,3 +191,115 @@ def test_model_with_resume_value_and_continue_conflict_still_errors(opened: Open
 
     assert result.exit_code != 0
     assert opened == []
+
+
+class Headless(list):
+    """What `run_headless` was called with, as `(workspace, options)`; the TUI must not have been opened."""
+
+
+@pytest.fixture
+def headless(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, opened: list[tuple[Path, StartChoice]]) -> Headless:
+    import src.headless.run as headless_run
+    from src.headless import HeadlessOptions
+
+    calls = Headless()
+
+    def fake(workspace: Path, opts: HeadlessOptions, **_: object) -> int:
+        calls.append((workspace, opts))
+        return 0
+
+    monkeypatch.setattr(headless_run, "run_headless", fake)
+    return calls
+
+
+def _opts(headless: Headless):
+    (_, opts) = headless[-1]
+    return opts
+
+
+def test_p_with_a_prompt_runs_headless_not_the_app(headless: Headless, opened: list) -> None:
+    result = runner.invoke(app, ["-p", "summarise src"])
+
+    assert result.exit_code == 0
+    assert opened == []
+    workspace, opts = headless[0]
+    assert workspace == Path.cwd()
+    assert (opts.prompt, opts.allow, opts.quiet, opts.trust_project, opts.model) == ("summarise src", (), False, False, None)
+    assert opts.start == StartChoice("new")
+
+
+def test_long_print_flag_and_equals_form_give_the_same_prompt(headless: Headless) -> None:
+    runner.invoke(app, ["--print", "a b"])
+    assert _opts(headless).prompt == "a b"
+    runner.invoke(app, ["--print=-dash first"])
+    assert _opts(headless).prompt == "-dash first"
+
+
+def test_p_without_a_prompt_reads_stdin(headless: Headless) -> None:
+    assert runner.invoke(app, ["-p"]).exit_code == 0
+    assert _opts(headless).prompt is None
+    runner.invoke(app, ["-p", "--quiet"])
+    assert _opts(headless).prompt is None and _opts(headless).quiet
+
+
+def test_the_prompt_may_come_after_the_other_flags(headless: Headless) -> None:
+    runner.invoke(app, ["-p", "--continue", "now add a test"])
+
+    opts = _opts(headless)
+    assert (opts.prompt, opts.start) == ("now add a test", StartChoice("continue"))
+
+
+def test_allow_is_repeatable_and_keeps_its_value_apart_from_the_prompt(headless: Headless) -> None:
+    runner.invoke(app, ["-p", "go", "--allow", "bash(make test)", "--allow", "edit", "--quiet", "--trust-project"])
+
+    opts = _opts(headless)
+    assert (opts.prompt, opts.allow, opts.quiet, opts.trust_project) == ("go", ("bash(make test)", "edit"), True, True)
+
+
+def test_p_combines_with_model_and_resume_by_id(headless: Headless) -> None:
+    runner.invoke(app, ["-p", "go", "--model", " qwen ", "--resume", "01JF3K"])
+
+    opts = _opts(headless)
+    assert (opts.model, opts.start) == ("qwen", StartChoice("resume", "01JF3K"))
+
+
+def test_p_with_a_bare_resume_is_a_usage_error(headless: Headless) -> None:
+    result = runner.invoke(app, ["-p", "go", "--resume"])
+
+    assert result.exit_code == 2
+    assert headless == []
+
+
+@pytest.mark.parametrize("flag", [["--allow", "bash"], ["--quiet"], ["--trust-project"]])
+def test_headless_only_flags_need_p(headless: Headless, opened: list, flag: list[str]) -> None:
+    result = runner.invoke(app, flag)
+
+    assert result.exit_code == 2
+    assert "needs -p" in result.output
+    assert headless == [] and opened == []
+
+
+def test_the_exit_code_of_the_headless_run_is_the_exit_code_of_the_command(
+    headless: Headless, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import src.headless.run as headless_run
+
+    monkeypatch.setattr(headless_run, "run_headless", lambda *a, **k: 130)
+
+    assert runner.invoke(app, ["-p", "x"]).exit_code == 130
+
+
+def test_extra_words_after_the_prompt_are_a_usage_error_naming_the_problem(headless: Headless) -> None:
+    result = runner.invoke(app, ["-p", "summarise", "the", "code"])
+
+    assert result.exit_code == 2
+    assert "the" in result.output and "quote" in result.output
+    assert headless == []
+
+
+def test_a_prompt_after_double_dash_is_a_usage_error_naming_the_problem(headless: Headless) -> None:
+    result = runner.invoke(app, ["-p", "--", "x"])
+
+    assert result.exit_code == 2
+    assert "--" in result.output and "-p" in result.output and "prompt" in result.output
+    assert headless == []

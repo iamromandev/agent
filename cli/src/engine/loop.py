@@ -209,6 +209,11 @@ class Agent:
         self.mode = mode
 
     @property
+    def recorder(self) -> Recorder:
+        """The recorder of the live session (it changes with `reset`)."""
+        return self._recorder
+
+    @property
     def busy(self) -> bool:
         return self._busy
 

@@ -12,6 +12,7 @@ from src.config import get_settings
 from src.engine.mcp.trust import TrustStore, trust_store_path
 from src.engine.permissions import setup as permission_setup
 from src.engine.permissions.config import project_settings_path
+from src.engine.permissions.rules import parse_rule
 from src.engine.permissions.setup import Rules, RuleSavedNotTrusted, prepare
 
 
@@ -813,3 +814,82 @@ def test_a_rules_object_built_without_hooks_behaves_as_before() -> None:
     rules = Rules.empty()
 
     assert rules.project_trusted and not rules.pending_trust
+
+
+def test_a_run_allow_rule_is_active_but_never_saved_or_remembered(launch: Launch) -> None:
+    rules = launch.prepare().rules
+
+    rules.add_run_allow([parse_rule("bash(make test)")])
+
+    assert _allow(rules, "bash", command="make test") == "bash(make test)"
+    assert _allow(rules, "bash", command="rm x") is None
+    assert not launch.project_path.exists()
+    assert rules.allow("bash", {"command": "make test"}, "command").source == "run"
+
+
+def test_a_deny_rule_beats_a_run_allow_rule(launch: Launch) -> None:
+    launch.write(launch.global_path, deny=["bash(rm*)"])
+    rules = launch.prepare().rules
+
+    rules.add_run_allow([parse_rule("bash")])
+
+    assert _deny(rules, "bash", command="rm x") == "bash(rm*)"
+
+
+def test_global_and_project_rules_are_consulted_before_run_rules(launch: Launch) -> None:
+    launch.write(launch.global_path, allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.add_run_allow([parse_rule("bash(ls)")])
+
+    verdict = rules.allow("bash", {"command": "ls"}, "command")
+
+    assert verdict is not None and verdict.source == "global"
+
+
+def test_the_listing_shows_run_rules_as_run(launch: Launch) -> None:
+    launch.write(launch.global_path, allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.add_run_allow([parse_rule("edit")])
+
+    assert rules.listing() == ["allow bash(ls) (global)", "allow edit (run)", "project file: none"]
+
+
+def test_trusting_for_the_run_activates_project_rules_without_touching_the_store(launch: Launch) -> None:
+    raw = launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    assert rules.pending_trust
+
+    rules.trust_for_run()
+
+    assert _allow(rules, "bash", command="ls") == "bash(ls)"
+    assert rules.project_trusted and not rules.pending_trust
+    assert not launch.store.is_trusted(launch.workspace, raw)
+    assert not launch.store.path.exists()
+    again = launch.prepare().rules  # the next launch still asks
+    assert again.pending_trust
+
+
+def test_saving_a_rule_after_trusting_for_the_run_never_writes_the_trust_store(launch: Launch) -> None:
+    raw = launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.trust_for_run()
+
+    rules.save_project("write")
+    rules.save_project_key("model", "x")
+
+    assert rules.project_trusted  # for this run
+    assert not launch.store.path.exists()
+    assert not launch.store.is_trusted(launch.workspace, raw)
+    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
+
+
+def test_run_rule_warnings_name_unknown_tools_and_valued_rules_on_keyless_tools() -> None:
+    keys = {"bash": "command", "read": None, "write": None}
+    rules = [parse_rule(t) for t in ("bash(ls)", "read(x)", "nosuch", "mcp__gh__*", "write")]
+
+    warnings = permission_setup.run_rule_warnings(rules, keys)
+
+    assert warnings == [
+        "--allow read(x): read has no argument to match; this rule never applies",
+        "--allow nosuch: no tool named nosuch; this rule never applies",
+    ]
