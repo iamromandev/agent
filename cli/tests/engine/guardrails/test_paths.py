@@ -549,3 +549,23 @@ def test_login_home_is_none_when_the_account_has_no_entry(monkeypatch: pytest.Mo
     monkeypatch.setattr(paths_module.pwd, "getpwuid", missing)
 
     assert paths_module.login_home() is None
+
+
+def test_name_rules_for_the_sandbox_split_built_in_exceptions_and_settings_names(home: Path) -> None:
+    paths = protected(home, "*.token", "~/secrets/**")
+
+    assert paths.builtin_name_patterns == [name.lower() for name in BUILTIN_NAMES]
+    assert ".env.example" in paths.exempt_names
+    assert paths.extra_name_patterns == ["*.token"]
+
+
+def test_glob_patterns_are_the_path_patterns_a_folder_list_cannot_express(home: Path) -> None:
+    paths = protected(home, "secrets/**", "~/logs/*.secret", "/etc/app/key", "~/vault")
+
+    globs = paths.glob_patterns()
+
+    assert "**/secrets/**" in globs
+    assert f"{home}/logs/*.secret" in globs
+    assert not any(glob.startswith(f"{home}/.ssh") for glob in globs)  # plain folders go through home_roots
+    assert not any(glob.startswith(f"{home}/vault") for glob in globs)
+    assert not any(glob.startswith("/etc/app/key") for glob in globs)

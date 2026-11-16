@@ -287,9 +287,10 @@ class SdkConnector:
                 os.killpg(pid, signal.SIGKILL)
 
     async def connect(self, config: ServerConfig, cwd: Path) -> McpConnection:
+        argv = self._guard.sandbox.wrap([config.command, *config.args])
         params = StdioServerParameters(
-            command=config.command,
-            args=list(config.args),
+            command=argv[0],
+            args=argv[1:],
             env=self._guard.env.filter(os.environ) | dict(config.env),  # an entry's own env always passes
             cwd=cwd,
         )

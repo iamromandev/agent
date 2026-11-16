@@ -8,9 +8,12 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from src.engine.guardrails.setup import Guardrails
 from src.engine.tools.base import Prepared, ToolContext, ToolResult
 from src.engine.tools.shell import BashTool, _Capture
 from src.engine.tools.text import strip_ansi
+
+from tests.fakes import FAKE_PROFILE, recording_sandbox
 
 
 @pytest.fixture(autouse=True)
@@ -416,9 +419,65 @@ async def test_bash_keeps_a_variable_named_in_the_global_keep_env(
 
     monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
     monkeypatch.setenv("OTHER_TOKEN", "other-value-1234")
-    guard = prepare(workspace, {"guardrails": {"keepEnv": ["GITHUB_TOKEN"]}}, None, os.environ, "Darwin", home=tmp_path)
+    guard = prepare(workspace, {"guardrails": {"keepEnv": ["GITHUB_TOKEN"]}}, None, os.environ, "Linux", home=tmp_path)
 
     result = await _run("env", ToolContext(workspace, 5.0, guard=guard))
 
     assert "GITHUB_TOKEN=ghp_agentsecret1234" in result.output.splitlines()
     assert "OTHER_TOKEN" not in result.output
+
+
+async def test_bash_runs_the_command_behind_the_sandbox_when_it_is_on(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard, log = recording_sandbox(tmp_path, monkeypatch, workspace)
+
+    result = await _run("echo hello", ToolContext(workspace, 5.0, guard=guard))
+
+    assert result.output == "hello\nexit 0"
+    assert log.read_text().splitlines() == [FAKE_PROFILE]
+
+
+async def test_bash_without_a_sandbox_runs_the_shell_directly(workspace: Path, tmp_path: Path) -> None:
+    result = await _run("echo hello", ToolContext(workspace, 5.0, guard=Guardrails.off(workspace)))
+
+    assert result.output == "hello\nexit 0"
+
+
+async def test_a_blocked_operation_under_the_sandbox_ends_with_the_sandbox_note(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard, _ = recording_sandbox(tmp_path, monkeypatch, workspace)
+
+    result = await _run("echo 'touch: x: Operation not permitted'; exit 1", ToolContext(workspace, 5.0, guard=guard))
+
+    assert result.output.endswith("exit 1\n[sandbox: a write or read outside the allowed paths was blocked]")
+    assert result.is_error is False  # the exit code is the command's, as before
+
+
+async def test_the_sandbox_note_is_in_the_display_copy_too(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard, _ = recording_sandbox(tmp_path, monkeypatch, workspace)
+
+    result = await _run("printf '\\033[31mOperation not permitted\\033[0m\\n'", ToolContext(workspace, 5.0, guard=guard))
+
+    assert result.display is not None
+    assert result.display.endswith("[sandbox: a write or read outside the allowed paths was blocked]")
+    assert result.output.endswith("[sandbox: a write or read outside the allowed paths was blocked]")
+
+
+async def test_ordinary_output_under_the_sandbox_has_no_note(
+    workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guard, _ = recording_sandbox(tmp_path, monkeypatch, workspace)
+
+    result = await _run("echo fine", ToolContext(workspace, 5.0, guard=guard))
+
+    assert "[sandbox" not in result.output
+
+
+async def test_the_same_text_without_a_sandbox_has_no_note(workspace: Path) -> None:
+    result = await _run("echo 'Operation not permitted'", ToolContext(workspace, 5.0, guard=Guardrails.off(workspace)))
+
+    assert "[sandbox" not in result.output

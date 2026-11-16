@@ -499,7 +499,7 @@ async def test_a_protected_read_dialog_names_the_path_and_offers_only_allow_once
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)
     (home / ".ssh" / "config").write_text("Host x\n")
-    guard = prepare_guard(tmp_path, None, None, {}, "Darwin", home=home.resolve())
+    guard = prepare_guard(tmp_path, None, None, {}, "Linux", home=home.resolve())
     call = ToolCall("r1", "read", {"path": str(home / ".ssh" / "config")})
     app = make_app([[ToolCallEvent(call), Done(1, 1)], [TextDelta("done"), Done(1, 1)]], guard=guard)
     async with app.run_test() as pilot:
