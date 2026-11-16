@@ -12,13 +12,15 @@ from typing import TYPE_CHECKING
 from src.engine.guardrails.config import GuardConfig, read_guardrails
 from src.engine.guardrails.env import EnvFilter
 from src.engine.guardrails.paths import ProtectedPaths, login_home
-from src.engine.guardrails.redact import Redactor
+from src.engine.guardrails.redact import Redactor, drop_partial_tail
 from src.engine.guardrails.sandbox import Sandbox, default_probe, make_sandbox
 
 if TYPE_CHECKING:
-    from src.engine.tools.base import ToolContext, ToolResult
+    from src.engine.tools.base import Preview, ToolContext, ToolResult
 
+REDACTION_FAILED = "[redaction failed: output withheld]"
 NO_SANDBOX_REASON = "off: not configured"  # `Guardrails.off`: tests and a context without a guard
+PREVIEW_WINDOW = 100_000  # what redaction reads of a diff preview: the dialog cannot show more, and the cost is bounded
 
 
 @dataclass
@@ -33,16 +35,44 @@ class Guardrails:
     redactions: int = 0  # how many secrets were replaced in this run, for /guardrails
 
     def redact_result(self, result: ToolResult) -> ToolResult:
-        """`result` with secrets replaced in its output and its display copy."""
-        output, count = self.redactor.redact(result.output)
-        display = result.display
-        if display is not None:
-            display, more = self.redactor.redact(display)
-            count += more
+        """`result` with secrets replaced in its output and its display copy.
+
+        Only the output is counted: the display is the same text with colours, and counting it too would count one
+        secret twice. When redaction changed anything the display copy is dropped, so the transcript shows the redacted
+        output: a secret split by colour codes (`ghp_`, a reset, the rest) is in no piece of the copy that a pattern
+        can match. Fails closed (NFR4): if redaction raises, the output is withheld and nothing of it is kept. The
+        error text is not used: it could quote the text being redacted."""
+        from src.engine.tools.base import ToolResult  # function level: the tools package imports this module
+
+        try:
+            output, count = self.redactor.redact(result.output)
+            display = result.display
+            if display is not None:
+                display = self.redactor.redact(display)[0]
+        except Exception:
+            return ToolResult(REDACTION_FAILED, True, "redaction failed")
         self.redactions += count
-        if count == 0:
+        if output == result.output and display == result.display:
             return result
-        return dataclasses.replace(result, output=output, display=display)
+        return dataclasses.replace(result, output=output, display=None)
+
+    def redact_preview(self, preview: Preview | None) -> Preview | None:
+        """The preview of a call as the user sees it: the body of a diff holds lines of the file as it is, so secrets
+        in it are replaced. A command or the full content of a write is the model's own text and shown as it is (the
+        user approves exactly what runs). Not counted, and never what a tool writes: only the display changes. A diff
+        longer than `PREVIEW_WINDOW` is cut there (the last word with it) and ends with a note of how much is not shown."""
+        if preview is None or preview.kind != "diff":
+            return preview
+        body = preview.body
+        hidden = max(len(body) - PREVIEW_WINDOW, 0)
+        try:
+            shown = self.redactor.redact(body[:PREVIEW_WINDOW])[0]
+            if hidden:
+                shown, dropped = drop_partial_tail(shown)
+                shown += f"\n[{hidden + dropped} characters not shown]"
+        except Exception:
+            shown = REDACTION_FAILED
+        return preview if shown == body else dataclasses.replace(preview, body=shown)
 
     @classmethod
     def off(cls, workspace: Path) -> Guardrails:

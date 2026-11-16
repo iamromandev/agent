@@ -9,10 +9,10 @@ from src.engine.guardrails import sandbox as sandbox_module
 from src.engine.guardrails.paths import MAX_TRACKED_FILES
 from src.engine.guardrails.sandbox import Sandbox
 from src.engine.guardrails.setup import Guardrails, prepare
-from src.engine.provider.base import Done, TextDelta
+from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.engine.session import sessions_root
 from src.tui import app as app_module
-from src.tui.widgets.transcript import AssistantEntry, NoticeEntry
+from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry
 
 from tests.tui.conftest import AppFactory, scripted, type_and_send, until
 
@@ -117,6 +117,33 @@ async def test_guardrails_counts_redactions(make_app: AppFactory, tmp_path: Path
     app = make_app(guard=guard)
 
     assert "Redacted this run: 3" in (await _guardrails_text(app)).splitlines()
+
+
+async def test_a_redacted_tool_result_is_counted_and_the_token_is_not_in_the_transcript_or_session_file(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    (tmp_path / "notes.txt").write_text(f"token {token}\n")
+    call = ToolCall("c1", "read", {"path": "notes.txt"})
+    app = make_app(
+        [[ToolCallEvent(call), Done(1, 1)], [TextDelta("done"), Done(1, 1)]],
+        guard=_guard(tmp_path),
+    )
+
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "show notes")
+        await until(pilot, lambda: any(e.text == "done" for e in app.query(AssistantEntry)))
+        await type_and_send(pilot, "/guardrails")
+        await until(pilot, lambda: any("Sandbox:" in n for n in _notices(app)))
+        (entry,) = app.query(ToolEntry)
+        shown = entry.detail + "\n".join(_notices(app))
+
+    assert "[redacted:github-token]" in entry.detail
+    assert token not in shown
+    assert "Redacted this run: 1" in shown
+    sessions = list(sessions_root(None).rglob("*.jsonl"))
+    assert sessions
+    assert all(token not in p.read_text() for p in sessions)
 
 
 async def test_guardrails_without_a_guard_uses_the_defaults(make_app: AppFactory) -> None:

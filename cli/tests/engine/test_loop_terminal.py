@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 from src.engine.approval import Choice, Decision
-from src.engine.events import AgentEvent, Notice
+from src.engine.events import AgentEvent, Notice, ToolFinished
 from src.engine.loop import Agent
 from src.engine.mode import Mode
 from src.engine.provider.base import Done, Message, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
@@ -125,6 +125,44 @@ async def test_term_read_needs_no_approval(ctx: ToolContext, manager: TerminalMa
 
     assert approver.requests == []
     assert tool_messages(agent)[0].content == "hello\n\nrunning"
+
+
+async def test_ac16_the_terminal_keeps_a_token_raw_and_term_read_redacts_it(
+    ctx: ToolContext, manager: TerminalManager, tmp_path: Path, workspace: Path
+) -> None:
+    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    terminal = manager.start("api", f"echo token {token}; sleep 30")
+    await wait_until(lambda: terminal.buffer.tail(1) == [f"token {token}"])
+    recorder = FileRecorder(workspace_dir(tmp_path / "sessions", workspace), workspace)
+    script = [reply(call("term_read", name="api")), reply(TextDelta("saw it"))]
+    agent, _, _ = make_agent(ctx, manager, script, [], recorder=recorder)
+    events = Events()
+
+    await agent.run_turn("look", events)
+    agent.close()
+
+    assert terminal.buffer.tail(1) == [f"token {token}"]  # what the pane draws is the user's own screen
+    assert tool_messages(agent)[0].content == "token [redacted:github-token]\n\nrunning"
+    finished = next(e for e in events.items if isinstance(e, ToolFinished))
+    assert token not in repr(finished)
+    (session,) = workspace_dir(tmp_path / "sessions", workspace).glob("*.jsonl")
+    assert token not in session.read_text()
+
+
+async def test_term_read_of_the_last_lines_of_a_pem_block_redacts_the_orphan_end(
+    ctx: ToolContext, manager: TerminalManager
+) -> None:
+    command = "printf '%s\\n' '-----BEGIN PRIVATE KEY-----' MIIEvQIBADANBgkq Zm9vYmFyYmF6 '-----END PRIVATE KEY-----' after; sleep 30"
+    terminal = manager.start("api", command)
+    await wait_until(lambda: terminal.buffer.tail(1) == ["after"])
+    script = [reply(call("term_read", name="api", lines=3)), reply(TextDelta("saw it"))]
+    agent, _, _ = make_agent(ctx, manager, script, [])
+
+    await agent.run_turn("look", Events())
+
+    content = tool_messages(agent)[0].content
+    assert "Zm9vYmFy" not in content
+    assert content == "[redacted:private-key]\nafter\n\nrunning"
 
 
 async def test_plan_mode_hides_start_and_stop_but_not_read(ctx: ToolContext, manager: TerminalManager) -> None:

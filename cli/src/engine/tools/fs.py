@@ -7,6 +7,7 @@ import itertools
 from pathlib import Path
 from typing import Any, ClassVar
 
+from src.engine.guardrails.redact import PLACEHOLDER, adds_placeholder
 from src.engine.guardrails.setup import guard_of
 
 from .base import Prepared, Preview, Tool, ToolContext, ToolResult
@@ -125,8 +126,10 @@ class WriteTool(Tool):
         except UnicodeEncodeError:
             return ToolResult("content is not valid UTF-8 text", is_error=True, summary="invalid text")
         title = f"write {raw}"
-        if path.exists():
-            old = await asyncio.to_thread(_read_lenient, path)
+        old = await asyncio.to_thread(_read_lenient, path) if path.exists() else None
+        if adds_placeholder(old or "", content):
+            return _refuse_placeholder("content")
+        if old is not None:
             preview = Preview("diff", title, unified_diff(old, content, raw))
         else:
             preview = Preview("content", title, content)
@@ -150,6 +153,17 @@ class WriteTool(Tool):
             return ToolResult(f"wrote {lines} lines to {raw}", summary=f"{lines} lines")
 
         return Prepared(preview, execute)
+
+
+def _refuse_placeholder(argument: str) -> ToolResult:
+    return ToolResult(
+        f"{argument} would add the text '{PLACEHOLDER}...]': that is a placeholder the agent puts where a tool result "
+        "held a secret, not the secret's value. Writing it would replace the real value with the placeholder. Leave "
+        "that part out, or take the value from where it is kept (an environment variable, a secrets manager) in the "
+        "code. Placeholders that the file already has can stay.",
+        is_error=True,
+        summary="redaction placeholder",
+    )
 
 
 def _not_regular(raw: str) -> ToolResult:
@@ -204,6 +218,8 @@ class EditTool(Tool):
             new_string.encode("utf-8")
         except UnicodeEncodeError:
             return ToolResult("new_string is not valid UTF-8 text", is_error=True, summary="invalid text")
+        if adds_placeholder(old_string, new_string):
+            return _refuse_placeholder("new_string")
         if not old_string:
             return ToolResult("old_string must not be empty", is_error=True, summary="empty old_string")
         try:

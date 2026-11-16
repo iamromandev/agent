@@ -462,3 +462,107 @@ async def test_write_still_allows_a_template_env_file(workspace: Path, ctx: Tool
 
     assert not (await prepared.execute()).is_error
     assert (workspace / ".env.example").read_text() == "X=\n"
+
+
+# --- the redaction placeholder is never written ---------------------------------------------------------------------
+
+
+async def test_write_refuses_content_with_a_redaction_placeholder(workspace: Path, ctx: ToolContext) -> None:
+    result = await _refused(WriteTool(), ctx, path="cfg.txt", content="token=[redacted:github-token]\n")
+
+    assert "[redacted:" in result.output
+    assert "placeholder" in result.output
+    assert not (workspace / "cfg.txt").exists()
+
+
+async def test_edit_refuses_a_new_string_with_a_redaction_placeholder(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "cfg.txt").write_text("token=real\n")
+
+    result = await _refused(EditTool(), ctx, path="cfg.txt", old_string="real", new_string="[redacted:env:API_TOKEN]")
+
+    assert "placeholder" in result.output
+    assert (workspace / "cfg.txt").read_text() == "token=real\n"
+
+
+async def test_edit_allows_an_old_string_that_names_a_placeholder_when_the_new_one_does_not(
+    workspace: Path, ctx: ToolContext
+) -> None:
+    (workspace / "doc.txt").write_text("shows [redacted:x] here\n")
+
+    prepared = await _prepared(EditTool(), ctx, path="doc.txt", old_string="[redacted:x]", new_string="nothing")
+
+    assert not (await prepared.execute()).is_error
+
+
+async def test_edit_of_a_file_that_documents_placeholders_works_when_it_adds_none(
+    workspace: Path, ctx: ToolContext
+) -> None:
+    (workspace / "doc.md").write_text("A result shows [redacted:github-token] and [redacted:env:API_TOKEN].\nold line\n")
+
+    prepared = await _prepared(EditTool(), ctx, path="doc.md", old_string="old line", new_string="new line")
+
+    assert not (await prepared.execute()).is_error
+    assert (workspace / "doc.md").read_text().endswith("new line\n")
+
+
+async def test_edit_may_keep_and_move_a_placeholder_that_old_string_already_has(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "doc.md").write_text("see [redacted:jwt] here\n")
+
+    prepared = await _prepared(
+        EditTool(), ctx, path="doc.md", old_string="see [redacted:jwt] here", new_string="here is [redacted:jwt]"
+    )
+
+    assert not (await prepared.execute()).is_error
+
+
+async def test_edit_refuses_a_second_copy_of_a_placeholder_old_string_has_once(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "doc.md").write_text("see [redacted:jwt] here\n")
+
+    result = await _refused(
+        EditTool(), ctx, path="doc.md", old_string="[redacted:jwt]", new_string="[redacted:jwt] [redacted:jwt]"
+    )
+
+    assert "placeholder" in result.output
+
+
+async def test_edit_refuses_a_different_placeholder_than_old_string_has(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "doc.md").write_text("see [redacted:jwt] here\n")
+
+    await _refused(EditTool(), ctx, path="doc.md", old_string="[redacted:jwt]", new_string="[redacted:github-token]")
+
+
+async def test_write_over_a_file_that_documents_placeholders_works_when_it_keeps_them(
+    workspace: Path, ctx: ToolContext
+) -> None:
+    (workspace / "doc.md").write_text("A result shows [redacted:github-token].\n")
+
+    prepared = await _prepared(
+        WriteTool(), ctx, path="doc.md", content="A result shows [redacted:github-token].\nMore text.\n"
+    )
+
+    assert not (await prepared.execute()).is_error
+    assert (workspace / "doc.md").read_text().endswith("More text.\n")
+
+
+async def test_write_refuses_a_placeholder_the_file_does_not_have_yet(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "doc.md").write_text("A result shows [redacted:github-token].\n")
+
+    result = await _refused(
+        WriteTool(), ctx, path="doc.md", content="A result shows [redacted:github-token] and [redacted:jwt].\n"
+    )
+
+    assert "placeholder" in result.output
+    assert (workspace / "doc.md").read_text() == "A result shows [redacted:github-token].\n"
+
+
+async def test_write_refuses_more_copies_of_a_placeholder_than_the_file_has(workspace: Path, ctx: ToolContext) -> None:
+    (workspace / "doc.md").write_text("[redacted:jwt]\n")
+
+    await _refused(WriteTool(), ctx, path="doc.md", content="[redacted:jwt]\n[redacted:jwt]\n")
+
+
+@pytest.mark.parametrize("text", ["[redacted:]", "[redacted: x]", "[redacted:A]", "[redacted:env:]", "[redacted:a b]", "[redacted:"])
+async def test_text_that_only_looks_a_little_like_a_placeholder_is_written(workspace: Path, ctx: ToolContext, text: str) -> None:
+    prepared = await _prepared(WriteTool(), ctx, path="note.txt", content=f"{text}\n")
+
+    assert not (await prepared.execute()).is_error
