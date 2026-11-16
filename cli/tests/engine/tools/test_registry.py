@@ -111,3 +111,12 @@ def test_skill_tool_is_offered_only_with_skills() -> None:
     assert "skill" not in [t.name for t in read_only_tools(skills=empty)]
     assert "skill" in [t.name for t in default_tools(skills=some)]
     assert [t.name for t in read_only_tools(skills=some)] == ["read", "glob", "grep", "skill"]
+
+
+def test_the_terminal_tools_are_offered_only_with_a_manager(tmp_path) -> None:
+    from src.engine.terminal.manager import TerminalManager
+
+    terminal = {"term_start", "term_read", "term_stop"}
+
+    assert terminal.isdisjoint(t.name for t in default_tools(None, fetcher=FakeFetcher()))
+    assert terminal <= {t.name for t in default_tools(TerminalManager(tmp_path))}

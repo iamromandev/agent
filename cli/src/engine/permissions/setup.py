@@ -6,7 +6,7 @@ import re
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from src.engine.hooks.config import read_hooks
 from src.engine.mcp.trust import TrustStore
@@ -25,7 +25,7 @@ class RuleSavedNotTrusted(OSError):
 @dataclass(frozen=True)
 class Verdict:
     rule: Rule
-    source: Source
+    source: Source | Literal["run"]  # "run": a rule given for this run only (`--allow`)
 
 
 class Rules:
@@ -49,11 +49,13 @@ class Rules:
         self._global = global_file
         self._project = project_file
         self._trusted = project_trusted
+        self._run_trusted = False  # trusted by `trust_for_run` only: the trust store is never written
         self._save = save
         self._save_key = save_key
         self._trust = trust
         self._project_hooks = project_hooks
         self._added: list[Rule] = []  # saved with "Always here" in this run: active at once
+        self._run: list[Rule] = []  # given for this run only (`--allow`): never saved
         self._deny: tuple[tuple[Rule, Source], ...] = (*((r, "global") for r in global_file.deny), *((r, "project") for r in project_file.deny))
         self._global_allow: tuple[Rule, ...] = global_file.allow
 
@@ -97,7 +99,20 @@ class Rules:
         for rule in project:
             if rule.matches(tool, args, key):
                 return Verdict(rule, "project")
+        for rule in self._run:
+            if rule.matches(tool, args, key):
+                return Verdict(rule, "run")
         return None
+
+    def add_run_allow(self, rules: Iterable[Rule]) -> None:
+        """Allow these rules for this run only: checked after the settings files' rules, never saved or remembered,
+        and deny rules still win."""
+        self._run.extend(rules)
+
+    def trust_for_run(self) -> None:
+        """Treat the project file as trusted for this run only: nothing is written to the trust store."""
+        self._trusted = True
+        self._run_trusted = True
 
     def trust_project(self) -> None:
         """The user trusted the project file: its allow rules are active now. Raises `OSError` if the choice cannot
@@ -135,7 +150,7 @@ class Rules:
 
     def _vouch(self, new: bytes | None, pending: bool) -> None:
         """Trust the bytes just written when they may be: see `save_project`."""
-        if new is not None and not pending and self._trust is not None:
+        if new is not None and not pending and self._trust is not None and not self._run_trusted:
             try:
                 self._trust(new)
             except OSError as exc:
@@ -160,6 +175,7 @@ class Rules:
             lines.extend(f"error ({source}): {escape(error)}" for error in file.list_errors)
             if file.error is not None:
                 lines.append(f"error ({source}): {escape(file.error)}")
+        lines.extend(f"allow {escape(r.text)} (run)" for r in self._run)
         if not lines:
             return []
         if self._project.error is not None:
@@ -202,6 +218,21 @@ def _rule_warnings(path: Path, file: RuleFile, *, project: bool, keys: Mapping[s
         if rule.tool == "web_fetch" and rule.prefix and rule.value is not None and _URL_HOST.match(rule.value):
             warnings.append(f"{path}: {rule.text}: a web_fetch prefix should end the host with a / (it also matches longer host names)")
     return warnings
+
+
+def run_rule_warnings(rules: Iterable[Rule], keys: Mapping[str, str | None], offered: Iterable[str] = ()) -> list[str]:
+    """Warnings for rules given for one run (`--allow`): a tool that is not offered (`keys` has the built-in tools,
+    `offered` more names, e.g. MCP tools) or a valued rule on a tool without a key argument. Never applies, so say so."""
+    names = {*keys, *offered}
+    warnings: list[str] = []
+    for rule in rules:
+        if rule.server_wildcard or rule.tool.startswith("mcp__"):
+            continue  # the servers start later: their tool names are not known yet
+        if rule.tool not in names:
+            warnings.append(f"--allow {rule.text}: no tool named {rule.tool}; this rule never applies")
+        elif rule.value is not None and _keyless(rule.tool, keys):
+            warnings.append(f"--allow {rule.text}: {rule.tool} has no argument to match; this rule never applies")
+    return [escape(w) for w in warnings]
 
 
 def _keyless(tool: str, keys: Mapping[str, str | None] | None) -> bool:
