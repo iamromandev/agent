@@ -19,12 +19,18 @@ Outcome = Literal["ok", "blocked", "context", "warning", "timeout"]
 
 BLOCKING_EVENTS: frozenset[str] = frozenset({"PreToolUse", "UserPromptSubmit", "Stop"})
 DEFAULT_REASON = "blocked by hook"
+STOP_CONTINUATIONS = 3  # times `Stop` hooks may continue one user turn
 NOTICE_CHARS = 200  # how much of a hook's text one transcript line shows
 
 
 def notice_text(text: str) -> str:
     """Hook text for one transcript line: cut first, then escaped, so the cut never splits an escape."""
     return escape(text[:NOTICE_CHARS])
+
+
+def hook_failed(event: str, exc: BaseException) -> Notice:
+    """The one warning for a hook step that raised (a bug or a failing sink), the same for every event."""
+    return Notice("warn", f"hook {event} failed: {notice_text(str(exc))}")
 
 
 class _NullRunner:
@@ -148,7 +154,7 @@ def _string(value: object) -> str:
 
 def _interpret(entry: HookEntry, run: HookRun, event: Event) -> HookOutcome:
     """What one run says. A block on an event that cannot block becomes context (`PostToolUse`) or a warning
-    (`SessionStart`); `PreToolUse` context is a warning (nothing uses it)."""
+    (`SessionStart`); `PreToolUse` and `Stop` context is a warning (nothing uses it)."""
     if run.error is not None:
         return HookOutcome(entry, "warning", run.error)
     if run.timed_out:
@@ -161,8 +167,8 @@ def _interpret(entry: HookEntry, run: HookRun, event: Event) -> HookOutcome:
     context = _string(answer.get("context"))
     if answer.get("decision") == "block":
         return _block(entry, _string(answer.get("reason"))[:REASON_CHARS], event, context)
-    if context and event == "PreToolUse":  # a tool call has no place for it: say so instead of dropping it silently
-        return HookOutcome(entry, "warning", "PreToolUse context is unused; ignored")
+    if context and event in ("PreToolUse", "Stop"):  # nothing uses it there: say so instead of dropping it silently
+        return HookOutcome(entry, "warning", f"{event} context is unused; ignored")
     return HookOutcome(entry, "context", context) if context else HookOutcome(entry, "ok", "")
 
 

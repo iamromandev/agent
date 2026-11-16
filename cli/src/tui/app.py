@@ -10,7 +10,7 @@ import signal
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
 from textual import events
 from textual.app import App, ComposeResult
@@ -18,6 +18,7 @@ from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import OptionList, Tabs, TextArea
+from textual.worker import WorkerCancelled
 
 from src.engine import (
     Agent,
@@ -46,7 +47,7 @@ from src.engine.guardrails.paths import (
     MAX_TRACKED_FILES,
 )
 from src.engine.guardrails.setup import Guardrails
-from src.engine.hooks.setup import Hooks
+from src.engine.hooks.setup import Hooks, hook_failed
 from src.engine.instructions import fingerprint, levels
 from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
@@ -240,13 +241,17 @@ class AgentApp(App[None]):
         return False
 
     async def _start(self) -> None:
-        try:  # the switch claimed in `on_mount` is held until the announcement is done: no turn can overlap it
-            await self._open_start_session()
-            await self._announce_instructions()
+        source: Literal["startup", "resume"] = "startup"
+        try:  # the switch claimed in `on_mount` is held until the hook is done: no turn can overlap it
+            try:
+                source = await self._open_start_session()
+                await self._announce_instructions()
+            finally:
+                self._start_mcp()  # after the session is drawn (a redraw would wipe the servers' notices), before the hook
+                self._start_trust()
+            await self._session_started(source)
         finally:
             self._switching = False
-            self._start_mcp()  # after the session is drawn: a redraw would wipe the servers' notices
-            self._start_trust()
 
     def _start_mcp(self) -> None:
         """Start the configured MCP servers in the background; their events become notices."""
@@ -350,15 +355,47 @@ class AgentApp(App[None]):
             with contextlib.suppress(Exception):
                 await self.query_one(Transcript).add_notice("error", f"Could not read AGENTS.md: {exc}")
 
-    async def _open_start_session(self) -> None:
-        """Begin as the command line asked: the latest session, one by id prefix, or a new one."""
+    async def _session_started(self, source: Literal["startup", "resume", "new", "switch"]) -> None:
+        """Run the SessionStart hooks (the session is drawn and its notices are in); never raises. The caller holds the
+        switch claim, so no message is accepted while a hook runs. The hook runs in its own worker (group
+        `session-start`), which Esc cancels: the runner then kills the hook's process group."""
+        if not self.hooks.has("SessionStart"):
+            return  # nothing to run, so nothing for Esc or ctrl+c to interrupt
+        events: list[AgentEvent] = []
+
+        async def run() -> None:
+            try:
+                await self.agent.session_started(source, events.append)
+            except Exception as exc:  # the agent does not raise; a bug here must not take the app down
+                events.append(hook_failed("SessionStart", exc))
+
+        worker = self.run_worker(run(), group="session-start", exit_on_error=False)
+        try:
+            await worker.wait()
+        except WorkerCancelled:
+            events.append(Notice("info", "hook SessionStart interrupted"))
+        with contextlib.suppress(Exception):
+            transcript = self.query_one(Transcript)
+            for event in events:
+                if isinstance(event, Notice):
+                    await transcript.add_notice(event.level, event.text)
+
+    async def _finish_new_session(self) -> None:
+        """The end of `/new` and `/clear`: the SessionStart hook, then release the claim the command took."""
+        try:
+            await self._session_started("new")
+        finally:
+            self._switching = False
+
+    async def _open_start_session(self) -> Literal["startup", "resume"]:
+        """Begin as the command line asked: the latest session, one by id prefix, or a new one. Returns the source
+        for the SessionStart hooks: `resume` when a saved session was opened, else `startup`."""
         store, kind = self.store, self.start.kind
         if store is None or kind == "new":
-            return
+            return "startup"
         # `on_mount` claimed the switch; `_start` releases it
         if kind == "pick":
-            await self._pick_session()
-            return
+            return "resume" if await self._pick_session() else "startup"
         transcript = self.query_one(Transcript)
         info: SessionInfo | None = None
         try:
@@ -370,9 +407,11 @@ class AgentApp(App[None]):
                 info = await asyncio.to_thread(store.find, self.start.session_id or "")
         except SessionError as exc:
             await transcript.add_notice("error", str(exc))
+        shown = False
         if info is not None:
-            await self._show_session(info)  # redraws the transcript, so the warning comes after it
+            shown = await self._show_session(info)  # redraws the transcript, so the warning comes after it
         await self._warn_skipped(store)
+        return "resume" if shown else "startup"
 
     async def _warn_skipped(self, store: SessionStore) -> None:
         if store.skipped:
@@ -457,41 +496,45 @@ class AgentApp(App[None]):
     async def _refuse_switch(self) -> None:
         await self.query_one(Transcript).add_notice("warn", self._busy_text("/sessions"))
 
-    async def _pick_session(self) -> None:
+    async def _pick_session(self) -> bool:
         """List this folder's sessions in a picker (a worker: it waits for the screen), then switch to the choice.
+        True when a session was switched to.
 
         The caller has claimed the switch (`_begin_switch`, or `on_mount` for the start) and releases it.
         """
         store, transcript = self.store, self.query_one(Transcript)
         if store is None:
-            return
+            return False
         infos = await asyncio.to_thread(store.list)
         await self._warn_skipped(store)
         if not infos:
             await transcript.add_notice("info", "No saved sessions for this folder")
-            return
+            return False
         chosen = await self.push_screen_wait(SessionPicker(infos))
-        if chosen is not None:
-            await self._show_session(next(info for info in infos if info.id == chosen))
+        if chosen is None:
+            return False
+        return await self._show_session(next(info for info in infos if info.id == chosen))
 
     async def _sessions_command(self) -> None:
         """The `/sessions` worker: pick and switch, then release the claim `_begin_switch` took."""
         try:
-            await self._pick_session()
+            if await self._pick_session():
+                await self._session_started("switch")
         finally:
             self._switching = False
 
-    async def _show_session(self, info: SessionInfo) -> None:
-        """Load `info`, make it the live session and redraw its transcript. The switching flag is held by the caller."""
+    async def _show_session(self, info: SessionInfo) -> bool:
+        """Load `info`, make it the live session and redraw its transcript. The switching flag is held by the caller.
+        False when the session could not be opened (the current one stays)."""
         store, transcript = self.store, self.query_one(Transcript)
         if store is None:
-            return
+            return False
         try:
             loaded = await asyncio.to_thread(store.load, info.id)
             recorder = FileRecorder.resume(loaded.info.path, self.workspace)
         except (SessionError, SessionWriteError) as exc:  # stay on the session we have
             await transcript.add_notice("error", str(exc))
-            return
+            return False
         try:
             if self._turn_active:  # a turn started while the file was read
                 raise AgentBusy
@@ -500,7 +543,7 @@ class AgentApp(App[None]):
             )
         except AgentBusy:
             await self._refuse_switch()
-            return
+            return False
         self.query_one(TodoPanel).show(self.agent.todos)
         await self._close_old(old)
         status = self.query_one(StatusBar)
@@ -513,6 +556,7 @@ class AgentApp(App[None]):
         await transcript.add_notice("info", f'Resumed "{info.title}" ({info.message_count} messages)')
         self.agent.forget_instructions_notice()  # the transcript was redrawn: show the notice in it
         await self._announce_instructions()
+        return True
 
     def guard_keys(self) -> None:
         """Called as an approval dialog opens: keys the user is typing into a terminal must not answer it.
@@ -692,7 +736,7 @@ class AgentApp(App[None]):
         return isinstance(focused, Tabs)  # a running tab closes only from the tab bar, never from the input or transcript
 
     def action_interrupt_or_quit(self) -> None:
-        if self._turn_active:
+        if self._turn_active or any(w.group == "session-start" and not w.is_finished for w in self.workers):
             self.interrupt_turn()
         else:
             self.exit()
@@ -701,6 +745,7 @@ class AgentApp(App[None]):
         if self._undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
             return
         self.workers.cancel_group(self, "turn")
+        self.workers.cancel_group(self, "session-start")
         if self._turn_active and not self._turn_entered:
             # Cancelled before its first line ran: the `finally` in `_turn` never will.
             self._end_turn()
@@ -789,6 +834,7 @@ class AgentApp(App[None]):
                     return
                 self.query_one(TodoPanel).show(self.agent.todos)
                 self._switching = True  # no message is accepted until the notice is back in the new transcript
+                handed = False  # the worker that runs the SessionStart hook releases the claim
                 try:
                     await self._close_old(old)
                     await transcript.clear_all()
@@ -799,8 +845,11 @@ class AgentApp(App[None]):
                     status.pending_mode = False
                     self.agent.forget_instructions_notice()
                     await self._announce_instructions()
+                    self.run_worker(self._finish_new_session(), group="new-session", exit_on_error=False)
+                    handed = True
                 finally:
-                    self._switching = False
+                    if not handed:
+                        self._switching = False
             case "/init":
                 if self._turn_active or self._switching:
                     await transcript.add_notice("warn", self._busy_text("/init"))
@@ -929,15 +978,27 @@ class AgentApp(App[None]):
         sent = False
         shown = False  # the user entry was drawn (or was being drawn)
         started = False  # the agent was handed the message
+        hook_events: list[AgentEvent] = []  # what the UserPromptSubmit hooks reported, shown once the prompt is
+        context: list[str] = []  # and what they added for the model
 
         async def work(emit: EventSink) -> None:
             nonlocal started
             started = True
-            await self.agent.run_turn(text, emit, draft=draft)
+            for hook_event in hook_events:
+                emit(hook_event)
+            await self.agent.run_turn(text, emit, draft=draft, context=context)
 
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
                 return
+            if not init:  # /init's prompt is the app's own, not something the user sent
+                decision = await self.agent.prompt_hooks(text, hook_events.append)
+                if decision.blocked:  # the prompt is dropped: `_end_turn` puts it back in the box
+                    for hook_event in hook_events:
+                        if isinstance(hook_event, Notice):
+                            await transcript.add_notice(hook_event.level, hook_event.text)
+                    return
+                context = decision.context
             self._draft = None  # from here the message is part of the conversation
             sent = True
             before = fingerprint(agents_md)
