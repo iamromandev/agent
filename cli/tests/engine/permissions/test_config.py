@@ -13,6 +13,7 @@ from src.engine.permissions.config import (
     global_settings_path,
     project_settings_path,
     read_rules,
+    set_top_key,
 )
 
 
@@ -404,3 +405,118 @@ def test_a_missing_or_unusable_file_has_no_data(tmp_path: Path) -> None:
     assert read_rules(tmp_path / "missing.json").data is None
     assert read_rules(tmp_path / "bad.json").data is None
     assert read_rules(tmp_path / "list.json").data is None
+
+
+# set_top_key
+
+
+def test_set_top_key_creates_the_file_and_the_agent_folder(tmp_path: Path) -> None:
+    path = tmp_path / ".agent" / "settings.json"
+
+    read, new = set_top_key(path, "model", "qwen3:14b")
+
+    assert read is None
+    assert json.loads(path.read_text()) == {"model": "qwen3:14b"}
+    assert path.read_bytes() == new
+    assert path.read_text().endswith("\n")
+    assert path.stat().st_mode & 0o077 == 0
+
+
+def test_set_top_key_keeps_every_other_key_in_order(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    _write(path, {"permissions": {"allow": ["bash(ls)"]}, "hooks": {"Stop": []}, "model": "old", "z": 1})
+
+    read, new = set_top_key(path, "model", "new")
+
+    assert read is not None
+    assert json.loads(path.read_text()) == {"permissions": {"allow": ["bash(ls)"]}, "hooks": {"Stop": []}, "model": "new", "z": 1}
+    assert list(json.loads(path.read_text())) == ["permissions", "hooks", "model", "z"]
+    assert path.read_bytes() == new
+
+
+def test_set_top_key_with_the_same_value_leaves_the_file_byte_for_byte(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    raw = _write(path, {"model": "m"})
+
+    assert set_top_key(path, "model", "m") == (raw, raw)
+    assert path.read_bytes() == raw
+
+
+def test_set_top_key_writes_non_ascii_as_is(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    set_top_key(path, "model", "é")
+    assert "é" in path.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("content", [b"{oops", b"[1]", b"\xff\xfe"])
+def test_set_top_key_never_overwrites_a_file_it_cannot_understand(tmp_path: Path, content: bytes) -> None:
+    path = tmp_path / "s.json"
+    path.write_bytes(content)
+
+    with pytest.raises(ValueError):
+        set_top_key(path, "model", "m")
+
+    assert path.read_bytes() == content
+
+
+def test_set_top_key_refuses_a_symlinked_file_and_a_symlinked_folder(tmp_path: Path) -> None:
+    real = tmp_path / "real.json"
+    before = _write(real, {"a": 1})
+    link = tmp_path / "s.json"
+    link.symlink_to(real)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (tmp_path / ".agent").symlink_to(elsewhere)
+
+    with pytest.raises(OSError, match="symlink"):
+        set_top_key(link, "model", "m")
+    with pytest.raises(OSError, match="symlink"):
+        set_top_key(tmp_path / ".agent" / "settings.json", "model", "m")
+
+    assert real.read_bytes() == before
+    assert list(elsewhere.iterdir()) == []
+
+
+def test_set_top_key_refuses_deeply_nested_json_an_oversized_file_and_a_fifo(tmp_path: Path) -> None:
+    deep, big, fifo = tmp_path / "deep.json", tmp_path / "big.json", tmp_path / "fifo.json"
+    deep.write_bytes(DEEP)
+    big.write_bytes(b'{"pad": "' + b"x" * (1 << 20) + b'"}')
+    os.mkfifo(fifo)
+
+    with pytest.raises(ValueError):
+        set_top_key(deep, "model", "m")
+    with pytest.raises(OSError, match="larger than"):
+        set_top_key(big, "model", "m")
+    with pytest.raises(OSError, match="regular file"):
+        set_top_key(fifo, "model", "m")
+
+    assert deep.read_bytes() == DEEP
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can write to a read-only file")
+def test_set_top_key_refuses_a_file_that_is_not_writable(tmp_path: Path) -> None:
+    path = tmp_path / "s.json"
+    before = _write(path, {"a": 1})
+    path.chmod(0o400)
+
+    with pytest.raises(OSError, match="not writable"):
+        set_top_key(path, "model", "m")
+
+    assert path.read_bytes() == before
+
+
+def test_a_crash_while_setting_a_key_leaves_the_old_file_whole_and_no_temp_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "s.json"
+    before = _write(path, {"a": 1})
+
+    def broken(src: object, dst: object) -> None:
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", broken)
+    with pytest.raises(OSError, match="disk full"):
+        set_top_key(path, "model", "m")
+
+    assert path.read_bytes() == before
+    assert [p.name for p in tmp_path.iterdir()] == ["s.json"]

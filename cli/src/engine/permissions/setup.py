@@ -10,7 +10,7 @@ from typing import Any
 
 from src.engine.hooks.config import read_hooks
 from src.engine.mcp.trust import TrustStore
-from src.engine.permissions.config import RuleFile, add_allow, project_settings_path, read_rules
+from src.engine.permissions.config import RuleFile, add_allow, project_settings_path, read_rules, set_top_key
 from src.engine.permissions.rules import Rule, Source, parse_rule, resolve_key
 from src.engine.text import escape
 from src.engine.tools.base import Tool
@@ -40,14 +40,17 @@ class Rules:
         save: Callable[[str], bytes | None] | None = None,
         trust: Callable[[bytes], None] | None = None,
         project_hooks: bool = False,
+        save_key: Callable[[str, str], bytes | None] | None = None,
     ) -> None:
         """`save(rule_text)` writes the rule to the project file and returns the new bytes when they may be trusted
         (None: written, but the file was changed since launch, so its content is not vouched for). `trust(bytes)`
-        remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust."""
+        remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust.
+        `save_key(key, value)` is `save` for a top-level string key (the model choice)."""
         self._global = global_file
         self._project = project_file
         self._trusted = project_trusted
         self._save = save
+        self._save_key = save_key
         self._trust = trust
         self._project_hooks = project_hooks
         self._added: list[Rule] = []  # saved with "Always here" in this run: active at once
@@ -118,6 +121,20 @@ class Rules:
         new = self._save(rule_text)
         if rule not in self._added and rule not in self._project.allow:
             self._added.append(rule)
+        self._vouch(new, pending)
+
+    def save_project_key(self, key: str, value: str) -> None:
+        """Set a top-level string key of the project file (the model choice), under the same trust rules as
+        `save_project`: a file that was trusted stays trusted, so the next launch asks nothing; a file the user
+        did not trust, or one changed since launch, is not vouched for. Same errors as `save_project`."""
+        if self._save_key is None:
+            raise OSError("this setting cannot be saved here (these rules have no way to write the project file)")
+        pending = self.pending_trust
+        new = self._save_key(key, value)
+        self._vouch(new, pending)
+
+    def _vouch(self, new: bytes | None, pending: bool) -> None:
+        """Trust the bytes just written when they may be: see `save_project`."""
         if new is not None and not pending and self._trust is not None:
             try:
                 self._trust(new)
@@ -226,10 +243,17 @@ def prepare(
             seen["raw"] = new
         return new if unchanged else None
 
+    def save_key(key: str, value: str) -> bytes | None:
+        read, new = set_top_key(project_path, key, value)
+        unchanged = read == seen["raw"]
+        if unchanged:
+            seen["raw"] = new
+        return new if unchanged else None
+
     def trust(content: bytes) -> None:
         store.trust(workspace, content)
 
-    rules = Rules(global_file, project_file, not needs_trust, save, trust, project_hooks)
+    rules = Rules(global_file, project_file, not needs_trust, save, trust, project_hooks, save_key)
     if len(warnings) > MAX_WARNINGS:
         more = len(warnings) - MAX_WARNINGS
         warnings = [*warnings[:MAX_WARNINGS], f"and {more} more warnings"]

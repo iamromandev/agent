@@ -72,6 +72,11 @@ class OllamaProvider:
         self.model = model
         self.context_window = num_ctx
 
+    def switch(self, model: str, context_window: int) -> None:
+        """Use `model` with `context_window` from the next request on."""
+        self.model = model
+        self.context_window = context_window
+
     async def stream(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> AsyncGenerator[ProviderEvent]:
         payload = {
             "model": self.model,

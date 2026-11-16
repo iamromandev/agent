@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import builtins
 import contextlib
 import dataclasses
 import json
@@ -20,6 +21,7 @@ from src.engine.hooks.runner import HookRun
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import CallResult, ToolInfo
 from src.engine.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
+from src.engine.provider.models import CatalogError, ModelInfo
 from src.engine.search_web import SearchHit
 from src.engine.session import SessionWriteError, ToolMeta
 from src.engine.web import FetchResponse
@@ -55,9 +57,11 @@ class ScriptedProvider:
         self.check_result = check_result
         self.check_gate: Gate | None = None  # while set, check() stops there until the test releases it
         self.requests: list[tuple[list[Message], list[str]]] = []
+        self.used: list[tuple[str, int]] = []  # (model, context_window) of each request
 
     async def stream(self, messages: Sequence[Message], tools: Sequence[ToolSpec]) -> AsyncGenerator[ProviderEvent]:
         self.requests.append(([copy(m) for m in messages], [t.name for t in tools]))
+        self.used.append((self.model, self.context_window))
         events: list[ProviderEvent | Gate] = (
             self.script.pop(0) if self.script else [ProviderError("script exhausted")]
         )
@@ -70,11 +74,49 @@ class ScriptedProvider:
                 await asyncio.sleep(self.delay)
             yield event
 
+    def switch(self, model: str, context_window: int) -> None:
+        self.model = model
+        self.context_window = context_window
+
     async def check(self) -> str | None:
         if self.check_gate is not None:
             self.check_gate.reached.set()
             await self.check_gate.release.wait()
         return self.check_result
+
+
+class FakeCatalog:
+    """A ModelCatalog over a fixed list. `lengths` maps a name to its context length (missing: unknown);
+    `delay` slows each call; `fail` makes `list` raise; names in `fail_length` make `context_length` raise."""
+
+    def __init__(
+        self,
+        models: Sequence[ModelInfo | str] = (),
+        lengths: Mapping[str, int] | None = None,
+        delay: float = 0.0,
+        fail: bool = False,
+    ) -> None:
+        self.models = [m if isinstance(m, ModelInfo) else ModelInfo(m) for m in models]
+        self.lengths = dict(lengths or {})
+        self.delay = delay
+        self.fail = fail
+        self.fail_length: set[str] = set()
+        self.length_calls: list[str] = []
+
+    async def list(self) -> builtins.list[ModelInfo]:
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail:
+            raise CatalogError("Cannot reach Ollama")
+        return list(self.models)
+
+    async def context_length(self, name: str) -> int | None:
+        self.length_calls.append(name)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail or name in self.fail_length:
+            raise CatalogError(f"Could not read {name}")
+        return self.lengths.get(name)
 
 
 class RecordingApprover:
@@ -129,6 +171,12 @@ class RecordedUndo:
     keep: int
 
 
+@dataclass(frozen=True)
+class RecordedModel:
+    model: str
+    window: int
+
+
 class MemoryRecorder:
     """A Recorder that keeps what it was given, and can be told to fail.
 
@@ -141,12 +189,13 @@ class MemoryRecorder:
         self.messages: list[tuple[Message, ToolMeta | None]] = []
         self.compactions: list[RecordedCompaction] = []
         self.undos: list[RecordedUndo] = []
-        self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo] = []  # all kinds, in write order
+        self.models: list[tuple[str, int]] = []
+        self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo | RecordedModel] = []  # all kinds, in write order
         self.fail = fail  # the next `fail` calls raise
         self.error = error  # what they raise (default: SessionWriteError)
         self.calls = 0
         self.closed = 0
-        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo] = []
+        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo | RecordedModel] = []
 
     def _write(self) -> None:
         """One write attempt for everything queued: all of it, or (when told to fail) none."""
@@ -159,6 +208,8 @@ class MemoryRecorder:
                 self.compactions.append(record)
             elif isinstance(record, RecordedUndo):
                 self.undos.append(record)
+            elif isinstance(record, RecordedModel):
+                self.models.append((record.model, record.window))
             else:
                 self.messages.append(record)
         self.records.extend(self._queued)
@@ -184,6 +235,10 @@ class MemoryRecorder:
 
     def undo(self, keep: int) -> None:
         self._queued.append(RecordedUndo(keep))
+        self._write()
+
+    def model(self, model: str, window: int) -> None:
+        self._queued.append(RecordedModel(model, window))
         self._write()
 
     def close(self) -> None:

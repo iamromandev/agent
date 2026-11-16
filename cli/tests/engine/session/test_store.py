@@ -16,7 +16,7 @@ import pytest
 from src.engine.provider.base import Message, ToolCall
 from src.engine.session.paths import workspace_dir
 from src.engine.session.recorder import FileRecorder
-from src.engine.session.records import SessionHeader, ToolMeta, dumps, message_to_obj, title_from
+from src.engine.session.records import SessionHeader, ToolMeta, dumps, message_to_obj, model_notice, title_from
 from src.engine.session.store import (
     AmbiguousSession,
     LoadedSession,
@@ -1058,3 +1058,148 @@ def test_an_undo_record_restores_the_earlier_list(store: SessionStore, root: Pat
     second = [user("two"), *todo_turn("t2", ("b", "pending")), assistant("a2")]
     write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [*first, *second, undo_record(len(first))])
     assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").todos == (TodoItem("a", "pending"),)
+
+
+# --- model switches ---------------------------------------------------------------------------
+
+
+def model_record(name: str, window: int) -> dict[str, Any]:
+    return {"type": "model", "at": STAMP, "model": name, "window": window}
+
+
+def test_the_model_notice_names_the_model_and_groups_the_window() -> None:
+    assert model_notice("qwen3:14b", 8192) == "Model: qwen3:14b (context 8,192)"
+
+
+def test_the_model_notice_writes_out_control_and_bidi_characters() -> None:
+    text = model_notice("a\x1b[2Jb\u202ec", 4096)
+    assert "\x1b" not in text
+    assert "\u202e" not in text
+    assert "\\x1b" in text
+
+
+def test_a_model_switch_replays_as_a_notice_at_its_place_and_leaves_the_history_alone(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    write_session(
+        root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA",
+        [user("q"), assistant("a"), model_record("qwen3:14b", 8192), user("q2"), assistant("a2")],
+    )
+
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    assert [(i.kind, i.text) for i in loaded.items] == [
+        ("user", "q"),
+        ("assistant", "a"),
+        ("notice", "Model: qwen3:14b (context 8,192)"),
+        ("user", "q2"),
+        ("assistant", "a2"),
+    ]
+    assert [m.content for m in loaded.history] == ["q", "a", "q2", "a2"]
+    assert loaded.skipped_lines == 0
+
+
+def test_a_model_notice_survives_an_undo_back_to_where_it_was_recorded(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    write_session(
+        root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA",
+        [user("q"), assistant("a"), model_record("m", 4096), user("q2"), assistant("a2"), {"type": "undo", "keep": 2, "at": STAMP}],
+    )
+
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    assert [i.text for i in loaded.items] == ["q", "a", "Model: m (context 4,096)"]
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"type": "model", "at": STAMP, "model": 5, "window": 1},
+        {"type": "model", "at": STAMP, "model": "m"},
+        {"type": "model", "at": STAMP, "model": "m", "window": "x"},
+        {"type": "model", "at": STAMP, "model": "m", "window": True},
+    ],
+)
+def test_a_malformed_model_record_is_skipped_like_any_bad_record(
+    store: SessionStore, root: Path, workspace: Path, bad: dict[str, Any]
+) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("q"), bad])
+
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    assert [i.text for i in loaded.items] == ["q"]
+    assert loaded.skipped_lines == 1
+
+
+def test_a_model_switch_on_a_fresh_session_leaves_no_session_for_continue(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    from src.engine.session.recorder import FileRecorder
+
+    recorder = FileRecorder(workspace_dir(root, workspace), workspace)
+    recorder.model("m", 4096)
+    assert store.latest() is None
+
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("old")], title="old")
+    recorder.model("n", 2048)
+
+    latest = store.latest()
+    assert latest is not None
+    assert latest.id == "01AAAAAAAAAAAAAAAAAAAAAAAA"
+    assert [i.id for i in store.list()] == ["01AAAAAAAAAAAAAAAAAAAAAAAA"]
+    recorder.close()
+
+
+def test_a_switch_before_the_first_message_replays_as_a_notice_before_it(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    from src.engine.session.recorder import FileRecorder
+
+    recorder = FileRecorder(workspace_dir(root, workspace), workspace)
+    recorder.model("m", 4096)
+    recorder.message(Message("user", "hi"), None)
+    recorder.close()
+
+    info = store.latest()
+    assert info is not None
+    loaded = store.load(info.id)
+    assert [(i.kind, i.text) for i in loaded.items] == [("notice", "Model: m (context 4,096)"), ("user", "hi")]
+
+
+def test_an_undo_that_cuts_back_past_a_model_notice_removes_it(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    write_session(
+        root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA",
+        [user("q"), assistant("a"), model_record("m", 4096), user("q2"), assistant("a2"), {"type": "undo", "keep": 0, "at": STAMP}],
+    )
+
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    assert loaded.items == []
+    assert loaded.history == []
+
+
+def test_a_model_notice_before_a_compaction_stays_and_an_undo_back_to_the_compaction_keeps_both(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    summary = embedded(Message("user", "summary"))
+    write_session(
+        root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA",
+        [
+            user("q"), assistant("a"), model_record("m", 4096), compaction([summary]),
+            user("q2"), assistant("a2"), model_record("n", 2048), user("q3"),
+            {"type": "undo", "keep": 1, "at": STAMP},
+        ],
+    )
+
+    loaded = store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+    texts = [i.text for i in loaded.items]
+    assert texts[:2] == ["q", "a"]
+    assert "Model: m (context 4,096)" in texts
+    assert "Model: n (context 2,048)" not in texts
+    assert "q2" not in texts
+    assert len(loaded.history) == 1
+    assert loaded.skipped_lines == 0

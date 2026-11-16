@@ -28,6 +28,23 @@ from src.tui.app import AgentApp
 from tests.helpers import assert_all_gone
 
 
+@pytest.fixture(autouse=True)
+def ollama(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Ollama as `run` sees it at launch: `tags` entries and `show` bodies by name (the network is blocked)."""
+    entries: list[dict] = []
+    answers: dict[str, Any] = {"show": {}, "tags": entries}
+
+    async def tags(self: OllamaClient) -> list[dict]:
+        return entries
+
+    async def show(self: OllamaClient, name: str, timeout: float) -> dict:
+        return answers["show"].get(name, {})
+
+    monkeypatch.setattr(OllamaClient, "tags", tags)
+    monkeypatch.setattr(OllamaClient, "show", show)
+    return answers
+
+
 def test_run_wires_settings_into_the_app(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("AGENT_MODEL", "foo")
     monkeypatch.setenv("AGENT_NUM_CTX", "4096")
@@ -219,6 +236,7 @@ def wired(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> _Wired:
     monkeypatch.setattr(tui_app, "AgentApp", FakeApp)
     monkeypatch.setattr(OllamaClient, "aclose", aclose)
     src.tui.run(tmp_path)
+    seen.order.clear()  # the launch's own probe client was closed during `run`; the tests look at the quit order
     return seen
 
 
@@ -711,3 +729,137 @@ def test_run_gives_the_sandbox_the_sessions_folder_and_the_same_guard_to_the_mcp
     assert f'(subpath "{sessions.resolve()}")' in profile
     assert app.mcp is not None
     assert app.mcp._connector._guard is app.guard  # ty: ignore[unresolved-attribute]
+
+
+def _project_model(workspace: Path, model: object) -> None:
+    path = workspace / ".agent" / "settings.json"
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps({"model": model}))
+
+
+def test_run_resolves_the_window_from_the_model_and_caps_it(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    monkeypatch.setenv("AGENT_MODEL", "foo")
+    monkeypatch.setenv("AGENT_NUM_CTX", "8192")
+    ollama["show"]["foo"] = {"model_info": {"general.architecture": "x", "x.context_length": 4096}}
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert (app.provider.model, app.provider.context_window) == ("foo", 4096)
+    assert app.window_cap == 8192
+    assert app.catalog is not None
+
+
+def test_run_prefers_the_flag_then_the_environment_then_the_project_key(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    _project_model(tmp_path, "z")
+    ollama["tags"].extend({"name": n} for n in ("x", "y", "z", "qwen2.5:7b-instruct"))
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        assert _run_app(monkeypatch, tmp_path).provider.model == "z"  # the project key
+        monkeypatch.setenv("AGENT_MODEL", "y")
+        get_settings.cache_clear()
+        assert _run_app(monkeypatch, tmp_path).provider.model == "y"  # the environment beats it
+        assert _run_app(monkeypatch, tmp_path, model="x").provider.model == "x"  # the flag beats both
+    finally:
+        get_settings.cache_clear()
+    assert json.loads((tmp_path / ".agent" / "settings.json").read_text()) == {"model": "z"}  # --model never writes
+
+
+def test_run_ignores_a_project_model_that_is_not_installed_with_a_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    _project_model(tmp_path, "gone")
+    ollama["tags"].append({"name": "qwen2.5:7b-instruct"})
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert app.provider.model == "qwen2.5:7b-instruct"
+    assert any("gone" in w and "not installed" in w for w in app._permission_warnings)
+
+
+def test_run_gives_the_app_an_info_line_when_the_project_key_decided_the_model(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    _project_model(tmp_path, " z\x1b[2J ")
+    ollama["tags"].append({"name": "z\x1b[2J"})
+    monkeypatch.delenv("AGENT_MODEL", raising=False)
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert app._launch_notices == ("Model z\\x1b[2J (from .agent/settings.json)",)
+
+
+def test_run_passes_no_info_line_when_the_environment_decided(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    _project_model(tmp_path, "z")
+    monkeypatch.setenv("AGENT_MODEL", "y")
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert app._launch_notices == ()
+
+
+def test_run_treats_a_blank_environment_model_as_unset(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, ollama: dict[str, Any]
+) -> None:
+    _project_model(tmp_path, "z")
+    ollama["tags"].append({"name": "z"})
+    monkeypatch.setenv("AGENT_MODEL", "  ")
+    get_settings.cache_clear()
+    try:
+        app = _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert app.provider.model == "z"
+
+
+def test_run_says_on_stderr_when_asking_ollama_takes_long(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    async def slow_show(self: OllamaClient, name: str, timeout: float) -> dict:
+        await asyncio.sleep(0.2)
+        return {}
+
+    monkeypatch.setattr(OllamaClient, "show", slow_show)
+    monkeypatch.setattr("src.engine.provider.models.SLOW_AFTER", 0.02)
+    monkeypatch.setenv("AGENT_MODEL", "foo\x1b[2J")
+    get_settings.cache_clear()
+    try:
+        _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    err = capsys.readouterr().err
+    assert err == "Asking Ollama about foo\\x1b[2J…\n"
+
+
+def test_run_prints_nothing_on_stderr_when_ollama_answers_quickly(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("AGENT_MODEL", "foo")
+    get_settings.cache_clear()
+    try:
+        _run_app(monkeypatch, tmp_path)
+    finally:
+        get_settings.cache_clear()
+
+    assert capsys.readouterr().err == ""

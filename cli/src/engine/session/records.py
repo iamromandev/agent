@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from typing import Any, get_args
 
 from src.engine.provider.base import Message, Role, ToolCall
+from src.engine.text import escape_display
 
 FORMAT_VERSION = 1
 TITLE_LIMIT = 50
@@ -148,3 +149,8 @@ def compaction_notice(pruned: int, summarized: int, before: int | None = None, a
     if before is not None and after is not None:
         text += f" (ctx ~{before} \u2192 ~{after})"
     return text
+
+
+def model_notice(name: str, window: int) -> str:
+    """The transcript line for a model switch. The live notice and the replayed one are both made here."""
+    return f"Model: {escape_display(name)} (context {window:,})"

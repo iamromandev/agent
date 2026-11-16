@@ -69,3 +69,11 @@ class Provider(Protocol):
     async def check(self) -> str | None:
         """None when ready, else a user-facing error that says how to fix it."""
         ...
+
+
+class SwitchableProvider(Provider, Protocol):
+    """A provider whose model and window can change between requests."""
+
+    def switch(self, model: str, context_window: int) -> None:
+        """Use `model` with `context_window` from the next request on."""
+        ...

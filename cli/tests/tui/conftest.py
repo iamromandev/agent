@@ -33,7 +33,7 @@ from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
 
-from tests.fakes import Gate, ScriptedProvider
+from tests.fakes import FakeCatalog, Gate, ScriptedProvider
 from tests.helpers import assert_all_gone
 
 WAIT = 5.0  # no test waits longer than this for the app; a regression fails instead of hanging
@@ -106,6 +106,9 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         skills: Skills | None = None,
         guard: Guardrails | None = None,
         hooks: Hooks | None = None,
+        catalog: FakeCatalog | None = None,
+        window_cap: int = 8192,
+        launch_notices: Sequence[str] = (),
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -155,6 +158,9 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             skills=skills,
             guard=guard,
             hooks=hooks,
+            catalog=catalog if catalog is not None else FakeCatalog([model]),
+            window_cap=window_cap,
+            launch_notices=launch_notices,
         )
 
     return build

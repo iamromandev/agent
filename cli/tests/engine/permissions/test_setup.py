@@ -476,6 +476,137 @@ def test_a_trust_store_that_fails_after_the_file_was_written_is_reported_as_exac
     assert _allow(rules, "bash", command="ls") == "bash(ls)"
 
 
+# save_project_key: the model choice must not cost the project its trust
+
+
+def test_saving_a_key_into_a_trusted_file_keeps_it_trusted_with_its_rules_and_hooks(launch: Launch) -> None:
+    launch.write(
+        launch.project_path,
+        allow=["bash(ls)"],
+        hooks={"Stop": [{"command": "true"}]},
+    )
+    rules = launch.prepare().rules
+    rules.trust_project()
+
+    rules.save_project_key("model", "qwen3:14b")
+
+    data = _saved(launch)
+    assert data["model"] == "qwen3:14b"
+    assert data["permissions"] == {"allow": ["bash(ls)"]}
+    assert data["hooks"] == {"Stop": [{"command": "true"}]}
+    assert launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
+    again = launch.prepare()  # the next launch: no trust prompt, rules and hooks still active
+    assert again.rules.untrusted_allow == ()
+    assert again.rules.pending_trust is False
+    assert _allow(again.rules, "bash", command="ls") == "bash(ls)"
+
+
+def test_a_second_switch_after_the_first_stays_trusted(launch: Launch) -> None:
+    launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.trust_project()
+
+    rules.save_project_key("model", "a")
+    rules.save_project_key("model", "b")
+
+    assert _saved(launch)["model"] == "b"
+    assert launch.prepare().rules.pending_trust is False
+
+
+def test_a_rule_saved_after_a_model_switch_is_still_trusted(launch: Launch) -> None:
+    launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.trust_project()
+
+    rules.save_project_key("model", "a")
+    rules.save_project("write")
+
+    assert launch.prepare().rules.pending_trust is False
+
+
+def test_saving_a_key_creates_the_file_when_none_exists_and_it_is_trusted(launch: Launch) -> None:
+    rules = launch.prepare().rules
+
+    rules.save_project_key("model", "a")
+
+    assert _saved(launch) == {"model": "a"}
+    assert launch.prepare().rules.pending_trust is False
+
+
+def test_saving_a_key_does_not_trust_the_rules_of_an_untrusted_file(launch: Launch) -> None:
+    launch.project(allow=["bash(*)"])
+    rules = launch.prepare().rules  # untrusted: the user declined
+
+    rules.save_project_key("model", "a")
+
+    assert _saved(launch)["model"] == "a"
+    assert _allow(rules, "bash", command="rm x") is None
+    again = launch.prepare().rules
+    assert [r.text for r in again.untrusted_allow] == ["bash(*)"]  # asked again next launch
+
+
+def test_saving_a_key_after_the_file_was_edited_during_the_run_does_not_trust_the_edit(launch: Launch) -> None:
+    launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.trust_project()
+    launch.project(allow=["bash(ls)", "bash"])  # edited after launch
+
+    rules.save_project_key("model", "a")
+
+    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
+    assert [r.text for r in launch.prepare().rules.untrusted_allow] == ["bash(ls)", "bash"]
+
+
+def test_a_key_saved_over_an_edit_made_in_the_write_window_does_not_trust_it(
+    launch: Launch, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    launch.project(allow=["bash(ls)"])
+    rules = launch.prepare().rules
+    rules.trust_project()
+    real = permission_setup.set_top_key
+
+    def edited_first(path: Path, key: str, value: str) -> tuple[bytes | None, bytes]:
+        launch.project(allow=["bash(ls)", "bash"])
+        return real(path, key, value)
+
+    monkeypatch.setattr(permission_setup, "set_top_key", edited_first)
+
+    rules.save_project_key("model", "a")
+
+    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
+
+
+def test_a_failing_trust_store_after_a_key_write_says_the_next_launch_will_ask(launch: Launch) -> None:
+    rules = prepare(launch.workspace, launch.global_path, TrustStore(launch.workspace / "trust.json")).rules
+
+    with pytest.raises(RuleSavedNotTrusted, match="next launch will ask"):
+        rules.save_project_key("model", "a")
+
+    assert _saved(launch)["model"] == "a"
+
+
+def test_saving_a_key_never_overwrites_an_unparseable_or_symlinked_file(launch: Launch, tmp_path: Path) -> None:
+    launch.project_path.parent.mkdir(parents=True)
+    launch.project_path.write_text("{oops")
+    with pytest.raises(ValueError, match="not valid JSON"):
+        launch.prepare().rules.save_project_key("model", "a")
+    assert launch.project_path.read_text() == "{oops"
+
+    launch.project_path.unlink()
+    real = tmp_path / "real.json"
+    before = launch.write(real, allow=["bash(x)"])
+    launch.project_path.symlink_to(real)
+    with pytest.raises(OSError, match="symlink"):
+        launch.prepare().rules.save_project_key("model", "a")
+    assert real.read_bytes() == before
+
+
+def test_the_empty_rules_cannot_save_a_key() -> None:
+    with pytest.raises(OSError, match="cannot be saved here") as caught:
+        Rules.empty().save_project_key("model", "a")
+    assert "no project settings file" not in str(caught.value)  # the file may exist: there is no way to write it
+
+
 # text from the project file is escaped wherever it is shown
 
 
