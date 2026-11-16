@@ -37,7 +37,8 @@ from src.engine.events import (
     TurnEnded,
     UsageUpdate,
 )
-from src.engine.guardrails.setup import guard_of
+from src.engine.guardrails.redact import drop_partial_tail
+from src.engine.guardrails.setup import REDACTION_FAILED, guard_of
 from src.engine.instructions import Instructions, load_instructions
 from src.engine.mode import Mode
 from src.engine.permissions.config import agent_config_files
@@ -61,7 +62,7 @@ from src.engine.todo import INTERRUPTED, NOT_COMPLETED, SKIPPED, TodoItem, activ
 from src.engine.tools.base import Prepared, Preview, Tool, ToolContext, ToolResult, check_args
 from src.engine.tools.paths import InvalidPath, resolve_path
 from src.engine.tools.skill import SkillTool
-from src.engine.tools.text import truncate, truncate_ansi
+from src.engine.tools.text import TOOL_OUTPUT_LIMIT, keep_sgr, truncate, truncate_ansi
 from src.engine.undo import (
     NOTHING_TO_UNDO,
     SNAPSHOT_FILE_LIMIT,
@@ -74,6 +75,11 @@ from src.engine.undo import (
 
 # Marks a partial assistant message that a cancel cut short, so the model does not take it for a
 # complete answer on the next turn.
+# What redaction reads of a result: the output limit plus this much, so a secret that starts before the cut and ends a
+# little after it is still seen whole; one that has no end in sight is replaced to the end of what is read. The rest of
+# the output is dropped before redaction, because redaction must not cost more than the model could ever see.
+REDACT_MARGIN = 4_000
+DISPLAY_FACTOR = 4  # the display copy also holds colour codes, which do not count towards its limit
 PARTIAL_MARK = "\n[interrupted by user]"
 NOTHING_TO_COMPACT = "Nothing to compact"
 NOT_SUMMARIZED = "Could not summarize the earlier conversation; continuing with pruned history"
@@ -101,6 +107,34 @@ def close_recorder(recorder: Recorder) -> None:
     if callable(close):
         with contextlib.suppress(Exception):
             close()
+
+
+def _window(result: ToolResult) -> tuple[ToolResult, int]:
+    """`result` cut to what redaction reads (`REDACT_MARGIN`), and how many characters of the output were dropped."""
+    room = TOOL_OUTPUT_LIMIT + REDACT_MARGIN
+    output, display = result.output, result.display
+    hidden = max(len(output) - room, 0)
+    if hidden:
+        output = output[:room]
+    if display is not None and len(display) > DISPLAY_FACTOR * room:
+        # Not in the middle of a colour code: a cut one at the end is dropped.
+        display = keep_sgr(display[: DISPLAY_FACTOR * room])
+    if hidden == 0 and display is result.display:
+        return result, 0
+    return dataclasses.replace(result, output=output, display=display), hidden
+
+
+def _truncate(output: str, hidden: int) -> str:
+    """`truncate`, for a redacted output that `_window` cut (`hidden` characters were dropped before redaction).
+
+    The last word goes first: a token that straddles the window edge is left as a prefix no pattern recognises, and
+    when redaction has shrunk the text below the limit that prefix would be the end of what the model gets. The note
+    counts every character that is not in the output: the window's, that word and what the limit cuts."""
+    if hidden == 0:
+        return truncate(output)
+    output, dropped = drop_partial_tail(output)
+    cut = max(len(output) - TOOL_OUTPUT_LIMIT, 0)
+    return f"{output[:TOOL_OUTPUT_LIMIT]}\n[{hidden + dropped + cut} characters truncated]"
 
 
 class Agent:
@@ -662,14 +696,20 @@ class Agent:
                 if isinstance(prepared, ToolResult):
                     result = prepared
                 else:
-                    preview = prepared.preview
+                    preview = guard_of(self.ctx).redact_preview(prepared.preview)
                     result, applied = await self._approve_and_run(tool, call, prepared, mode, emit)
         except _Landed as landed:
             result, applied, cancel = landed.result, landed.applied, landed.cancel
         except Exception as exc:  # NFR4: a failing tool is an error result, never a crashed turn
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
             applied = False
-        result = dataclasses.replace(result, output=truncate(result.output))
+        # Redaction first, the limit after it: a secret that straddles the cut must not leave its first characters.
+        guard = guard_of(self.ctx)
+        result, hidden = _window(result)
+        result = guard.redact_result(result)
+        if result.output == REDACTION_FAILED:  # the message replaced the output: nothing of it was cut
+            hidden = 0
+        result = dataclasses.replace(result, output=_truncate(result.output, hidden))
         if result.display is not None:
             result = dataclasses.replace(result, display=truncate_ansi(result.display))
         self._record(
@@ -778,7 +818,9 @@ class Agent:
         ):
             allow_always = mode is not Mode.PLAN and not guarded
             save_rule = self._offered_rule(tool, call) if allow_always else None
-            request = ApprovalRequest(call.name, tool.label(call.arguments), prepared.preview, allow_always, save_rule)
+            request = ApprovalRequest(
+                call.name, tool.label(call.arguments), guard_of(self.ctx).redact_preview(prepared.preview), allow_always, save_rule
+            )
             decision = await self.approver.ask(request)
             if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no
                 note = f" Note: {decision.note}" if decision.note else ""

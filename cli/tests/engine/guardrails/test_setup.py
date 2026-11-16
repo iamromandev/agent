@@ -9,7 +9,7 @@ import pytest
 from src.engine.guardrails import sandbox as sandbox_module
 from src.engine.guardrails import setup as guard_setup
 from src.engine.guardrails.setup import Guardrails, guard_of, prepare
-from src.engine.tools.base import ToolContext, ToolResult
+from src.engine.tools.base import Preview, ToolContext, ToolResult
 
 
 def make(tmp_path: Path, global_data: dict | None = None, project_data: dict | None = None, env: dict | None = None) -> Guardrails:
@@ -112,12 +112,55 @@ def test_a_failing_probe_is_a_launch_warning(tmp_path: Path, monkeypatch: pytest
     assert len(guard.warnings) == 1 and "test command" in guard.warnings[0]
 
 
-def test_the_empty_redactor_changes_nothing(tmp_path: Path) -> None:
-    guard = make(tmp_path)
-    result = ToolResult("ghp_abcdefghijklmnopqrstuvwxyz0123456789", display="shown")
+def test_prepare_builds_the_redactor_from_the_removed_variables_that_are_long_enough(tmp_path: Path) -> None:
+    env = {"GITHUB_TOKEN": "a-long-enough-value", "SHORT_TOKEN": "short", "PATH": "/usr/local/bin:/usr/bin"}
 
-    assert guard.redactor.redact("text") == ("text", 0)
-    assert guard.redact_result(result) == result
+    guard = make(tmp_path, env=env)
+
+    assert guard.redactor.redact("x a-long-enough-value short /usr/local/bin:/usr/bin") == (
+        "x [redacted:env:GITHUB_TOKEN] short /usr/local/bin:/usr/bin",
+        1,
+    )
+
+
+def test_a_kept_variables_value_is_not_redacted_as_an_env_value(tmp_path: Path) -> None:
+    guard = make(tmp_path, {"guardrails": {"keepEnv": ["NPM_TOKEN"]}}, None, {"NPM_TOKEN": "npm-value-12345"})
+
+    assert guard.redactor.redact("npm-value-12345") == ("npm-value-12345", 0)
+
+
+def test_redact_result_replaces_the_output_drops_the_colour_copy_and_counts_the_output_only(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    result = ToolResult(f"out {secret}", True, "exit 1", display=f"shown {secret} {secret}")
+
+    redacted = guard.redact_result(result)
+
+    # The display is a copy of the output with colours: with the output redacted it is dropped, so the transcript shows
+    # the redacted plain text (a copy cannot be trusted to hold a secret in one piece, see the next tests).
+    assert redacted == ToolResult("out [redacted:github-token]", True, "exit 1", display=None)
+    assert guard.redactions == 1
+
+
+def test_redact_result_returns_the_same_result_when_nothing_matches(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    result = ToolResult("plain", display="shown")
+
+    assert guard.redact_result(result) is result
+    assert guard.redactions == 0
+
+
+def test_a_redactor_that_raises_withholds_the_result_and_leaks_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard = make(tmp_path)
+
+    def broken(self: object, text: str) -> tuple[str, int]:
+        raise RuntimeError(f"cannot handle {text}")
+
+    monkeypatch.setattr(type(guard.redactor), "redact", broken)
+
+    withheld = guard.redact_result(ToolResult("secret-text", False, "ok", display="secret-display"))
+
+    assert withheld == ToolResult("[redaction failed: output withheld]", True, "redaction failed")
     assert guard.redactions == 0
 
 
@@ -188,3 +231,127 @@ def test_off_is_built_once_per_home_and_keeps_its_own_redaction_count(tmp_path: 
     Guardrails.off(tmp_path)
     assert builds == [tmp_path, tmp_path / "elsewhere"]
     guard_setup._off.cache_clear()
+
+
+def test_redact_result_counts_a_secret_only_in_the_display_not_at_all(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+
+    redacted = guard.redact_result(ToolResult("clean", display=f"shown {secret}"))
+
+    assert redacted == ToolResult("clean", display=None)
+    assert guard.redactions == 0
+
+
+GITHUB = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+JWT = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
+
+
+def test_a_secret_split_by_colour_codes_in_the_display_does_not_reach_the_transcript(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    colored = f"\x1b[31mghp_\x1b[0m{GITHUB[4:]}"
+    assert GITHUB not in colored  # the display copy alone cannot be matched
+
+    redacted = guard.redact_result(ToolResult(GITHUB, display=colored))
+
+    assert redacted.output == "[redacted:github-token]"
+    assert redacted.display is None
+    assert guard.redactions == 1
+
+
+def test_a_jwt_with_a_coloured_segment_in_the_display_does_not_reach_the_transcript(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    header, payload, signature = JWT.split(".")
+    colored = f"{header}.\x1b[32m{payload}\x1b[0m.{signature}"
+
+    redacted = guard.redact_result(ToolResult(f"token {JWT}", display=colored))
+
+    assert redacted.output == "token [redacted:jwt]"
+    assert redacted.display is None
+
+
+def test_a_display_that_nothing_changed_is_kept(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    result = ToolResult("plain text", display="\x1b[32mplain text\x1b[0m")
+
+    assert guard.redact_result(result) is result
+
+
+def test_redact_preview_replaces_a_secret_in_a_diff_and_does_not_count_it(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    preview = Preview("diff", "edit a.txt", f"-token={secret}\n+token=x\n")
+
+    shown = guard.redact_preview(preview)
+
+    assert shown == Preview("diff", "edit a.txt", "-token=[redacted:github-token]\n+token=x\n")
+    assert guard.redactions == 0
+
+
+def test_redact_preview_leaves_what_the_model_wrote_itself(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    secret = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
+    command = Preview("command", "bash echo", f"echo {secret}")
+    content = Preview("content", "write a", secret)
+
+    assert guard.redact_preview(command) is command  # the user approves exactly what runs
+    assert guard.redact_preview(content) is content
+    assert guard.redact_preview(None) is None
+
+
+def test_a_redactor_that_raises_withholds_the_diff_preview(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard = make(tmp_path)
+
+    def broken(self: object, text: str) -> tuple[str, int]:
+        raise RuntimeError(f"cannot handle {text}")
+
+    monkeypatch.setattr(type(guard.redactor), "redact", broken)
+
+    shown = guard.redact_preview(Preview("diff", "edit a", "-secret-text"))
+
+    assert shown == Preview("diff", "edit a", "[redaction failed: output withheld]")
+
+
+def test_redact_preview_bounds_a_huge_diff_and_says_what_it_did_not_show(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    line = "+some added line of the diff\n"
+    body = line * 20_000  # 580 KB
+
+    shown = guard.redact_preview(Preview("diff", "edit a", body))
+
+    assert shown is not None
+    assert len(shown.body) < guard_setup.PREVIEW_WINDOW + 200
+    assert shown.body.startswith(line * 100)
+    assert shown.body.endswith("characters not shown]")
+    hidden = int(shown.body.rsplit("[", 1)[1].split(" ", 1)[0])
+    assert hidden + len(shown.body.rsplit("\n[", 1)[0]) == len(body)
+
+
+def test_redact_preview_of_a_huge_diff_does_not_leave_the_start_of_a_token_at_the_cut(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    body = "+x\n" * 50_000
+    body = body[: guard_setup.PREVIEW_WINDOW - 10] + " " + GITHUB + "\n" + body
+
+    shown = guard.redact_preview(Preview("diff", "edit a", body))
+
+    assert shown is not None
+    assert "ghp_" not in shown.body
+
+
+def test_redact_preview_of_a_huge_adversarial_diff_is_fast(tmp_path: Path) -> None:
+    import time
+
+    guard = make(tmp_path, None, None, {"A_TOKEN": "value-number-0001-secret"})
+    body = "[redacted:" * 200_000
+
+    start = time.perf_counter()
+    guard.redact_preview(Preview("diff", "edit a", body))
+
+    assert time.perf_counter() - start < 1.0
+
+
+def test_a_small_diff_preview_has_no_note(tmp_path: Path) -> None:
+    guard = make(tmp_path)
+    preview = Preview("diff", "edit a", "-a\n+b\n")
+
+    assert guard.redact_preview(preview) is preview
