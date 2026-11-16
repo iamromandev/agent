@@ -302,7 +302,9 @@ def test_a_quiet_run_keeps_progress_lines_off_stderr(ws: Path, capsys: pytest.Ca
 
     go(ws, ScriptedProvider([call("read", path="a.txt"), say("ok")], context_window=100_000), quiet=True)
 
-    assert capsys.readouterr().err == ""
+    lines = capsys.readouterr().err.splitlines()
+    # Launch warnings (e.g. no sandbox on Linux) may remain; progress lines must not.
+    assert all(line.startswith("warning") for line in lines), lines
 
 
 class _Closed:
