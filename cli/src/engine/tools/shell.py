@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
-import os
 import re
-import signal
 from asyncio.subprocess import DEVNULL, PIPE, STDOUT, Process
 from collections import deque
 from typing import Any, ClassVar
 
 from src.engine.env import child_environment
 from src.engine.guardrails.setup import guard_of
+from src.engine.process import kill_group, shell_argv
 
 from .base import Prepared, Preview, Tool, ToolContext, ToolResult
 from .text import DANGLING, ESCAPE, SGR, keep_sgr, strip_ansi
@@ -180,7 +178,7 @@ def _with_note(text: str, plain: str, sandboxed: bool) -> str:
 
 async def _run(command: str, ctx: ToolContext) -> ToolResult:
     guard = guard_of(ctx)
-    argv = guard.sandbox.wrap([os.environ.get("SHELL") or "/bin/sh", "-c", command])
+    argv = guard.sandbox.wrap(shell_argv(command))
     sandboxed = guard.sandbox.profile is not None
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -198,7 +196,7 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
     try:
         await asyncio.wait_for(_drain(proc, capture), ctx.bash_timeout)
     except TimeoutError:
-        await _kill_group(proc)
+        await kill_group(proc)
         message = f"Command timed out after {ctx.bash_timeout:g}s and was killed"
         text = capture.text()
         raw = capture.raw()
@@ -210,7 +208,7 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
             _with_note(output, text, sandboxed), is_error=True, summary="timed out", display=display
         )
     except BaseException:  # CancelledError (Esc) or anything unexpected: never leave a process behind
-        await _kill_group(proc)
+        await kill_group(proc)
         raise
     text = capture.text()
     code = proc.returncode
@@ -221,10 +219,3 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
         display = _with_note(display, text, sandboxed)
     return ToolResult(_with_note(output, text, sandboxed), summary=f"exit {code}", display=display)
 
-
-async def _kill_group(proc: Process) -> None:
-    """SIGKILL the command's whole process group, then reap the shell."""
-    # Ignore "already gone"; macOS answers EPERM for a group that holds only zombies.
-    with contextlib.suppress(ProcessLookupError, PermissionError):
-        os.killpg(proc.pid, signal.SIGKILL)
-    await proc.wait()

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal
 
@@ -137,3 +137,17 @@ def exact_rule_text(tool: str, value: str | None) -> str:
     if value is not None and (rule.prefix or rule.value != value):
         raise RuleError("the value ends in *, which a rule would read as a prefix")
     return text
+
+
+def name_matcher(text: str) -> Callable[[str], bool]:
+    """A test on a tool name for `text`: an exact name, `<prefix>*` (names that start with it), `mcp__<server>__*`, or
+    a lone `*` for every tool. No argument value: `tool(value)` is a `RuleError`, like any other invalid text."""
+    if text == "*":
+        return lambda tool: True
+    if text.endswith("*") and text != "*" and "(" not in text and _NAME.fullmatch(text[:-1]):
+        prefix = text[:-1]
+        return lambda tool: tool.startswith(prefix)
+    rule = parse_rule(text)
+    if rule.value is not None:
+        raise RuleError("a matcher names tools, not arguments")
+    return lambda tool: rule.matches(tool, {}, None)

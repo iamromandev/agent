@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import json
 import stat
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from copy import copy
@@ -15,6 +16,7 @@ from src.engine.approval import ApprovalRequest, Choice, Decision
 from src.engine.guardrails import sandbox as sandbox_module
 from src.engine.guardrails.sandbox import Sandbox
 from src.engine.guardrails.setup import Guardrails
+from src.engine.hooks.runner import HookRun
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import CallResult, ToolInfo
 from src.engine.provider.base import Message, ProviderError, ProviderEvent, ToolSpec
@@ -315,3 +317,31 @@ def recording_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace
     monkeypatch.setattr(sandbox_module, "SANDBOX_EXEC", script)
     guard = Guardrails.off(workspace or tmp_path)
     return dataclasses.replace(guard, sandbox=Sandbox(FAKE_PROFILE, "on (fake)", True, ())), log
+
+
+class FakeRunner:
+    """A hook `Runner` that spawns nothing: it answers from a script and records every call.
+
+    `script` is a list of `HookRun`s used in order (the last one repeats), or a function of (command, payload)."""
+
+    def __init__(self, script: Callable[[str, dict[str, Any]], HookRun] | Sequence[HookRun] = ()) -> None:
+        self.script = script
+        self.calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []  # (command, stdin payload, env_extra)
+
+    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
+        payload = json.loads(stdin)
+        self.calls.append((command, payload, dict(env_extra)))
+        script = self.script
+        if not isinstance(script, Sequence):
+            return script(command, payload)
+        if not script:
+            return ok_run()
+        return script[min(len(self.calls), len(script)) - 1]
+
+
+def ok_run(stdout: str = "", stderr: str = "") -> HookRun:
+    return HookRun(0, stdout, stderr, False, None)
+
+
+def exit_run(code: int, stderr: str = "", stdout: str = "") -> HookRun:
+    return HookRun(code, stdout, stderr, False, None)

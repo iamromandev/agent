@@ -15,6 +15,7 @@ import src.tui.app as tui_app
 from src.client import OllamaClient, SearxClient, WebClient
 from src.config.settings import get_settings
 from src.engine import Agent
+from src.engine.hooks.runner import ProcessRunner
 from src.engine.mcp.hub import McpHub
 from src.engine.provider.base import Message
 from src.engine.provider.ollama import OllamaProvider
@@ -473,6 +474,58 @@ def test_run_kills_what_is_left_of_the_mcp_servers_after_the_app_ends(
     with pytest.raises(RuntimeError, match="app crashed"):
         src.tui.run(tmp_path)
     assert killed == ["mcp", "mcp"]
+
+
+def test_run_kills_the_hooks_still_running_after_the_app_ends(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    killed: list[str] = []
+    monkeypatch.setattr(ProcessRunner, "kill_all", lambda self: killed.append("hooks"))
+
+    _run_app(monkeypatch, tmp_path)
+    assert killed == ["hooks"]
+
+    def failing_run(self: AgentApp, **_: object) -> None:
+        raise RuntimeError("app crashed")
+
+    monkeypatch.setattr(AgentApp, "run", failing_run)
+    with pytest.raises(RuntimeError, match="app crashed"):
+        src.tui.run(tmp_path)
+    assert killed == ["hooks", "hooks"]
+
+
+async def test_quitting_kills_the_hooks_that_are_running(wired: _Wired, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert wired.on_close is not None
+    killed: list[str] = []
+    monkeypatch.setattr(ProcessRunner, "kill_all", lambda self: killed.append("hooks"))
+
+    await wired.on_close()
+
+    assert killed == ["hooks"]
+
+
+async def test_quitting_the_app_while_a_hook_runs_kills_its_process_group(
+    make_app: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.hooks.config import DEFAULT_TIMEOUT, HookEntry
+    from src.engine.hooks.setup import Hooks
+    from src.engine.provider.base import Done, ToolCall, ToolCallEvent
+
+    from tests.helpers import wait_for_pids
+    from tests.tui.conftest import type_and_send
+
+    monkeypatch.setenv("SHELL", "/bin/sh")
+    workspace = tmp_path.resolve()
+    (workspace / "a.txt").write_text("hello\n")
+    runner = ProcessRunner(workspace, Guardrails.off(workspace))
+    entry = HookEntry("PreToolUse", "sleep 30 & echo $! > pid; wait", None, DEFAULT_TIMEOUT, "global")
+    hooks = Hooks([entry], [], runner, lambda: True, workspace)
+    script = [[ToolCallEvent(ToolCall("c1", "read", {"path": "a.txt"})), Done(1, 1)]]
+    app = make_app(script, hooks=hooks)
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "go")
+        pids = await wait_for_pids(workspace / "pid")
+
+    await assert_all_gone(*pids)
 
 
 async def test_quitting_closes_the_mcp_servers_first(wired: _Wired, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -599,3 +599,86 @@ def test_prepare_exposes_the_parsed_data_of_both_files(tmp_path: Path) -> None:
 
     assert setup.global_data == {"guardrails": {"keepEnv": ["X"]}}
     assert setup.project_data == {"guardrails": {"protected": ["a"]}}
+
+
+HOOKS = {"hooks": {"PreToolUse": [{"command": "echo hi"}]}}
+
+
+def test_a_project_file_with_only_hooks_is_untrusted_until_the_user_trusts_it(launch: Launch) -> None:
+    raw = launch.write(launch.project_path, **HOOKS)
+    rules = launch.prepare().rules
+
+    assert not rules.project_trusted and rules.pending_trust
+    rules.trust_project()
+
+    assert rules.project_trusted and not rules.pending_trust
+    assert launch.store.is_trusted(launch.workspace, raw)
+    assert launch.prepare().rules.project_trusted  # the next launch
+
+
+def test_editing_a_trusted_hooks_file_asks_again(launch: Launch) -> None:
+    launch.write(launch.project_path, **HOOKS)
+    launch.prepare().rules.trust_project()
+
+    launch.write(launch.project_path, hooks={"Stop": [{"command": "other"}]})
+
+    assert launch.prepare().rules.pending_trust
+
+
+@pytest.mark.parametrize("extra", [{}, {"hooks": {}}, {"hooks": None}])
+def test_a_project_file_without_hooks_or_allow_rules_has_nothing_pending(launch: Launch, extra: dict) -> None:
+    launch.write(launch.project_path, deny=["bash(rm*)"], **extra)
+
+    assert not launch.prepare().rules.pending_trust
+
+
+@pytest.mark.parametrize(
+    "hooks",
+    [{"Nope": [{"command": "x"}]}, {"Stop": [{"command": ""}]}, {"Stop": []}, {"Stop": ["x"]}, {"Stop": [{"command": "x", "timeout": -1}]}],
+)
+def test_a_hooks_object_without_one_valid_entry_is_not_pending_trust(launch: Launch, hooks: dict) -> None:
+    launch.write(launch.project_path, hooks=hooks)
+
+    assert not launch.prepare().rules.pending_trust
+
+
+def test_one_valid_entry_among_invalid_ones_is_pending_trust(launch: Launch) -> None:
+    launch.write(launch.project_path, hooks={"Nope": [{"command": "x"}], "Stop": [{"command": "bye"}]})
+
+    assert launch.prepare().rules.pending_trust
+
+
+def test_a_project_file_with_allow_rules_is_pending_as_before(launch: Launch) -> None:
+    launch.project(allow=["bash(ls)"])
+
+    assert launch.prepare().rules.pending_trust
+
+
+def test_always_here_on_a_file_with_untrusted_hooks_does_not_trust_the_new_bytes(launch: Launch) -> None:
+    launch.write(launch.project_path, **HOOKS)
+    rules = launch.prepare().rules  # untrusted, the user declined
+
+    rules.save_project("bash(ls)")
+
+    assert _allow(rules, "bash", command="ls") == "bash(ls)"
+    assert not rules.project_trusted
+    again = launch.prepare().rules
+    assert again.pending_trust and not again.project_trusted
+
+
+def test_always_here_on_a_trusted_hooks_file_keeps_it_trusted(launch: Launch) -> None:
+    launch.write(launch.project_path, **HOOKS)
+    rules = launch.prepare().rules
+    rules.trust_project()
+
+    rules.save_project("bash(ls)")
+
+    again = launch.prepare().rules
+    assert again.project_trusted and not again.pending_trust
+    assert json.loads(launch.project_path.read_text())["hooks"] == HOOKS["hooks"]
+
+
+def test_a_rules_object_built_without_hooks_behaves_as_before() -> None:
+    rules = Rules.empty()
+
+    assert rules.project_trusted and not rules.pending_trust
