@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import platform
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -21,10 +22,13 @@ class StartChoice:
 NEW = StartChoice("new")
 
 
-def run(workspace: Path, start: StartChoice = NEW) -> int:
-    """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code."""
+def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> int:
+    """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code.
+
+    `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key."""
     from src.client import OllamaClient, SearxClient, WebClient
     from src.client.mcp import SdkConnector
+    from src.client.ollama import OllamaCatalog
     from src.config.settings import get_settings
     from src.engine import Agent
     from src.engine.approval import Approver
@@ -38,6 +42,7 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     from src.engine.mcp.trust import TrustStore, trust_store_path
     from src.engine.permissions import setup as permission_setup
     from src.engine.permissions.config import global_settings_path, project_settings_path
+    from src.engine.provider.models import SLOW_AFTER, launch_model, shown_name
     from src.engine.provider.ollama import OllamaProvider
     from src.engine.session import FileRecorder, Recorder, SessionStore, sessions_root, workspace_dir
     from src.engine.skills.loader import load_skills
@@ -49,7 +54,6 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
     settings = get_settings()
     root = workspace.resolve()
     client = OllamaClient(settings.ollama_url)
-    provider = OllamaProvider(client, settings.model, settings.num_ctx)
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
     web = WebClient(settings.fetch_timeout, settings.fetch_max_bytes)
@@ -67,6 +71,30 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             # to warn about rules that never apply; the manager is only asked for its tools' names, it starts nothing
             permission_setup.tool_keys(default_tools(TerminalManager(root), fetcher=web, searcher=search, skills=skills)),
         )
+        # The model: --model, then AGENT_MODEL, then the project's `model` key (read without trust: it only picks an
+        # installed model), then the default. A throwaway client, because this loop is closed before the app's starts.
+        model_notices: list[str] = []
+
+        def say_slow(name: str) -> None:  # before the TUI draws anything: the user is waiting on Ollama
+            print(f"Asking Ollama about {shown_name(name)}…", file=sys.stderr, flush=True)
+
+        async def pick_model() -> tuple[str, int, list[str]]:
+            probe = OllamaClient(settings.ollama_url)
+            try:
+                return await launch_model(
+                    settings,
+                    model,
+                    permissions.project_data,
+                    OllamaCatalog(probe),
+                    notices=model_notices,
+                    on_slow=say_slow,
+                    slow_after=SLOW_AFTER,
+                )
+            finally:
+                await probe.aclose()
+
+        chosen, window, model_warnings = asyncio.run(pick_model())
+        provider = OllamaProvider(client, chosen, window)
         # Guardrails come from the same two settings files, already parsed: protected paths, the child environment, the sandbox.
         guard = prepare_guardrails(
             root,
@@ -145,7 +173,10 @@ def run(workspace: Path, start: StartChoice = NEW) -> int:
             mcp=mcp,
             mcp_trust=setup.remember,
             permissions=permissions.rules,
-            permission_warnings=(*permissions.warnings, *guard.warnings, *hooks.warnings),
+            permission_warnings=(*permissions.warnings, *model_warnings, *guard.warnings, *hooks.warnings),
+            catalog=OllamaCatalog(client),
+            window_cap=settings.num_ctx,
+            launch_notices=model_notices,
             commands=commands,
             skills=skills,
             guard=guard,

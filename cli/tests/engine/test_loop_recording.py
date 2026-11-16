@@ -853,6 +853,7 @@ async def test_reset_tolerates_a_recorder_without_close_or_whose_close_fails(ctx
             after: int,
         ) -> None: ...
         def undo(self, keep: int) -> None: ...
+        def model(self, model: str, window: int) -> None: ...
 
     class BadClose(NoClose):
         def close(self) -> None:
@@ -995,3 +996,21 @@ async def test_both_copies_are_cut_at_the_same_visible_length(ctx: ToolContext) 
     assert finished.result.display == "\x1b[32m" + "x" * 30_000 + "\x1b[0m\n[10000 characters truncated]"
     (tool_message,) = [m for m in recorded(recorder) if m.role == "tool"]
     assert tool_message.content == finished.result.output
+
+
+async def test_model_switched_is_recorded_without_touching_the_history(ctx: ToolContext) -> None:
+    agent, _, recorder = make_agent(ctx, [])
+
+    agent.model_switched("b", 4096)
+
+    assert recorder.models == [("b", 4096)]
+    assert agent.history == []
+
+
+async def test_a_model_record_that_fails_to_save_is_reported_not_raised(ctx: ToolContext) -> None:
+    agent, _, _ = make_agent(ctx, [], recorder=MemoryRecorder(fail=1))
+    events: list[object] = []
+
+    agent.model_switched("b", 4096, events.append)
+
+    assert [e.level for e in events if isinstance(e, Notice)] == ["error"]

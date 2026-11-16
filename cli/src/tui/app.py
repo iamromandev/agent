@@ -53,9 +53,17 @@ from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
 from src.engine.mcp.names import tool_name
 from src.engine.mode import Mode
-from src.engine.permissions.setup import Rules
+from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_init_prompt
-from src.engine.provider.base import Provider
+from src.engine.provider.base import SwitchableProvider
+from src.engine.provider.models import (
+    SHOW_TIMEOUT,
+    CatalogError,
+    ModelCatalog,
+    installed_name,
+    resolve_window,
+    shown_name,
+)
 from src.engine.session import (
     FileRecorder,
     NullRecorder,
@@ -65,6 +73,7 @@ from src.engine.session import (
     SessionStore,
     SessionWriteError,
 )
+from src.engine.session.records import model_notice
 from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalError, TerminalManager
 from src.engine.text import escape, escape_display
@@ -107,7 +116,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
 )
 
 # Built-in commands and what `/` suggests for them. Must equal the cases of `AgentApp._command` (a test checks).
@@ -122,6 +131,7 @@ BUILTINS: dict[str, str] = {
     "hooks": "configured hooks",
     "skills": "loaded skills",
     "compact": "shrink the context",
+    "model": "switch model (/model <name>)",
     "init": "write AGENTS.md",
     "undo": "undo the last turn",
     "quit": "exit",
@@ -152,7 +162,7 @@ class AgentApp(App[None]):
     def __init__(
         self,
         agent_factory: Callable[[Approver], Agent],
-        provider: Provider,
+        provider: SwitchableProvider,
         workspace: Path,
         *,
         store: SessionStore | None = None,
@@ -168,6 +178,9 @@ class AgentApp(App[None]):
         skills: Skills | None = None,
         guard: Guardrails | None = None,
         hooks: Hooks | None = None,
+        catalog: ModelCatalog | None = None,
+        window_cap: int,
+        launch_notices: Sequence[str] = (),
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -184,6 +197,9 @@ class AgentApp(App[None]):
         self.start = start
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
         self.provider = provider
+        self.catalog = catalog
+        self.window_cap = window_cap  # AGENT_NUM_CTX: caps every window
+        self._launch_notices = tuple(launch_notices)  # info lines for the transcript, already escaped
         self.workspace = workspace
         self.agent = agent_factory(TuiApprover(self))
         self._shutting_down = False
@@ -215,7 +231,7 @@ class AgentApp(App[None]):
 
     def on_mount(self) -> None:
         status = self.query_one(StatusBar)
-        status.model = self.provider.model
+        status.model = escape_display(self.provider.model)
         status.window = self.provider.context_window
         status.workspace = display_path(self.workspace)
         status.mode = self.agent.mode
@@ -265,6 +281,7 @@ class AgentApp(App[None]):
         the permission prompt. One after the other, so two prompts never overlap."""
         if (
             self._permission_warnings
+            or self._launch_notices
             or self.guard.info
             or self.commands.warnings
             or self.skills.warnings
@@ -278,6 +295,8 @@ class AgentApp(App[None]):
         transcript = self.query_one(Transcript)
         for warning in (*self._permission_warnings, *self.commands.warnings, *self.skills.warnings):
             await transcript.add_notice("warn", warning)
+        for line in self._launch_notices:
+            await transcript.add_notice("info", line)
         for line in self.guard.info:
             await transcript.add_notice("info", escape(line))
         if self.mcp is not None and self.mcp.untrusted():
@@ -514,6 +533,66 @@ class AgentApp(App[None]):
         if chosen is None:
             return False
         return await self._show_session(next(info for info in infos if info.id == chosen))
+
+    async def _model_command(self, name: str) -> None:
+        """The `/model <name>` worker: switch, then release the claim `_begin_switch` took."""
+        try:
+            await self._switch_model(name)
+        except Exception as error:  # a bug must not leave the app claimed or kill it
+            await self.query_one(Transcript).add_notice("error", f"Model switch failed: {escape(str(error))}")
+        finally:
+            self._switching = False
+
+    async def _switch_model(self, name: str) -> None:
+        """Make `name` (an installed model) the one every later request uses, with a window that fits it, and
+        remember it for the project. Ollama failing leaves the old model and window in place."""
+        transcript, status = self.query_one(Transcript), self.query_one(StatusBar)
+        if self.catalog is None:
+            await transcript.add_notice("error", "No model catalog is available")
+            return
+        try:
+            installed = [info.name for info in await self.catalog.list()]
+        except CatalogError as error:
+            await transcript.add_notice("error", f"Could not list the installed models: {error}")
+            return
+        target = installed_name(name, installed)
+        if target is None:
+            listed = ", ".join(escape_display(n) for n in installed) or "none"
+            await transcript.add_notice("error", f"Model {shown_name(name)} is not installed. Installed: {listed}")
+            return
+        if installed_name(self.provider.model, installed) == target:
+            await transcript.add_notice("info", f"Already using {escape_display(target)}.")
+            return
+        length: int | None = None
+        failed: str | None = None
+        try:
+            async with asyncio.timeout(SHOW_TIMEOUT):
+                length = await self.catalog.context_length(target)
+        except CatalogError as error:
+            failed = str(error)
+        except TimeoutError:
+            failed = f"Ollama did not answer within {SHOW_TIMEOUT:g} s"
+        window = resolve_window(length, self.window_cap)
+        self.provider.switch(target, window)
+        status.model = escape_display(target)
+        status.window = window
+        await transcript.add_notice("info", model_notice(target, window))
+        if failed is not None:
+            await transcript.add_notice(
+                "warn",
+                f"Could not read the context length of {escape_display(target)}; using AGENT_NUM_CTX ({self.window_cap}): {failed}",
+            )
+        recorded: list[Any] = []
+        self.agent.model_switched(target, window, recorded.append)
+        for event in recorded:
+            if isinstance(event, Notice):
+                await transcript.add_notice(event.level, event.text)
+        try:
+            self.permissions.save_project_key("model", target)
+        except RuleSavedNotTrusted as error:
+            await transcript.add_notice("warn", escape(str(error)))
+        except (OSError, ValueError) as error:
+            await transcript.add_notice("warn", f"Model saved for the run only: {escape(str(error))}")
 
     async def _sessions_command(self) -> None:
         """The `/sessions` worker: pick and switch, then release the claim `_begin_switch` took."""
@@ -881,6 +960,14 @@ class AgentApp(App[None]):
                 self.run_worker(self._compact, group="turn")
             case "/undo":
                 await self._undo_command()
+            case "/model":
+                if not rest.strip():
+                    await transcript.add_notice("info", "Usage: /model <name> (the installed models: ollama list)")
+                    return
+                if not self._begin_switch():
+                    await transcript.add_notice("warn", self._busy_text("/model"))
+                    return
+                self.run_worker(functools.partial(self._model_command, rest.strip()), group="model", exit_on_error=False)
             case _:
                 custom = self.commands.get(name[1:])
                 if custom is None:

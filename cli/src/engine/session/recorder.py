@@ -50,6 +50,8 @@ class Recorder(Protocol):
 
     def undo(self, keep: int) -> None: ...
 
+    def model(self, model: str, window: int) -> None: ...
+
     # All raise SessionWriteError on I/O failure.
 
 
@@ -71,6 +73,9 @@ class NullRecorder:
         return None
 
     def undo(self, keep: int) -> None:
+        return None
+
+    def model(self, model: str, window: int) -> None:
         return None
 
     def close(self) -> None:
@@ -135,6 +140,7 @@ class FileRecorder:
         self._creating = False  # a new session whose file does not exist yet
         self._fd: int | None = None
         self._pending: list[bytes] = []
+        self._held: list[bytes] = []  # model switches made before the file started
 
     @classmethod
     def resume(cls, path: Path, workspace: Path) -> FileRecorder:
@@ -192,6 +198,20 @@ class FileRecorder:
         self._pending.append(line)
         self._flush()
 
+    def model(self, model: str, window: int) -> None:
+        """Record a model switch: the model now in use and its context window.
+
+        A switch before the session has a file is held and written right after the header (and title) when the first
+        record comes, so `/model` alone never leaves a header-only file for `--continue` or the picker to find.
+        """
+        stamp = _stamp(self._now())
+        line = _encode({"type": "model", "at": stamp, "model": model, "window": window})
+        if not self._started:
+            self._held.append(line)
+            return
+        self._pending.append(line)
+        self._flush()
+
     def close(self) -> None:
         """Make one last attempt to write queued records, then release the file. Never raises."""
         try:
@@ -219,6 +239,8 @@ class FileRecorder:
         self._started = True
         self._creating = True
         self._pending.extend(lines)
+        self._pending.extend(self._held)
+        self._held.clear()
 
     def _open(self) -> int:
         if self._fd is not None:

@@ -101,16 +101,10 @@ def read_rules(path: Path, *, follow_symlink: bool = False) -> RuleFile:
     return RuleFile(parsed["allow"], parsed["deny"], tuple(invalid), raw, None, tuple(list_errors), data)
 
 
-def add_allow(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:
-    """Add `rule_text` to the allow list of the settings file at `path`; returns `(bytes read, new bytes)`: what
-    the file held when this call read it (None: it did not exist) and what it holds now. Both come from this one
-    read, so a caller can tell whether the content it just wrote is built on what it had seen before.
-
-    Everything else in the file is kept, a rule already there is not added twice, and the write is atomic (a
-    temp file in the same folder, then `os.replace`), so a crash leaves the old file or the new one. Raises
-    `OSError` for a symlink (the file or its folder) or a failed write, and `ValueError` when an existing file
-    is not a JSON object of the expected shape: the user's file is never overwritten.
-    """
+def _load_for_write(path: Path) -> tuple[dict[str, object], bytes | None, int]:
+    """The settings file at `path` as `(top-level object, bytes read (None: missing), mode)` for a writer, with the
+    guards every writer shares. Raises `OSError` for a symlink (the file or its folder), a non-regular, oversized or
+    read-only file, and `ValueError` when it is not a JSON object: the user's file is never overwritten."""
     folder = path.parent
     if path.is_symlink() or folder.is_symlink():
         raise OSError(f"{path} is a symlink; not writing through it")
@@ -132,15 +126,12 @@ def add_allow(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:
         if not isinstance(loaded, dict):
             raise ValueError(f"{path} is not a JSON object; not changing it")
         data = loaded
-    permissions = data.setdefault("permissions", {})
-    if not isinstance(permissions, dict):
-        raise ValueError(f'"permissions" in {path} is not an object; not changing it')
-    allow = permissions.setdefault("allow", [])
-    if not isinstance(allow, list):
-        raise ValueError(f'"permissions.allow" in {path} is not a list; not changing it')
-    if rule_text in allow and raw is not None:
-        return raw, raw  # nothing to add: the file stays byte for byte as it is
-    allow.append(rule_text)
+    return data, raw, mode
+
+
+def _write_atomic(path: Path, data: dict[str, object], mode: int) -> bytes:
+    """Write `data` as the settings file (a temp file in the same folder, then `os.replace`); returns the bytes."""
+    folder = path.parent
     content = (json.dumps(data, indent=2, ensure_ascii=False) + "\n").encode("utf-8")
     folder.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=folder, prefix=".settings-", suffix=".tmp")  # mode 0600
@@ -155,4 +146,38 @@ def add_allow(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
-    return raw, content
+    return content
+
+
+def add_allow(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:
+    """Add `rule_text` to the allow list of the settings file at `path`; returns `(bytes read, new bytes)`: what
+    the file held when this call read it (None: it did not exist) and what it holds now. Both come from this one
+    read, so a caller can tell whether the content it just wrote is built on what it had seen before.
+
+    Everything else in the file is kept, a rule already there is not added twice, and the write is atomic (a
+    temp file in the same folder, then `os.replace`), so a crash leaves the old file or the new one. Raises
+    `OSError` for a symlink (the file or its folder) or a failed write, and `ValueError` when an existing file
+    is not a JSON object of the expected shape: the user's file is never overwritten.
+    """
+    data, raw, mode = _load_for_write(path)
+    permissions = data.setdefault("permissions", {})
+    if not isinstance(permissions, dict):
+        raise ValueError(f'"permissions" in {path} is not an object; not changing it')
+    allow = permissions.setdefault("allow", [])
+    if not isinstance(allow, list):
+        raise ValueError(f'"permissions.allow" in {path} is not a list; not changing it')
+    if rule_text in allow and raw is not None:
+        return raw, raw  # nothing to add: the file stays byte for byte as it is
+    allow.append(rule_text)
+    return raw, _write_atomic(path, data, mode)
+
+
+def set_top_key(path: Path, key: str, value: str) -> tuple[bytes | None, bytes]:
+    """Set the top-level string `key` of the settings file at `path`; returns `(bytes read, new bytes)` like
+    `add_allow`, with the same guards and the same atomic write. Every other key is kept; when the key already
+    has that value the file stays byte for byte as it is."""
+    data, raw, mode = _load_for_write(path)
+    if raw is not None and data.get(key) == value:
+        return raw, raw
+    data[key] = value
+    return raw, _write_atomic(path, data, mode)

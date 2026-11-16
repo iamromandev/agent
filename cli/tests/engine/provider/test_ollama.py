@@ -365,3 +365,20 @@ async def test_cancelling_mid_stream_closes_the_response() -> None:
     with pytest.raises(asyncio.CancelledError):
         await task
     assert stream.closed
+
+
+async def test_switch_changes_the_model_and_the_window_of_the_next_request() -> None:
+    seen: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(json.loads(request.content))
+        return httpx.Response(200, content=_ndjson({"done": True}))
+
+    provider = _provider(handler, "a", 8192)
+    messages = [Message("user", "hi")]
+    _ = [e async for e in provider.stream(messages, [])]
+    provider.switch("b", 4096)
+    _ = [e async for e in provider.stream(messages, [])]
+    assert [(r["model"], r["options"]["num_ctx"]) for r in seen] == [("a", 8192), ("b", 4096)]
+    assert (provider.model, provider.context_window) == ("b", 4096)
+    assert seen[0]["messages"] == seen[1]["messages"]

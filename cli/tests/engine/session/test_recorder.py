@@ -417,6 +417,47 @@ def test_a_failed_undo_write_stays_queued_before_later_messages(
     assert [r["type"] for r in lines(recorder.path)] == ["session", "title", "message", "undo", "message"]
 
 
+def test_a_model_switch_is_recorded_with_its_window(recorder: FileRecorder) -> None:
+    recorder.message(Message("user", "q"), None)
+    recorder.model("qwen3:14b", 8192)
+
+    assert recorder.path is not None
+    record = lines(recorder.path)[-1]
+    assert list(record) == ["type", "at", "model", "window"]
+    assert (record["type"], record["model"], record["window"]) == ("model", "qwen3:14b", 8192)
+
+
+def test_a_model_switch_before_any_message_writes_no_file(recorder: FileRecorder, directory: Path) -> None:
+    recorder.model("a", 1)
+
+    assert recorder.path is None
+    assert not directory.exists() or list(directory.iterdir()) == []
+
+
+def test_a_model_switch_before_the_first_message_is_written_just_before_it(recorder: FileRecorder) -> None:
+    recorder.model("a", 1)
+    recorder.model("b", 2)
+    recorder.message(Message("user", "hello"), None)
+
+    assert recorder.path is not None
+    records = lines(recorder.path)
+    assert [r["type"] for r in records] == ["session", "title", "model", "model", "message"]
+    assert [r["model"] for r in records if r["type"] == "model"] == ["a", "b"]
+
+
+def test_a_failed_write_keeps_a_held_model_switch_queued(
+    monkeypatch: pytest.MonkeyPatch, recorder: FileRecorder
+) -> None:
+    recorder.model("a", 1)
+    failing_write(monkeypatch, {1})
+    with pytest.raises(SessionWriteError):
+        recorder.message(Message("user", "first"), None)
+    recorder.message(Message("user", "later"), None)
+
+    assert recorder.path is not None
+    assert [r["type"] for r in lines(recorder.path)] == ["session", "title", "model", "message", "message"]
+
+
 def test_close_is_idempotent_and_safe_before_any_write(recorder: FileRecorder) -> None:
     recorder.close()
     recorder.close()
@@ -482,6 +523,7 @@ def test_null_recorder_does_no_io(
     null.message(Message("user", "a"), None)
     null.compaction([], {}, 0, 0, 0, 0)
     null.undo(0)
+    null.model("a", 1)
     null.close()
     assert list(tmp_path.iterdir()) == []
 

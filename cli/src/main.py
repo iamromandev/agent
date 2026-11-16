@@ -16,16 +16,22 @@ class _OptionalResumeValue(TyperGroup):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         fixed: list[str] = []
-        for i, arg in enumerate(args):
+        i = 0
+        while i < len(args):
+            arg = args[i]
             if arg == "--" or not arg.startswith("-"):  # the root options end at `--` or the subcommand name
                 fixed.extend(args[i:])
                 break
             nxt = args[i + 1] if i + 1 < len(args) else None
-            fixed.append(f"--resume={PICK}" if arg == "--resume" and (nxt is None or nxt.startswith("-")) else arg)
-            if arg == "--resume" and nxt is not None and not nxt.startswith("-"):
-                fixed.append(nxt)  # its value, not a subcommand name
-                fixed.extend(args[i + 2 :])
-                break
+            if arg == "--model" and nxt is not None:  # its value is not a subcommand name either
+                fixed.extend((arg, nxt))
+                i += 2
+            elif arg == "--resume" and nxt is not None and not nxt.startswith("-"):
+                fixed.extend((arg, nxt))  # its value, not a subcommand name
+                i += 2
+            else:
+                fixed.append(f"--resume={PICK}" if arg == "--resume" else arg)
+                i += 1
         return super().parse_args(ctx, fixed)
 
 
@@ -45,11 +51,14 @@ def root(
     version: bool = typer.Option(False, "--version", callback=_version, is_eager=True, help="Print the version"),
     continue_: bool = typer.Option(False, "--continue", help="Resume the latest session for this folder"),
     resume: str | None = typer.Option(None, "--resume", help="Resume a session by id (no value: pick from a list)"),
+    model: str | None = typer.Option(None, "--model", help="Ollama model for this launch (not saved)"),
 ) -> None:
     """Agent command-line client. Run without a command to open the coding agent."""
     if ctx.invoked_subcommand is None:
         from src.tui import StartChoice, run  # lazy: Textual is not needed for `health` or `--help`
 
+        if model is not None and not model.strip():
+            raise typer.BadParameter("give a model name", param_hint="--model")
         if continue_ and resume is not None:
             raise typer.BadParameter("use either --continue or --resume")
         if continue_:
@@ -60,7 +69,7 @@ def root(
             start = StartChoice("pick")
         else:
             start = StartChoice("resume", resume)
-        if code := run(Path.cwd(), start):
+        if code := run(Path.cwd(), start, model=model.strip() if model else None):
             raise typer.Exit(code)  # e.g. 128 + the signal that ended it
 
 

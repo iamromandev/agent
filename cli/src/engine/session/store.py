@@ -26,6 +26,7 @@ from src.engine.session.records import (
     ToolMeta,
     compaction_notice,
     message_from_obj,
+    model_notice,
 )
 from src.engine.todo import TodoItem, current_todos
 
@@ -196,6 +197,12 @@ class SessionStore:
                     history, notice = _compaction(obj, tool_meta)
                     items.append(notice)
                     marks = {len(history): len(items)}
+                elif kind == "model":
+                    name, window = obj.get("model"), _size(obj.get("window"))
+                    if not isinstance(name, str) or window is None:
+                        raise RecordError("bad model record")
+                    items.append(TranscriptItem("notice", model_notice(name, window)))
+                    marks[len(history)] = len(items)  # an undo back to here keeps the notice
                 elif kind == "undo":
                     keep = _size(obj.get("keep"))
                     if keep is None or keep not in marks:

@@ -343,6 +343,13 @@ class Agent:
         """Save the history as compaction left it (the file keeps every earlier record). Never raises."""
         self._save(lambda: self._recorder.compaction(self.history, self.tool_meta, pruned, summarized, before, after))
 
+    def model_switched(self, name: str, window: int, emit: EventSink | None = None) -> None:
+        """Record that the provider now uses `name` with `window` (the provider itself was switched by the caller).
+        The history is untouched. Never raises; a failed save is shown through `emit` when there is one."""
+        self._save(lambda: self._recorder.model(name, window))
+        if emit is not None:
+            self._flush_save_error(emit)
+
     def _save(self, write: Callable[[], None]) -> None:
         try:
             write()
