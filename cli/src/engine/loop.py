@@ -12,6 +12,7 @@ from pathlib import Path, PurePath
 from typing import Literal
 
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
+from src.engine.checkpoints.store import CheckpointStore
 from src.engine.compaction import (
     MIN_SUMMARY_GAIN,
     STOP_NOTE_PREFIX,
@@ -162,8 +163,11 @@ class Agent:
         role: Literal["main", "task"] = "main",
         rules: Rules | None = None,
         hooks: Hooks | None = None,
+        checkpoints: CheckpointStore | None = None,
     ) -> None:
         self.provider = provider
+        self._checkpoints = checkpoints  # the `task` child never gets one
+        self._checkpoint_warning: str | None = None  # taken from the store, not yet shown
         self.hooks = hooks if hooks is not None else Hooks.empty()  # the `task` child never gets any
         self.rules = rules if rules is not None else Rules.empty()  # not part of `Grants`: `reset()` leaves it alone
         self.role = role
@@ -519,6 +523,7 @@ class Agent:
         try:
             self._record(Message("user", text))
             try:
+                await self._checkpoint(emit, end=False)
                 for notice in self._add_hook_context("UserPromptSubmit", context):
                     emit(notice)
                 self._flush_save_error(emit)
@@ -547,9 +552,36 @@ class Agent:
                 with contextlib.suppress(Exception):
                     emit(TurnEnded("error"))
         finally:
-            self._undo.finish()
-            self._busy = False
-            self._inflight = None
+            try:
+                await self._checkpoint(emit, end=True)
+            finally:
+                self._undo.finish()
+                self._busy = False
+                self._inflight = None
+
+    async def _checkpoint(self, emit: EventSink, *, end: bool) -> None:
+        """Snapshot the workspace into the turn's undo record (`end`: when the turn is over, never raising: a cancel or
+        an error there must not mask the turn's outcome, and the file-level undo is the fallback)."""
+        store = self._checkpoints
+        if store is None or (end and self._undo.current_before is None):
+            return
+        try:
+            snap = await store.snapshot()
+            if snap is not None:
+                if end:
+                    self._undo.mark(after=snap.commit, skipped_large=snap.skipped_large)
+                else:
+                    self._undo.mark(before=snap.commit)
+            if self._checkpoint_warning is None:
+                self._checkpoint_warning = store.take_warning()
+            if self._checkpoint_warning is not None:
+                emit(Notice("warn", self._checkpoint_warning))
+                self._checkpoint_warning = None  # only once it was shown: a failing `emit` keeps it for the next call
+        except asyncio.CancelledError:
+            if not end:
+                raise
+        except Exception:
+            pass  # a bug in the snapshot must not break the turn; the file-level undo still works
 
     async def undo(self, emit: EventSink) -> str | None:
         """Undo the last turn: restore its files, drop it from the history and the session. Returns its prompt.

@@ -15,7 +15,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
     `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key."""
     from src.tui.app import BUILTINS, AgentApp
 
-    rt = build_runtime(workspace, BUILTINS, model=model)
+    rt = build_runtime(workspace, BUILTINS, model=model, checkpoints=True)
     try:
         # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
         app = AgentApp(

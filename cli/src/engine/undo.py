@@ -45,6 +45,9 @@ class UndoTurn:
     changes: dict[Path, FileChange] = field(default_factory=dict)  # insertion order = first touch
     bash: int = 0
     size: int = 0  # bytes held in `before` snapshots
+    before: str | None = None  # checkpoint commit taken when the turn began
+    after: str | None = None  # checkpoint commit taken when it ended; both set: the turn can be restored from them
+    skipped_large: tuple[str, ...] = ()  # files over the checkpoint size cap, as the `after` snapshot saw them
 
 
 def _digest(data: bytes) -> bytes:
@@ -131,6 +134,23 @@ class UndoLog:
 
     def pop(self) -> UndoTurn | None:
         return self._stack.pop() if self._stack else None
+
+    def mark(self, before: str | None = None, after: str | None = None, skipped_large: tuple[str, ...] | None = None) -> None:
+        """Record checkpoint commit ids on the turn in progress (a value left as None is not changed)."""
+        turn = self._current
+        if turn is None:
+            return
+        if before is not None:
+            turn.before = before
+        if after is not None:
+            turn.after = after
+        if skipped_large is not None:
+            turn.skipped_large = skipped_large
+
+    @property
+    def current_before(self) -> str | None:
+        """The checkpoint commit the turn in progress began with, if one was taken."""
+        return self._current.before if self._current is not None else None
 
     def note_bash(self) -> None:
         if self._current is not None:
