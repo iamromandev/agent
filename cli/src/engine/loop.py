@@ -6,13 +6,15 @@ import asyncio
 import contextlib
 import dataclasses
 import platform
+import time
 from collections.abc import Callable, Mapping, Sequence
 from datetime import date
 from pathlib import Path, PurePath
 from typing import Literal
 
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
-from src.engine.checkpoints.store import CheckpointStore
+from src.engine.checkpoints.restore import restore_checkpoint, restore_unsnapshotted
+from src.engine.checkpoints.store import CheckpointStore, DiffEntry, Snapshot, exclude_signature, file_signature
 from src.engine.compaction import (
     MIN_SUMMARY_GAIN,
     STOP_NOTE_PREFIX,
@@ -41,7 +43,7 @@ from src.engine.events import (
 )
 from src.engine.guardrails.redact import drop_partial_tail
 from src.engine.guardrails.setup import REDACTION_FAILED, guard_of
-from src.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed
+from src.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed, notice_text
 from src.engine.instructions import Instructions, load_instructions
 from src.engine.mode import Mode
 from src.engine.permissions.config import agent_config_files
@@ -72,6 +74,9 @@ from src.engine.undo import (
     SNAPSHOT_TOTAL_LIMIT,
     UNDO_UNTRACKED,
     UndoLog,
+    UndoResult,
+    UndoTurn,
+    checkpoint_notices,
     restore_turn,
     undo_notices,
 )
@@ -168,6 +173,9 @@ class Agent:
         self.provider = provider
         self._checkpoints = checkpoints  # the `task` child never gets one
         self._checkpoint_warning: str | None = None  # taken from the store, not yet shown
+        self._large_before: dict[str, tuple[int, int] | None] = {}  # files over the size cap when the turn began
+        self._exclude_before: tuple[int, int, int] | None = None  # `.git/info/exclude` when the turn began
+        self._checkpoint_read: asyncio.Task[tuple[list[DiffEntry], dict[str, bytes]]] | None = None  # the `/undo` diff + blob read, while it runs
         self.hooks = hooks if hooks is not None else Hooks.empty()  # the `task` child never gets any
         self.rules = rules if rules is not None else Rules.empty()  # not part of `Grants`: `reset()` leaves it alone
         self.role = role
@@ -569,9 +577,17 @@ class Agent:
             snap = await store.snapshot()
             if snap is not None:
                 if end:
-                    self._undo.mark(after=snap.commit, skipped_large=snap.skipped_large)
+                    self._undo.mark(
+                        after=snap.commit,
+                        skipped_large=self._large_made(snap),
+                        exclude_changed=exclude_signature(self.ctx.workspace) != self._exclude_before,
+                    )
                 else:
-                    self._undo.mark(before=snap.commit)
+                    workspace = self.ctx.workspace
+                    self._large_before = {name: file_signature(workspace, name) for name in snap.skipped_large}
+                    self._exclude_before = exclude_signature(workspace)
+                    # the time is taken after the snapshot: what the turn creates is born later
+                    self._undo.mark(before=snap.commit, before_time=time.time(), large_before=snap.skipped_large)
             if self._checkpoint_warning is None:
                 self._checkpoint_warning = store.take_warning()
             if self._checkpoint_warning is not None:
@@ -582,6 +598,14 @@ class Agent:
                 raise
         except Exception:
             pass  # a bug in the snapshot must not break the turn; the file-level undo still works
+
+    def _large_made(self, snap: Snapshot) -> tuple[str, ...]:
+        """Files over the size cap that the turn made, or that were over it before and it changed or deleted: the
+        checkpoints hold none of them, so undo cannot put them back."""
+        workspace = self.ctx.workspace
+        made = [name for name in snap.skipped_large if name not in self._large_before]
+        changed = [name for name, seen in self._large_before.items() if file_signature(workspace, name) != seen]
+        return tuple(dict.fromkeys([*made, *changed]))
 
     async def undo(self, emit: EventSink) -> str | None:
         """Undo the last turn: restore its files, drop it from the history and the session. Returns its prompt.
@@ -599,17 +623,19 @@ class Agent:
             # The restore runs in a thread a cancel cannot stop: let it finish and cut the history
             # to match what it did, then hand the cancel on.
             cut_ids = {m.tool_call_id for m in self.history[turn.start :] if m.tool_call_id}
-            task = asyncio.ensure_future(asyncio.to_thread(restore_turn, turn, self.ctx.workspace))
+            task = asyncio.ensure_future(self._restore(turn, emit))
             cancel: asyncio.CancelledError | None = None
             while not task.done():
                 try:
                     await asyncio.shield(task)
                 except asyncio.CancelledError as exc:
                     cancel = cancel or exc
+                    if self._checkpoint_read is not None:
+                        self._checkpoint_read.cancel()  # kills the git process group; the file log restores instead
                 except Exception:
                     break
             error = task.exception()
-            result = None if error is not None else task.result()
+            result, from_checkpoints = (None, False) if error is not None else task.result()
             del self.history[turn.start :]
             kept = {m.tool_call_id for m in self.history if m.tool_call_id}
             for call_id in cut_ids - kept:
@@ -625,11 +651,70 @@ class Agent:
             if result is None:
                 emit(Notice("error", f"Undo could not restore the files: {error}"))
                 return turn.prompt
-            for notice in undo_notices(result, turn.bash):
+            notices = (
+                checkpoint_notices(result, turn.skipped_large)
+                if from_checkpoints
+                else undo_notices(result, turn.bash)
+            )
+            for notice in notices:
                 emit(notice)
         finally:
             self._busy = False
         return turn.prompt
+
+    async def _restore(self, turn: UndoTurn, emit: EventSink) -> tuple[UndoResult, bool]:
+        """Restore the turn from its two checkpoints: `(result, True)`. Without a complete pair, when git fails before
+        anything was written, or when Esc stops git, from the file-level log: `(result, False)` (which is quick)."""
+        store = self._checkpoints
+        if turn.before and turn.after and store is not None:
+            read = asyncio.create_task(self._read_checkpoint(store, turn.before, turn.after))
+            self._checkpoint_read = read
+            loaded: tuple[list[DiffEntry], dict[str, bytes]] | None = None
+            try:
+                loaded = await read
+            except asyncio.CancelledError:
+                if not read.cancelled():
+                    raise
+            except Exception as exc:  # git failed or the folder is gone: nothing was touched yet
+                why = notice_text(f"{type(exc).__name__}: {exc}")
+                with contextlib.suppress(Exception):  # a sink that raises must not stop the undo
+                    emit(Notice("warn", f"Checkpoint restore failed ({why}); using the file-level undo"))
+            finally:
+                self._checkpoint_read = None
+            if loaded is not None:
+                entries, blobs = loaded
+                return await asyncio.to_thread(self._restore_checkpoint, turn, entries, blobs), True
+        return await asyncio.to_thread(restore_turn, turn, self.ctx.workspace), False
+
+    @staticmethod
+    async def _read_checkpoint(
+        store: CheckpointStore, before: str, after: str
+    ) -> tuple[list[DiffEntry], dict[str, bytes]]:
+        entries = await store.diff(before, after)
+        return entries, await store.read_blobs([e.old_sha for e in entries if e.old_sha])
+
+    def _restore_checkpoint(self, turn: UndoTurn, entries: list[DiffEntry], blobs: dict[str, bytes]) -> UndoResult:
+        """The restore from the snapshots, then the write/edit changes to files the snapshots leave out (ignored files,
+        `.agent/` files) from the file log. Blocking."""
+        workspace = self.ctx.workspace
+        result = restore_checkpoint(
+            entries,
+            blobs,
+            workspace,
+            before_time=turn.before_time,
+            large_before=frozenset(turn.large_before),
+            exclude_changed=turn.exclude_changed,
+        )
+        paths = guard_of(self.ctx).paths
+
+        def protected(path: Path) -> bool:
+            try:
+                return paths.is_protected(path)
+            except Exception:
+                return True  # when unsure, leave it alone
+
+        extra = restore_unsnapshotted(turn, entries, workspace, protected)
+        return UndoResult([*result.entries, *extra.entries])
 
     def _answer_unanswered_calls(
         self, in_flight_text: str, skipped_text: str, in_flight_summary: str, skipped_summary: str

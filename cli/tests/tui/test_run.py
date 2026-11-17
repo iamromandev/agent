@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import shutil
 import signal
 from collections.abc import Awaitable, Callable
 from pathlib import Path
@@ -252,6 +253,24 @@ async def test_quitting_stops_the_terminals_before_the_client_is_closed(wired: _
         await assert_all_gone(pid)
     finally:
         await wired.manager.close_all()  # a failing assertion must not leave the process running
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+def test_quitting_removes_the_checkpoint_folder_of_the_run(tmp_path: Path) -> None:
+    from src.runtime import build_runtime
+    from src.tui.app import BUILTINS
+
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    rt = build_runtime(ws, BUILTINS, checkpoints=True)
+    store = rt.checkpoints
+    assert store is not None
+    assert asyncio.run(store.snapshot()) is not None, store.off_reason
+    assert store.folder.is_dir() and store.folder.parent.name == "checkpoints"
+
+    asyncio.run(rt.close())  # what the app does on unmount
+
+    assert not store.folder.exists()
 
 
 async def test_quitting_closes_the_client_even_if_stopping_the_terminals_fails(

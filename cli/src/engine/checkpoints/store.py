@@ -11,7 +11,7 @@ import hashlib
 import os
 import shutil
 import stat
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -20,6 +20,7 @@ from src.engine.guardrails.setup import Guardrails
 from src.engine.text import escape
 
 FILE_CAP = 10 * 1024 * 1024
+BLOB_LIMIT = 128 * 1024 * 1024  # content `read_blobs` holds at once (git's output and the blobs are two copies)
 ATTRIBUTES = "* -filter -text -eol -ident -working-tree-encoding -diff -merge\n"
 AGENT_FILES = frozenset({".agent/settings.json", ".agent/mcp.json"})
 AGENT_FOLDERS = (".agent/commands/", ".agent/skills/")
@@ -35,6 +36,41 @@ def off_warning(reason: str) -> str:
 class Snapshot:
     commit: str
     skipped_large: tuple[str, ...]  # workspace-relative posix paths over FILE_CAP
+
+
+@dataclass(frozen=True)
+class DiffEntry:
+    """One path that differs between two snapshots (`diff-tree --raw`); a side that is absent has mode 0, sha None."""
+
+    path: str  # posix, workspace-relative (bytes decoded with surrogateescape)
+    old_mode: int
+    old_sha: str | None  # None: the path was added
+    new_mode: int
+    new_sha: str | None  # None: the path was deleted
+
+
+ZERO_SHA = "0" * 40
+
+
+def parse_diff(raw: bytes) -> list[DiffEntry]:
+    """Parse `diff-tree -r -z --no-renames --raw --no-abbrev`: `:<old mode> <new mode> <old sha> <new sha> <status>\0<path>\0`."""
+    fields = raw.split(b"\0")
+    entries: list[DiffEntry] = []
+    for head, path in zip(fields[0::2], fields[1::2], strict=False):
+        parts = head.lstrip(b":").decode("ascii").split()
+        if len(parts) != 5:
+            raise GitError(f"unexpected diff-tree output: {escape(head.decode('ascii', 'replace'))}")
+        old_mode, new_mode, old_sha, new_sha, _status = parts
+        entries.append(
+            DiffEntry(
+                os.fsdecode(path),
+                int(old_mode, 8),
+                None if set(old_sha) == {"0"} else old_sha,
+                int(new_mode, 8),
+                None if set(new_sha) == {"0"} else new_sha,
+            )
+        )
+    return entries
 
 
 def folder_name(workspace: Path) -> str:
@@ -309,6 +345,61 @@ class CheckpointStore:
             keep.append(rel)
             self._verdicts[rel] = signature
 
+    def _started(self) -> GitRunner:
+        if self._git is None or self._closed or not self.folder.is_dir():
+            raise GitError("no checkpoint repository")
+        return self._git
+
+    async def diff(self, before: str, after: str) -> list[DiffEntry]:
+        """The paths that differ between two snapshots. Raises GitError (also GitTimeout) when git fails."""
+        out = await self._started().run(
+            "diff-tree", "-r", "-z", "--no-renames", "--raw", "--no-abbrev", before, after,
+            timeout=self._timeout, tree=False,
+        )  # fmt: skip
+        return parse_diff(out)
+
+    async def read_blobs(self, shas: Sequence[str], *, limit: int = BLOB_LIMIT) -> dict[str, bytes]:
+        """The content of each blob, by sha, in one `cat-file --batch`. Raises GitError for an unknown sha.
+
+        The sizes are asked first (`--batch-check`, no content): blobs are taken in order while their total stays within
+        `limit`, and the rest are left out of the result (the restore skips those paths as too large)."""
+        wanted = list(dict.fromkeys(shas))
+        if not wanted:
+            return {}
+        git = self._started()
+        request = "".join(f"{s}\n" for s in wanted).encode()
+        checked = await git.run("cat-file", "--batch-check", stdin=request, timeout=self._timeout, tree=False)
+        lines = checked.split(b"\n")
+        if len(lines) <= len(wanted):
+            raise GitError("cat-file --batch-check answered too few lines")
+        chosen: list[str] = []
+        total = 0
+        for sha, line in zip(wanted, lines, strict=False):  # one line per sha, then the empty rest
+            header = line.split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise GitError(f"cannot read blob {escape(sha)}")
+            size = int(header[2])
+            if total + size <= limit:
+                chosen.append(sha)
+                total += size
+        if not chosen:
+            return {}
+        out = await git.run(
+            "cat-file", "--batch", stdin="".join(f"{s}\n" for s in chosen).encode(),
+            timeout=self._timeout, tree=False,
+        )  # fmt: skip
+        blobs: dict[str, bytes] = {}
+        pos = 0
+        for sha in chosen:
+            end = out.find(b"\n", pos)
+            header = out[pos:end].split() if end >= 0 else []
+            if len(header) != 3 or header[1] != b"blob":
+                raise GitError(f"cannot read blob {escape(sha)}")
+            size = int(header[2])
+            blobs[sha] = out[end + 1 : end + 1 + size]
+            pos = end + 1 + size + 1
+        return blobs
+
     def close(self) -> None:
         """Synchronous: kill any git still running and delete the folder (errors ignored)."""
         self._closed = True
@@ -316,6 +407,25 @@ class CheckpointStore:
             self._git.kill_all()
         with contextlib.suppress(Exception):
             shutil.rmtree(self.folder, ignore_errors=True)
+
+
+def exclude_signature(workspace: Path) -> tuple[int, int, int] | None:
+    """`(size, mtime, inode)` of the workspace's `.git/info/exclude`, None when there is none: two different values
+    mean the file changed. Never raises."""
+    try:
+        info = os.lstat(workspace / ".git" / "info" / "exclude")
+    except OSError:
+        return None
+    return (info.st_size, info.st_mtime_ns, info.st_ino)
+
+
+def file_signature(workspace: Path, rel: str) -> tuple[int, int] | None:
+    """`(size, mtime)` of a workspace file, None when it is gone. Never raises."""
+    try:
+        info = os.lstat(workspace / rel)
+    except OSError:
+        return None
+    return (info.st_size, info.st_mtime_ns)
 
 
 def _nul(paths: list[str]) -> bytes:
