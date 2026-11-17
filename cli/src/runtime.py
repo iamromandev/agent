@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     from src.engine.guardrails.setup import Guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import Hooks
+    from src.engine.mcp.contract import McpConnector
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import McpSetup
     from src.engine.permissions.setup import PermissionSetup
@@ -99,13 +100,16 @@ def build_runtime(
     model: str | None = None,
     terminals: bool = True,
     provider: SwitchableProvider | None = None,
+    connector: McpConnector | None = None,
+    trust_project_mcp: bool = False,
 ) -> Runtime:
     """Read the settings files once and wire the run for `workspace` (a folder).
 
     `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key.
     `builtins` are the slash commands a custom command may not shadow. With `terminals=False` there is no
     terminal manager and no `term_*` tool. `provider` replaces the Ollama one and skips the launch model lookup
-    (for tests)."""
+    (for tests), and so does `connector` for the MCP servers. `trust_project_mcp` treats the project's MCP file as
+    trusted for this run (nothing is remembered)."""
     from src.client import OllamaClient, SearxClient, WebClient
     from src.client.mcp import SdkConnector
     from src.client.ollama import OllamaCatalog
@@ -195,13 +199,13 @@ def build_runtime(
         manager = TerminalManager(root, guard=guard) if terminals else None
         commands = load_commands(root, builtins)  # read once, like the settings files
         mcp = McpHub(  # nothing starts yet
-            SdkConnector(guard=guard),
+            connector if connector is not None else SdkConnector(guard=guard),
             root,
             setup.servers,
             settings.mcp_timeout,
             setup.warnings,
             start_timeout=settings.mcp_start_timeout,
-            untrusted=setup.untrusted,
+            untrusted=frozenset() if trust_project_mcp else setup.untrusted,
         )
 
         def recorder_factory() -> Recorder:

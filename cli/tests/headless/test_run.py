@@ -577,6 +577,62 @@ def test_a_model_that_is_not_installed_exits_1_with_the_message(ws: Path, capsys
     assert "error: Model ghost is not pulled" in err and "ollama pull ghost" in err
 
 
+def test_a_session_error_with_a_file_derived_id_is_written_out_escaped(
+    ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from src.engine.session import SessionError
+
+    go(ws, ScriptedProvider([say("one")]), prompt="first")
+    (info,) = SessionStore(_sessions(), ws.resolve()).list()
+
+    def bad_load(self: SessionStore, session_id: str) -> None:  # what `read_header` says of a renamed file
+        raise SessionError(f"Session {session_id} was copied or renamed: its header says evil\x1b[2J")
+
+    monkeypatch.setattr(SessionStore, "load", bad_load)
+    capsys.readouterr()
+
+    code = go(ws, ScriptedProvider([say("x")]), start=StartChoice("resume", info.id[:8]))
+
+    err = capsys.readouterr().err
+    assert code == EXIT_USAGE, err
+    assert "\x1b" not in err and "evil\\x1b[2J" in err
+
+
+def test_a_usage_error_text_is_written_out_escaped(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    code = go(ws, ScriptedProvider([say("x")]), allow=("bash(\x1b[2J",))
+
+    err = capsys.readouterr().err
+    assert code == EXIT_USAGE
+    assert "\x1b" not in err and "\\x1b[2J" in err
+
+
+def test_mcp_server_names_and_failure_reasons_are_written_out_escaped(
+    ws: Path, env: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.fakes import FakeConnector
+
+    (env / "agent").mkdir(parents=True)
+    (env / "agent" / "mcp.json").write_text(json.dumps({"servers": {"srv": {"command": "x"}}}))
+    connector = FakeConnector(failures={"srv": RuntimeError("bad\x1b[2J")})
+
+    run_headless(ws, HeadlessOptions("hi"), provider=ScriptedProvider([say("ok")]), connector=connector)
+
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "bad\\x1b[2J" in err
+
+
+def test_a_project_file_value_in_the_untrusted_warnings_is_written_out_escaped(
+    ws: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (ws / ".agent").mkdir()
+    (ws / ".agent" / "settings.json").write_text(json.dumps({"hooks": {"Evil\x1b[2J": [{"command": "x"}]}}))
+
+    go(ws, ScriptedProvider([say("ok")]))
+
+    err = capsys.readouterr().err
+    assert "\x1b" not in err and "\\x1b[2J" in err
+
+
 def test_an_ambiguous_resume_prefix_exits_2(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
     go(ws, ScriptedProvider([say("one")]), prompt="first")
     go(ws, ScriptedProvider([say("two")]), prompt="second")
@@ -603,3 +659,199 @@ def test_allow_rules_that_can_never_apply_are_warned_about_on_stderr(ws: Path, c
     assert "warning: --allow read(x): read has no argument to match" in err
     assert "warning: --allow nosuch: no tool named nosuch" in err
     assert "warning: --allow term_start: no tool named term_start" in err  # terminals are off in headless mode
+
+
+# --- stdin, built-ins, project trust, MCP -----------------------------------------------------------------------
+
+
+def _trust_files() -> list[Path]:
+    import os
+
+    return sorted(Path(os.environ["XDG_DATA_HOME"]).glob("agent/*trust*.json"))
+
+
+def _project(ws: Path, hook_log: Path) -> None:
+    (ws / ".agent").mkdir()
+    (ws / ".agent" / "settings.json").write_text(
+        json.dumps(
+            {
+                "permissions": {"allow": ["bash(echo hi > made.txt)"]},
+                "hooks": {"UserPromptSubmit": [{"command": f"echo ran >> {hook_log}"}]},
+            }
+        )
+    )
+    (ws / ".agent" / "mcp.json").write_text(json.dumps({"servers": {"proj": {"command": "x"}}}))
+
+
+def test_an_untrusted_project_warns_once_per_kind_and_none_of_it_is_active(
+    ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.fakes import FakeConnector
+
+    log = tmp_path / "hook.log"
+    _project(ws, log)
+    connector = FakeConnector()
+    provider = ScriptedProvider([call("bash", command="echo hi > made.txt"), say("ok")])
+
+    code = run_headless(ws, HeadlessOptions("hi"), provider=provider, connector=connector)
+
+    err = capsys.readouterr().err
+    assert code == EXIT_OK
+    assert [line for line in err.splitlines() if "untrusted" in line and "--trust-project" in line].__len__() == 3
+    for kind in ("allow rule", "hook", "MCP server"):
+        assert sum(kind in line and "--trust-project" in line for line in err.splitlines()) == 1
+    assert tool_results(provider)[0].startswith("User denied")
+    assert not log.exists() and not (ws / "made.txt").exists()
+    assert connector.connects == []
+    assert _trust_files() == []
+
+
+def test_trust_project_activates_rules_hooks_and_servers_without_writing_a_trust_store(
+    ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from tests.fakes import FakeConnector
+
+    log = tmp_path / "hook.log"
+    _project(ws, log)
+    connector = FakeConnector()
+    provider = ScriptedProvider([call("bash", command="echo hi > made.txt"), say("ok")])
+
+    code = run_headless(ws, HeadlessOptions("hi", trust_project=True), provider=provider, connector=connector)
+
+    err = capsys.readouterr().err
+    assert code == EXIT_OK
+    assert "--trust-project" not in err
+    assert not tool_results(provider)[0].startswith("User denied")
+    assert (ws / "made.txt").exists() and log.read_text() == "ran\n"
+    assert [name for name, _ in connector.connects] == ["proj"]
+    assert _trust_files() == []
+
+
+def test_a_trusted_server_is_started_and_waited_for_before_the_first_request(ws: Path, env: Path) -> None:
+    from src.engine.mcp.contract import ToolInfo
+
+    from tests.fakes import FakeConnection, FakeConnector
+
+    (env / "agent").mkdir(parents=True)
+    (env / "agent" / "mcp.json").write_text(json.dumps({"servers": {"srv": {"command": "x"}}}))
+    info = ToolInfo("ping", "ping", {"type": "object", "properties": {}})
+    connector = FakeConnector({"srv": FakeConnection([info])}, delays={"srv": 0.2})
+    provider = ScriptedProvider([say("ok")])
+
+    run_headless(ws, HeadlessOptions("hi"), provider=provider, connector=connector)
+
+    assert "mcp__srv__ping" in provider.requests[0][1]
+    assert connector.connections["srv"].closed == 1
+
+
+def test_a_failing_server_is_a_warning_and_the_turn_still_runs(ws: Path, env: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from tests.fakes import FakeConnector
+
+    (env / "agent").mkdir(parents=True)
+    (env / "agent" / "mcp.json").write_text(json.dumps({"servers": {"srv": {"command": "x"}}}))
+    connector = FakeConnector(failures={"srv": RuntimeError("boom")})
+
+    code = run_headless(ws, HeadlessOptions("hi"), provider=ScriptedProvider([say("ok")]), connector=connector)
+
+    assert code == EXIT_OK
+    assert "warning: mcp srv failed: boom" in capsys.readouterr().err
+
+
+def test_a_built_in_prompt_is_a_usage_error_before_any_request(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    provider = ScriptedProvider([say("x")])
+
+    code = go(ws, provider, "/compact")
+
+    assert code == EXIT_USAGE and provider.requests == []
+    assert "/compact" in capsys.readouterr().err
+
+
+def test_a_custom_command_prompt_is_expanded(ws: Path) -> None:
+    (ws / ".agent" / "commands").mkdir(parents=True)
+    (ws / ".agent" / "commands" / "fix.md").write_text("Please fix: $ARGUMENTS")
+    provider = ScriptedProvider([say("ok")])
+
+    go(ws, provider, "/fix the bug")
+
+    assert provider.requests[0][0][-1].content == "Please fix: the bug"
+
+
+def test_piped_stdin_is_the_prompt_or_is_attached_to_the_argument(ws: Path) -> None:
+    from io import BytesIO
+
+    only = ScriptedProvider([say("ok")])
+    run_headless(ws, HeadlessOptions(None), provider=only, stdin=BytesIO(b"from stdin"))
+    both = ScriptedProvider([say("ok")])
+    run_headless(ws, HeadlessOptions("look"), provider=both, stdin=BytesIO(b"data"))
+
+    assert only.requests[0][0][-1].content == "from stdin"
+    assert both.requests[0][0][-1].content == "look\n\n<piped input>\n```\ndata\n```"
+
+
+def test_empty_or_oversized_stdin_is_a_usage_error_before_any_request(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from io import BytesIO
+
+    provider = ScriptedProvider([say("x")])
+
+    empty = run_headless(ws, HeadlessOptions(None), provider=provider, stdin=BytesIO(b""))
+    big = run_headless(ws, HeadlessOptions(None), provider=provider, stdin=BytesIO(b"a" * ((1 << 20) + 1)))
+
+    assert (empty, big) == (EXIT_USAGE, EXIT_USAGE) and provider.requests == []
+
+
+def test_a_stdin_without_a_byte_buffer_is_no_input_not_a_crash(
+    ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from io import StringIO
+
+    monkeypatch.setattr(sys, "stdin", StringIO("ignored"))
+
+    code = run_headless(ws, HeadlessOptions(None), provider=ScriptedProvider([say("x")]))
+
+    assert code == EXIT_USAGE
+    assert "the prompt is empty" in capsys.readouterr().err
+
+
+def test_the_first_request_is_made_soon_after_the_start(ws: Path) -> None:
+    import time
+
+    class Timed(ScriptedProvider):
+        first: float | None = None
+
+        async def stream(self, messages, tools):
+            if self.first is None:
+                self.first = time.monotonic()
+            async for event in super().stream(messages, tools):
+                yield event
+
+    provider = Timed([say("ok")])
+    begun = time.monotonic()
+
+    go(ws, provider)
+
+    # NFR3 is 1 s; the bound is 3 s so a loaded CI machine (sandbox probe, imports) does not make it flaky, while a
+    # start that waits on anything slow (a model list, a server) still fails it.
+    assert provider.first is not None and provider.first - begun < 3.0
+
+
+def test_a_sigterm_during_the_runtime_build_exits_143_and_restores_the_handler(
+    ws: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import signal
+    import time
+
+    import src.headless.run as headless_run
+
+    def slow_build(*_: object, **__: object):
+        os.kill(os.getpid(), signal.SIGTERM)
+        time.sleep(2)  # the handler raises before this ends
+        raise AssertionError("SIGTERM was ignored")
+
+    monkeypatch.setattr(headless_run, "build_runtime", slow_build)
+    before = signal.getsignal(signal.SIGTERM)
+
+    code = go(ws, ScriptedProvider([say("x")]))
+
+    assert code == 143
+    assert signal.getsignal(signal.SIGTERM) is before
