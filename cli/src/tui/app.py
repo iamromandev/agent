@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Literal
 
 from textual import events
-from textual.app import App, ComposeResult
+from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
 from textual.message import Message
@@ -55,6 +55,7 @@ from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
 from src.engine.mcp.names import tool_name
 from src.engine.mentions import MentionNote, expand_mentions, note_text
+from src.engine.mentions_index import FileIndex
 from src.engine.mode import Mode
 from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_init_prompt
@@ -90,6 +91,7 @@ from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
+from src.tui.widgets.path_suggestions import PathSuggestions
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
@@ -188,6 +190,9 @@ class AgentApp(App[None]):
         self.window_cap = window_cap  # AGENT_NUM_CTX: caps every window
         self._launch_notices = tuple(launch_notices)  # info lines for the transcript, already escaped
         self.workspace = workspace
+        self.file_index = FileIndex(workspace, self.guard)
+        self._indexing = False
+        self._reindex_pending = False
         self.agent = agent_factory(TuiApprover(self))
         self._shutting_down = False
         self._turn_active = False
@@ -213,6 +218,7 @@ class AgentApp(App[None]):
             yield TerminalPane(self.terminals)
         yield TodoPanel(id="todos")
         yield CommandSuggestions(id="suggestions")  # above the input
+        yield PathSuggestions(id="path-suggestions")
         yield ChatInput(id="input")
         yield StatusBar()
 
@@ -223,7 +229,9 @@ class AgentApp(App[None]):
         status.workspace = display_path(self.workspace)
         status.mode = self.agent.mode
         self.query_one(ChatInput).suggestions = self.query_one(CommandSuggestions)
+        self.query_one(ChatInput).paths = self.query_one(PathSuggestions)
         self.query_one(ChatInput).focus()
+        self._reindex()
         self._stop_on_signals()
         self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
@@ -734,6 +742,7 @@ class AgentApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
+        self.file_index.cancel()  # the build thread stops at its next check instead of walking on
         self.agent.close()
         try:
             if self.mcp is not None:
@@ -1039,17 +1048,62 @@ class AgentApp(App[None]):
         entries.extend((c.name, c.description or "", c.source) for c in self.commands.sorted())
         return entries
 
+    def _reindex(self) -> None:
+        """Build the `@` index in a thread (once at mount, again after each turn). A request that arrives while a
+        build runs makes it run once more when it ends, so files created meanwhile are not missed."""
+        if self._shutting_down:
+            return
+        if self._indexing:
+            self._reindex_pending = True
+            return
+        self._indexing = True
+        self.run_worker(self._build_index(), group="file-index", exit_on_error=False)
+
+    async def _build_index(self) -> None:
+        self._indexing = True
+        try:
+            while True:
+                self._reindex_pending = False
+                await asyncio.to_thread(self.file_index.build)
+                if self._shutting_down:
+                    return
+                with contextlib.suppress(NoMatches, ScreenStackError):  # the app may be closing
+                    self._update_suggestions(self.query_one(ChatInput))
+                if not self._reindex_pending:
+                    return
+        finally:
+            self._indexing = False
+
+    def _update_suggestions(self, box: ChatInput) -> None:
+        """Command names for a bare `/prefix`, otherwise paths for the `@token` at the cursor; never both."""
+        if box.suggestions is not None:
+            box.suggestions.update_for(box.text, self._suggestion_entries())
+        self._update_paths(box)
+
+    def _update_paths(self, box: ChatInput) -> None:
+        if box.paths is None:
+            return
+        token = None if box.suggestions is not None and box.suggestions.is_open else box.token_before_cursor()
+        box.paths.update_for(self.file_index.suggest(token) if token is not None else [])
+
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
-        if isinstance(event.text_area, ChatInput) and event.text_area.suggestions is not None:
-            event.text_area.suggestions.update_for(event.text_area.text, self._suggestion_entries())
+        if isinstance(event.text_area, ChatInput):
+            self._update_suggestions(event.text_area)
+
+    def on_text_area_selection_changed(self, event: TextArea.SelectionChanged) -> None:
+        if isinstance(event.text_area, ChatInput) and event.text_area.paths is not None:
+            self._update_paths(event.text_area)  # a cursor move only changes the token; the command list reads the text
 
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
-        if isinstance(event.widget, ChatInput) and event.widget.suggestions is not None:
-            event.widget.suggestions.hide()  # the popup belongs to the focused input
+        if isinstance(event.widget, ChatInput):
+            if event.widget.suggestions is not None:
+                event.widget.suggestions.hide()  # the popup belongs to the focused input
+            if event.widget.paths is not None:
+                event.widget.paths.hide()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
-        if isinstance(event.widget, ChatInput) and event.widget.suggestions is not None:
-            event.widget.suggestions.update_for(event.widget.text, self._suggestion_entries())
+        if isinstance(event.widget, ChatInput):
+            self._update_suggestions(event.widget)
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if isinstance(event.option_list, CommandSuggestions):
@@ -1057,6 +1111,12 @@ class AgentApp(App[None]):
             chat = self.query_one(ChatInput)
             if (name := event.option_list.name_at(event.option_index)) is not None:
                 chat.complete(name)
+            chat.focus()
+        elif isinstance(event.option_list, PathSuggestions):
+            event.stop()
+            chat = self.query_one(ChatInput)
+            if (choice := event.option_list.at(event.option_index)) is not None:
+                chat.complete_path(choice)
             chat.focus()
 
     def _help(self) -> str:
@@ -1262,6 +1322,7 @@ class AgentApp(App[None]):
                 status.window = window
                 status.estimated = estimated
             case TurnEnded(turn_status):
+                self._reindex()
                 status.pending_mode = False
                 await transcript.end_assistant()
                 await transcript.close_open_tools(turn_status.replace("_", " "))

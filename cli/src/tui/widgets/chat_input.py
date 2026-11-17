@@ -9,7 +9,9 @@ from textual.binding import Binding, BindingType
 from textual.message import Message
 from textual.widgets import TextArea
 
+from src.engine.mentions_index import Suggestion, current_token
 from src.tui.widgets.command_suggestions import CommandSuggestions
+from src.tui.widgets.path_suggestions import PathSuggestions
 
 POPUP_KEYS = frozenset({"up", "down", "tab", "enter", "escape"})
 
@@ -28,10 +30,44 @@ class ChatInput(TextArea):
     def __init__(self, text: str = "", **kwargs: Any) -> None:
         super().__init__(text, **kwargs)
         self.suggestions: CommandSuggestions | None = None  # set by the app; its keys are ours while it is open
+        self.paths: PathSuggestions | None = None  # same for the `@path` list
 
     @property
     def popup_open(self) -> bool:
-        return self.suggestions is not None and self.suggestions.is_open
+        return (self.suggestions is not None and self.suggestions.is_open) or (
+            self.paths is not None and self.paths.is_open
+        )
+
+    def token_before_cursor(self) -> str | None:
+        row, col = self.cursor_location
+        return current_token(self.document.get_line(row)[:col])
+
+    def complete_path(self, choice: Suggestion) -> None:
+        """Replace the `@token` at the cursor by the chosen path. A file ends with a space; a folder ends with `/` and
+        the list stays open for the next segment. A path with whitespace is quoted (a folder leaves the quote open)."""
+        token = self.token_before_cursor()
+        if token is None:
+            return
+        row, col = self.cursor_location
+        quoted = any(c.isspace() for c in choice.path)
+        if choice.folder:
+            text = f'@"{choice.path}' if quoted else f"@{choice.path}"
+        else:
+            text = f'@"{choice.path}" ' if quoted else f"@{choice.path} "
+        self.replace(text, (row, col - len(token) - 1), (row, col))
+        if not choice.folder and self.paths is not None:
+            self.paths.hide()
+
+    def _typed_file(self, key: str) -> bool:
+        """Enter on a file whose whole path is typed: nothing is left to complete, so it sends (the list closes)."""
+        paths = self.paths
+        if key != "enter" or paths is None or (choice := paths.chosen()) is None or choice.folder:
+            return False
+        token = self.token_before_cursor()
+        if token is None or token.removeprefix('"') != choice.path:
+            return False
+        paths.hide()
+        return True
 
     def complete(self, name: str) -> None:
         """Put `/name ` in the box, ready for arguments."""
@@ -44,6 +80,21 @@ class ChatInput(TextArea):
         self.insert("\n")
 
     async def _on_key(self, event: events.Key) -> None:
+        paths = self.paths
+        if paths is not None and paths.is_open and event.key in POPUP_KEYS and not self._typed_file(event.key):
+            event.stop()
+            event.prevent_default()
+            match event.key:
+                case "up" | "down":
+                    paths.move(-1 if event.key == "up" else 1)
+                case "tab" | "enter":
+                    if (choice := paths.chosen()) is not None:
+                        self.complete_path(choice)
+                    else:
+                        paths.hide()
+                case _:  # escape
+                    paths.hide()
+            return
         popup = self.suggestions
         if popup is not None and popup.is_open and event.key == "enter" and self.text == f"/{popup.chosen()}":
             popup.hide()  # the whole name is typed: Enter sends it, as it always did
