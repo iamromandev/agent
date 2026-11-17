@@ -532,3 +532,32 @@ async def test_a_server_that_stays_untrusted_is_never_connected_and_closing_is_c
     assert connector.connects == []
     assert hub.tools() == []
     assert [s.status for s in hub.states()] == ["untrusted", "untrusted"]
+
+
+async def test_wait_started_returns_once_every_starting_server_is_ready_or_failed() -> None:
+    connector = FakeConnector(delays={"slow": 0.05}, failures={"bad": RuntimeError("no")})
+    hub, _ = make_hub(connector, "slow", "bad", "quick")
+    hub.start()
+
+    await hub.wait_started()
+
+    assert {s.config.name: s.status for s in hub.states()} == {"slow": "ready", "bad": "failed", "quick": "ready"}
+    await hub.close_all()
+
+
+async def test_wait_started_gives_up_after_its_limit_and_leaves_the_server_starting() -> None:
+    connector = FakeConnector()
+    connector.gates["stuck"] = asyncio.Event()
+    hub, _ = make_hub(connector, "stuck")
+    hub.start()
+
+    await hub.wait_started(0.05)
+
+    assert [s.status for s in hub.states()] == ["starting"]
+    await hub.close_all()
+
+
+async def test_wait_started_with_nothing_started_returns_at_once() -> None:
+    hub, _ = make_hub(FakeConnector(), "a")
+
+    await hub.wait_started()

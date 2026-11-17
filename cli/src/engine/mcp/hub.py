@@ -103,6 +103,13 @@ class McpHub:
                     state.status, state.reason = "starting", ""
                 self._tasks[name] = asyncio.create_task(self._run(name))
 
+    async def wait_started(self, limit: float | None = None) -> None:
+        """Wait until every server that was started is ready or failed, or `limit` seconds passed (the servers keep
+        their own start deadline; the default waits a little past it)."""
+        tasks = [t for t in self._tasks.values() if not t.done()]
+        if tasks:
+            await asyncio.wait(tasks, timeout=self._start_timeout + 5 if limit is None else limit)
+
     async def _run(self, name: str) -> None:
         state = self._states[name]
         connection: McpConnection | None = None
