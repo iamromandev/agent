@@ -54,6 +54,7 @@ from src.engine.instructions import fingerprint, levels
 from src.engine.loop import close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
 from src.engine.mcp.names import tool_name
+from src.engine.mentions import MentionNote, expand_mentions, note_text
 from src.engine.mode import Mode
 from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_init_prompt
@@ -1119,19 +1120,23 @@ class AgentApp(App[None]):
         started = False  # the agent was handed the message
         hook_events: list[AgentEvent] = []  # what the UserPromptSubmit hooks reported, shown once the prompt is
         context: list[str] = []  # and what they added for the model
+        sent_text = text  # what the hooks and the model get: `text` plus the files its @mentions attach
+        notes: tuple[MentionNote, ...] = ()
 
         async def work(emit: EventSink) -> None:
             nonlocal started
             started = True
             for hook_event in hook_events:
                 emit(hook_event)
-            await self.agent.run_turn(text, emit, draft=draft, context=context)
+            await self.agent.run_turn(sent_text, emit, draft=draft, context=context)
 
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
                 return
             if not init:  # /init's prompt is the app's own, not something the user sent
-                decision = await self.agent.prompt_hooks(text, hook_events.append)
+                expansion = await asyncio.to_thread(expand_mentions, text, self.workspace, self.guard)
+                sent_text, notes = expansion.text, expansion.notes
+                decision = await self.agent.prompt_hooks(sent_text, hook_events.append)
                 if decision.blocked:  # the prompt is dropped: `_end_turn` puts it back in the box
                     for hook_event in hook_events:
                         if isinstance(hook_event, Notice):
@@ -1143,6 +1148,8 @@ class AgentApp(App[None]):
             before = fingerprint(agents_md)
             shown = True
             await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
+            for note in notes:
+                await transcript.add_notice("info" if note.attached else "warn", note_text(note))
             self._finished_since_toggle = False
             status.pending_mode = False
             await self._run_with_events(work)

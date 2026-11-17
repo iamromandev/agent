@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from typing import BinaryIO
 
 from src.engine.commands.loader import Commands
@@ -12,10 +12,18 @@ from src.headless import STDIN_LIMIT, UsageError
 _SLASH = re.compile(r"/([A-Za-z0-9_-]+)(?:\s+(.*))?", re.DOTALL)
 
 
-def build_prompt(arg: str | None, stdin: BinaryIO, stdin_is_tty: bool, commands: Commands, builtins: Iterable[str]) -> str:
+def build_prompt(
+    arg: str | None,
+    stdin: BinaryIO,
+    stdin_is_tty: bool,
+    commands: Commands,
+    builtins: Iterable[str],
+    attach: Callable[[str], str] | None = None,
+) -> str:
     """The prompt for `-p`. Without `arg`, stdin is the prompt (a terminal is a usage error). With `arg` and a
     piped stdin, the input follows after a blank line in a fenced block. `stdin` is read as bytes, at most
-    `STDIN_LIMIT`, and must be UTF-8."""
+    `STDIN_LIMIT`, and must be UTF-8. `attach` (the `@file` expansion) sees only what the user wrote, the argument
+    or a stdin that is the prompt, after a custom command is expanded: never the piped input block."""
     if arg is None:
         if stdin_is_tty:
             raise UsageError('give a prompt: agent -p "<prompt>", or pipe it on stdin')
@@ -26,6 +34,8 @@ def build_prompt(arg: str | None, stdin: BinaryIO, stdin_is_tty: bool, commands:
     if not base:
         raise UsageError("the prompt is empty")
     base = _expand(base, commands, set(builtins))
+    if attach is not None:
+        base = attach(base)
     if piped.strip():
         piped = piped.rstrip("\n")
         runs = re.findall(r"`+", piped)

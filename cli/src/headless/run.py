@@ -21,6 +21,7 @@ from src.engine.events import AgentEvent, Notice, TurnEnded
 from src.engine.loop import close_recorder
 from src.engine.mcp.contract import McpConnector
 from src.engine.mcp.hub import HubEvent
+from src.engine.mentions import MentionNote, expand_mentions, note_text
 from src.engine.permissions.rules import Rule, RuleError, parse_rule
 from src.engine.permissions.setup import run_rule_warnings, tool_keys
 from src.engine.provider.base import SwitchableProvider
@@ -134,7 +135,14 @@ def run_headless(
         state.redact = _redactor(rt)
         model = getattr(rt.provider, "model", None)
         state.model = model if isinstance(model, str) else None
-        prompt = build_prompt(opts.prompt, *_stdin(stdin), rt.commands, BUILTINS)
+        mention_notes: list[MentionNote] = []
+
+        def attach(text: str) -> str:  # the user's own prompt only, not piped input
+            expansion = expand_mentions(text, rt.root, rt.guard)
+            mention_notes.extend(expansion.notes)
+            return expansion.text
+
+        prompt = build_prompt(opts.prompt, *_stdin(stdin), rt.commands, BUILTINS, attach)
         rt.permissions.rules.add_run_allow(allow)
         if opts.trust_project:
             rt.permissions.rules.trust_for_run()  # hooks follow the rules' trust; no store is written
@@ -145,6 +153,8 @@ def run_headless(
             sink(Notice("warn", warning))
         for note in (*rt.model_notices, *rt.guard.info):
             sink(Notice("info", note))
+        for mention in mention_notes:
+            sink(Notice("info" if mention.attached else "warn", note_text(mention)))
         asyncio.run(_main(rt, opts, prompt, sink, started, state))
     except UsageError as exc:
         state.outcome = Outcome(EXIT_USAGE, "usage", str(exc))
