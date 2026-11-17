@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Literal
 
 from src.headless.approver import HEADLESS_DENY as HEADLESS_DENY
 from src.headless.approver import HeadlessApprover as HeadlessApprover
@@ -24,4 +25,5 @@ class HeadlessOptions:
     trust_project: bool = False
     model: str | None = None
     start: StartChoice = NEW  # new, continue or resume (never pick)
+    output: Literal["text", "json", "stream-json"] = "text"
 

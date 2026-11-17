@@ -665,7 +665,7 @@ async def test_done_sets_the_reported_count_and_emits_a_real_usage_update(ctx: T
 
     await agent.run_turn("q", events)
 
-    assert events.of(UsageUpdate) == [UsageUpdate(823, WINDOW, estimated=False)]
+    assert events.of(UsageUpdate) == [UsageUpdate(823, WINDOW, estimated=False, prompt_tokens=700, completion_tokens=123)]
     assert agent._reported == Reported(823, 2)  # the user message plus the assistant reply
 
 

@@ -35,7 +35,7 @@ class _OptionalResumeValue(TyperGroup):
                 fixed.extend(args[i:])
                 break
             nxt = args[i + 1] if i + 1 < len(args) else None
-            if arg in ("--model", "--allow") and nxt is not None:  # its value is not a subcommand name either
+            if arg in ("--model", "--allow", "--output") and nxt is not None:  # its value is not a subcommand name either
                 fixed.extend((arg, nxt))
                 i += 2
             elif arg == "--resume" and nxt is not None and not nxt.startswith("-"):
@@ -79,6 +79,7 @@ def root(
     trust_project: bool = typer.Option(
         False, "--trust-project", help="With -p: trust the project's settings and MCP file for this run (dangerous)"
     ),
+    output: str = typer.Option("text", "--output", case_sensitive=False, help="With -p: text, json or stream-json on stdout"),
 ) -> None:
     """Agent command-line client. Run without a command to open the coding agent."""
     if ctx.invoked_subcommand is None:
@@ -88,8 +89,16 @@ def root(
             raise typer.BadParameter("give a model name", param_hint="--model")
         if continue_ and resume is not None:
             raise typer.BadParameter("use either --continue or --resume")
+        output = output.lower()
+        if output not in ("text", "json", "stream-json"):
+            raise typer.BadParameter("use text, json or stream-json", param_hint="--output")
         if print_ is None:
-            for given, flag in ((bool(allow), "--allow"), (quiet, "--quiet"), (trust_project, "--trust-project")):
+            for given, flag in (
+                (bool(allow), "--allow"),
+                (quiet, "--quiet"),
+                (trust_project, "--trust-project"),
+                (output != "text", "--output"),
+            ):
                 if given:
                     raise typer.BadParameter(f"{flag} needs -p", param_hint=flag)
         elif resume == PICK:
@@ -107,7 +116,7 @@ def root(
             from src.headless import HeadlessOptions
             from src.headless.run import run_headless
 
-            opts = HeadlessOptions(None if print_ == STDIN else print_, tuple(allow), quiet, trust_project, chosen, start)
+            opts = HeadlessOptions(None if print_ == STDIN else print_, tuple(allow), quiet, trust_project, chosen, start, output)
             raise typer.Exit(run_headless(Path.cwd(), opts))
         from src.tui import run  # lazy: Textual is not needed for `health` or `--help`
 

@@ -131,7 +131,7 @@ async def test_a_tool_call_runs_and_its_result_reaches_the_second_request(ctx: T
 
     await agent.run_turn("what is in a.py?", events)
 
-    assert events.of(ToolStarted) == [ToolStarted("c1", "read a.py")]
+    assert events.of(ToolStarted) == [ToolStarted("c1", "read a.py", name="read", args={"path": "a.py"})]
     assert [e.delta for e in events.of(AssistantText)] == ["looking", "done"]
     assert events.last == TurnEnded("done")
     second_request, _ = provider.requests[1]
@@ -204,7 +204,7 @@ async def test_a_done_event_updates_usage(ctx: ToolContext) -> None:
 
     await agent.run_turn("q", events)
 
-    assert events.of(UsageUpdate) == [UsageUpdate(used=823, window=WINDOW)]
+    assert events.of(UsageUpdate) == [UsageUpdate(used=823, window=WINDOW, prompt_tokens=700, completion_tokens=123)]
 
 
 async def test_usage_updates_are_not_marked_estimated_by_default() -> None:
