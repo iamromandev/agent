@@ -855,3 +855,14 @@ def test_a_sigterm_during_the_runtime_build_exits_143_and_restores_the_handler(
 
     assert code == 143
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_headless_makes_no_checkpoint_folder(ws: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    data = tmp_path / "xdg-data"
+    monkeypatch.setenv("XDG_DATA_HOME", str(data))
+    (ws / "a.txt").write_text("x")
+
+    code = go(ws, ScriptedProvider([call("write", path="b.txt", content="y"), say("done")]), allow=("write",))
+
+    assert code == EXIT_OK
+    assert not (data / "agent" / "checkpoints").exists()

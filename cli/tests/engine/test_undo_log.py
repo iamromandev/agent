@@ -309,3 +309,54 @@ def test_after_hashes_a_too_large_file_without_reading_it_whole(
     turn = log.pop()
     assert turn is not None
     assert turn.changes[target].after == digest(b"y" * 3_000_000)
+
+
+def test_mark_records_checkpoint_commits_on_the_turn_in_progress(workspace: Path) -> None:
+    log = UndoLog(workspace)
+    log.begin(0, "p")
+
+    log.mark(before="b1")
+    log.mark(after="a1")
+    log.finish()
+    turn = log.pop()
+
+    assert turn is not None
+    assert (turn.before, turn.after) == ("b1", "a1")
+
+
+def test_a_turn_without_marks_has_no_commits_and_mark_outside_a_turn_is_ignored(workspace: Path) -> None:
+    log = UndoLog(workspace)
+    log.mark(before="x")
+    log.begin(0, "p")
+    log.finish()
+    turn = log.pop()
+
+    assert turn is not None
+    assert (turn.before, turn.after) == (None, None)
+
+
+def test_mark_records_the_time_the_large_files_and_the_exclude_change(workspace: Path) -> None:
+    log = UndoLog(workspace)
+    log.begin(0, "go")
+
+    log.mark(before="b1", before_time=12.5, large_before=("big.bin",))
+    log.mark(after="a1", skipped_large=("new.bin",), exclude_changed=True)
+    log.finish()
+
+    turn = log.pop()
+    assert turn is not None
+    assert (turn.before, turn.after) == ("b1", "a1")
+    assert turn.before_time == 12.5
+    assert turn.large_before == ("big.bin",)
+    assert turn.skipped_large == ("new.bin",)
+    assert turn.exclude_changed is True
+
+
+def test_a_turn_starts_with_no_time_no_large_files_and_no_exclude_change(workspace: Path) -> None:
+    log = UndoLog(workspace)
+    log.begin(0, "go")
+    log.finish()
+
+    turn = log.pop()
+    assert turn is not None
+    assert (turn.before_time, turn.large_before, turn.exclude_changed) == (None, (), False)

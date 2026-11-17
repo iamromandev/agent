@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     from src.config.settings import Settings
     from src.engine import Agent
     from src.engine.approval import Approver
+    from src.engine.checkpoints.store import CheckpointStore
     from src.engine.commands.loader import Commands
     from src.engine.guardrails.setup import Guardrails
     from src.engine.hooks.runner import ProcessRunner
@@ -65,6 +66,7 @@ class Runtime:
     hooks: Hooks
     hook_runner: ProcessRunner
     guard: Guardrails
+    checkpoints: CheckpointStore | None
     terminals: TerminalManager | None
     commands: Commands
     skills: Skills
@@ -76,6 +78,8 @@ class Runtime:
     def kill_all(self) -> None:
         """Synchronous fallback once the loop is gone: whatever `close` did not stop is killed."""
         self.hook_runner.kill_all()  # nor a hook (a no-op once `close` ran)
+        if self.checkpoints is not None:
+            self.checkpoints.close()  # idempotent: the shadow folder is gone after the first call
         self.mcp.kill_all()  # a server still running means `close` never ran, and its loop is gone
         if self.terminals is not None and self.terminals.names():  # none when `close` ran
             self.terminals.kill_all()
@@ -102,6 +106,7 @@ def build_runtime(
     provider: SwitchableProvider | None = None,
     connector: McpConnector | None = None,
     trust_project_mcp: bool = False,
+    checkpoints: bool = False,
 ) -> Runtime:
     """Read the settings files once and wire the run for `workspace` (a folder).
 
@@ -109,12 +114,13 @@ def build_runtime(
     `builtins` are the slash commands a custom command may not shadow. With `terminals=False` there is no
     terminal manager and no `term_*` tool. `provider` replaces the Ollama one and skips the launch model lookup
     (for tests), and so does `connector` for the MCP servers. `trust_project_mcp` treats the project's MCP file as
-    trusted for this run (nothing is remembered)."""
+    trusted for this run (nothing is remembered). `checkpoints=True` (the app) snapshots the workspace around each turn for `/undo`."""
     from src.client import OllamaClient, SearxClient, WebClient
     from src.client.mcp import SdkConnector
     from src.client.ollama import OllamaCatalog
     from src.config.settings import get_settings
     from src.engine import Agent
+    from src.engine.checkpoints.setup import prepare_checkpoints
     from src.engine.commands.loader import load_commands
     from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.hooks.runner import ProcessRunner
@@ -194,6 +200,9 @@ def build_runtime(
         # Hooks too: both files already parsed; project hooks stay off until the same trust as the allow rules.
         hook_runner = ProcessRunner(root, guard)
         hooks = prepare_hooks(permissions, root, hook_runner)
+        shadow, shadow_warnings = prepare_checkpoints(
+            root, guard, guard.env.filter(os.environ), enabled=checkpoints
+        )
         ctx = ToolContext(root, settings.bash_timeout, guard=guard)
         # lives for the whole run; /new and session switches do not touch it
         manager = TerminalManager(root, guard=guard) if terminals else None
@@ -227,10 +236,13 @@ def build_runtime(
                 task_max_steps=settings.task_max_steps,
                 rules=permissions.rules,
                 hooks=hooks,
+                checkpoints=shadow,
             )
 
         async def close() -> None:
             hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
+            if shadow is not None:
+                shadow.close()  # the run's shadow repository is deleted
             try:
                 await mcp.close_all()  # no server process outlives the agent
             finally:
@@ -263,12 +275,13 @@ def build_runtime(
             hooks=hooks,
             hook_runner=hook_runner,
             guard=guard,
+            checkpoints=shadow,
             terminals=manager,
             commands=commands,
             skills=skills,
             catalog=OllamaCatalog(client),
             model_notices=model_notices,
-            warnings=(*permissions.warnings, *model_warnings, *guard.warnings, *hooks.warnings),
+            warnings=(*permissions.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,
         )
     except BaseException:

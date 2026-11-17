@@ -11,11 +11,13 @@ import hashlib
 import os
 import stat
 import tempfile
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
 
 from src.engine.events import Notice
+from src.engine.text import escape
 
 SNAPSHOT_FILE_LIMIT = 8 * 1024 * 1024
 SNAPSHOT_TOTAL_LIMIT = 64 * 1024 * 1024
@@ -45,6 +47,12 @@ class UndoTurn:
     changes: dict[Path, FileChange] = field(default_factory=dict)  # insertion order = first touch
     bash: int = 0
     size: int = 0  # bytes held in `before` snapshots
+    before: str | None = None  # checkpoint commit taken when the turn began
+    after: str | None = None  # checkpoint commit taken when it ended; both set: the turn can be restored from them
+    skipped_large: tuple[str, ...] = ()  # files over the size cap that the turn made or changed (not restorable)
+    before_time: float | None = None  # `time.time()` when the `before` snapshot was done
+    large_before: tuple[str, ...] = ()  # files over the size cap at the `before` snapshot
+    exclude_changed: bool = False  # the turn changed the workspace's `.git/info/exclude`
 
 
 def _digest(data: bytes) -> bytes:
@@ -131,6 +139,38 @@ class UndoLog:
 
     def pop(self) -> UndoTurn | None:
         return self._stack.pop() if self._stack else None
+
+    def mark(
+        self,
+        before: str | None = None,
+        after: str | None = None,
+        skipped_large: tuple[str, ...] | None = None,
+        *,
+        before_time: float | None = None,
+        large_before: tuple[str, ...] | None = None,
+        exclude_changed: bool | None = None,
+    ) -> None:
+        """Record checkpoint facts on the turn in progress (a value left as None is not changed)."""
+        turn = self._current
+        if turn is None:
+            return
+        if before is not None:
+            turn.before = before
+        if after is not None:
+            turn.after = after
+        if skipped_large is not None:
+            turn.skipped_large = skipped_large
+        if before_time is not None:
+            turn.before_time = before_time
+        if large_before is not None:
+            turn.large_before = large_before
+        if exclude_changed is not None:
+            turn.exclude_changed = exclude_changed
+
+    @property
+    def current_before(self) -> str | None:
+        """The checkpoint commit the turn in progress began with, if one was taken."""
+        return self._current.before if self._current is not None else None
 
     def note_bash(self) -> None:
         if self._current is not None:
@@ -327,6 +367,32 @@ def restore_turn(turn: UndoTurn, workspace: Path) -> UndoResult:
         with contextlib.suppress(Exception):
             _rmdirs(change.created_dirs, root)
     return UndoResult(entries)
+
+
+OUTSIDE_NOTE = "Effects outside the workspace and running processes are not undone."
+NAMES_SHOWN = 20
+
+
+def checkpoint_notices(result: UndoResult, large_skipped: Sequence[str]) -> list[Notice]:
+    """The notices of a restore from checkpoints: counts, the skipped names (escaped, at most 20), and the note about
+    what an undo cannot reach. `large_skipped`: files over the checkpoint size cap that the turn made or changed;
+    each counts once, and not at all when the restore did put it back or delete it."""
+    restored = sum(1 for e in result.entries if e[0] == "restored")
+    deleted = sum(1 for e in result.entries if e[0] == "deleted")
+    handled = {name for kind, name, _ in result.entries if kind != "skipped"}
+    skipped = [name for kind, name, _ in result.entries if kind == "skipped"]
+    skipped += [name for name in large_skipped if name not in handled and name not in skipped]
+    if not (restored or deleted or skipped):
+        text = "Undid the last turn: nothing to restore"
+    else:
+        text = f"Undid the last turn: {restored} restored, {deleted} deleted"
+        if skipped:
+            names = ", ".join(escape(n) for n in skipped[:NAMES_SHOWN])
+            if len(skipped) > NAMES_SHOWN:
+                names += f", and {len(skipped) - NAMES_SHOWN} more"
+            text += f", {len(skipped)} skipped: {names}"
+    level: Literal["info", "warn"] = "warn" if skipped else "info"
+    return [Notice(level, text), Notice("info", OUTSIDE_NOTE)]
 
 
 def undo_notices(result: UndoResult, bash: int) -> list[Notice]:
