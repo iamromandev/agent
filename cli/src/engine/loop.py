@@ -696,7 +696,7 @@ class Agent:
                             calls.append(call)
                         case Done(prompt_tokens, completion_tokens):
                             total = prompt_tokens + completion_tokens
-                            emit(UsageUpdate(total, self.provider.context_window))
+                            emit(UsageUpdate(total, self.provider.context_window, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens))
                         case ProviderError(message):
                             failure = message
                             break  # report after the stream is closed: a cancel in aclose() must not repeat it
@@ -723,7 +723,7 @@ class Agent:
         tool = next((t for t in self.all_tools() if t.name == call.name), None)
         self._inflight = call.id
         label = tool.label(call.arguments) if tool else call.name
-        emit(ToolStarted(call.id, label, task=tool is not None and tool.name == "task"))
+        emit(ToolStarted(call.id, label, task=tool is not None and tool.name == "task", name=call.name, args=dict(call.arguments)))
         preview: Preview | None = None
         applied = False
         ran = False  # did the tool itself do its work? (not refused, denied or blocked first)

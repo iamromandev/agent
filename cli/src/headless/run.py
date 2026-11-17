@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import io
+import json
 import signal
 import sys
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -26,7 +29,7 @@ from src.engine.text import escape_display
 from src.engine.tools import default_tools
 from src.headless import EXIT_FAIL, EXIT_INT, EXIT_OK, EXIT_TERM, EXIT_USAGE, HeadlessOptions, UsageError
 from src.headless.approver import HeadlessApprover
-from src.headless.output import StderrSink, want_color, write_stdout
+from src.headless.output import JsonCollector, Outcome, StderrSink, StopReason, json_line, want_color, write_stdout
 from src.headless.prompt import build_prompt
 from src.runtime import Runtime, build_runtime
 
@@ -39,6 +42,62 @@ def _raise_terminated(number: int, frame: object) -> None:
     raise _Terminated
 
 
+@dataclass
+class _State:
+    """What the exit paths leave for `_finish`: how the run ended, the reply and what the result object reports."""
+
+    json_mode: bool
+    collector: JsonCollector | None = None
+    outcome: Outcome | None = None
+    reply: str = ""
+    session_id: str | None = None
+    model: str | None = None
+    redact: Callable[[str], str] = lambda text: text  # the runtime's redactor once there is one
+    finished: bool = False
+
+
+def _fanout(*sinks: Callable[[AgentEvent], None]) -> Callable[[AgentEvent], None]:
+    def sink(event: AgentEvent) -> None:
+        for each in sinks:
+            each(event)
+
+    return sink
+
+
+def _finish(state: _State) -> int:
+    """Write the one final JSON object (JSON modes only; text mode wrote its reply already) and return the exit code.
+    Whatever goes wrong while building or writing it, a minimal ASCII result is written instead."""
+    outcome = state.outcome or Outcome(EXIT_FAIL, "error", "internal error: no outcome")
+    if state.json_mode and state.collector is not None and not state.finished:
+        for attempt in range(3):
+            try:
+                if attempt == 0:
+                    state.collector.flush()
+                    write_stdout(json_line(state.collector.result(outcome, state.reply, state.session_id, state.model)))
+                else:
+                    write_stdout(_minimal(outcome))
+                state.finished = True
+                break
+            except (Exception, KeyboardInterrupt, _Terminated):
+                continue
+    return outcome.exit_code
+
+
+def _minimal(outcome: Outcome) -> str:
+    error = outcome.error if outcome.exit_code else None
+    return json.dumps(
+        {
+            "type": "result",
+            "is_error": outcome.exit_code != 0,
+            "exit_code": outcome.exit_code,
+            "stop_reason": outcome.stop_reason,
+            "error": error,
+        },
+        ensure_ascii=True,
+        separators=(",", ":"),
+    )
+
+
 def run_headless(
     workspace: Path,
     opts: HeadlessOptions,
@@ -49,7 +108,13 @@ def run_headless(
 ) -> int:
     """Run one turn for `opts` in `workspace` and return the exit code. `provider` replaces Ollama, `connector` the
     MCP servers' and `stdin` the process's (bytes; all for tests)."""
-    sink = StderrSink(sys.stderr, opts.quiet, want_color(sys.stderr))
+    json_mode = opts.output != "text"
+    state = _State(json_mode)
+    stderr_sink = StderrSink(sys.stderr, opts.quiet or json_mode, want_color(sys.stderr))
+    sink: Callable[[AgentEvent], None] = stderr_sink
+    if json_mode:
+        state.collector = JsonCollector(None, lambda text: state.redact(text), streaming=opts.output == "stream-json")
+        sink = _fanout(stderr_sink, state.collector)
     rt: Runtime | None = None
     started: list[bool] = []  # set once the loop that owns the runtime's connections has taken over
     previous = None
@@ -66,6 +131,9 @@ def run_headless(
             connector=connector,
             trust_project_mcp=opts.trust_project,
         )
+        state.redact = _redactor(rt)
+        model = getattr(rt.provider, "model", None)
+        state.model = model if isinstance(model, str) else None
         prompt = build_prompt(opts.prompt, *_stdin(stdin), rt.commands, BUILTINS)
         rt.permissions.rules.add_run_allow(allow)
         if opts.trust_project:
@@ -77,24 +145,57 @@ def run_headless(
             sink(Notice("warn", warning))
         for note in (*rt.model_notices, *rt.guard.info):
             sink(Notice("info", note))
-        return asyncio.run(_main(rt, opts, prompt, sink, started))
+        asyncio.run(_main(rt, opts, prompt, sink, started, state))
     except UsageError as exc:
+        state.outcome = Outcome(EXIT_USAGE, "usage", str(exc))
         print(f"agent: {escape_display(str(exc))}", file=sys.stderr)
-        return EXIT_USAGE
     except _Terminated:
-        return EXIT_TERM
+        state.outcome = Outcome(EXIT_TERM, "interrupted")
     except KeyboardInterrupt:  # SIGINT before the loop took over: nothing was started that needs stopping
-        return EXIT_INT
+        state.outcome = Outcome(EXIT_INT, "interrupted")
     except Exception as exc:  # never a traceback: one line and exit 1
+        state.outcome = Outcome(EXIT_FAIL, "error", f"internal error: {exc}")
         print(f"agent: internal error: {escape_display(str(exc))}", file=sys.stderr)
-        return EXIT_FAIL
     finally:
-        if previous is not None:
-            signal.signal(signal.SIGTERM, previous)
-        if rt is not None:
-            if not started:
-                rt.abort()  # the loop never ran, so nothing closed the clients
-            rt.kill_all()  # after `close` ran in the loop, this only covers what it could not stop
+        # From here to the end of the write a late signal is ignored: it must neither lose the result nor
+        # change the exit code (the outcome's); SIGKILL is the one thing that can still cut the result short.
+        saved = _ignore_signals()
+        try:
+            if previous is not None:
+                saved[signal.SIGTERM] = previous  # what the caller had, not our launch-time handler
+            if rt is not None:
+                for step in (rt.abort, rt.kill_all) if not started else (rt.kill_all,):
+                    with contextlib.suppress(_Terminated, KeyboardInterrupt):
+                        step()  # abort: the loop never ran; kill_all: only what `close` could not stop
+            try:
+                code = _finish(state)
+            except (_Terminated, KeyboardInterrupt):
+                code = state.outcome.exit_code if state.outcome else EXIT_FAIL
+        finally:
+            _restore_signals(saved)
+    return code
+
+
+def _ignore_signals() -> dict[int, object]:
+    """Ignore SIGINT and SIGTERM (main thread only); what was installed before, to hand to `_restore_signals`."""
+    if threading.current_thread() is not threading.main_thread():
+        return {}
+    return {number: signal.signal(number, signal.SIG_IGN) for number in (signal.SIGINT, signal.SIGTERM)}
+
+
+def _restore_signals(saved: dict[int, object]) -> None:
+    for number, handler in saved.items():
+        signal.signal(number, handler)  # ty: ignore[invalid-argument-type]
+
+
+def _redactor(rt: Runtime) -> Callable[[str], str]:
+    def redact(text: str) -> str:
+        try:
+            return rt.guard.redactor.redact(text)[0]
+        except Exception:
+            return ""  # fail closed, like the loop's hook text
+
+    return redact
 
 
 def _stdin(given: BinaryIO | None) -> tuple[BinaryIO, bool]:
@@ -138,12 +239,12 @@ def _parse_allow(texts: tuple[str, ...]) -> list[Rule]:
 
 
 async def _main(
-    rt: Runtime, opts: HeadlessOptions, prompt: str, sink: Callable[[AgentEvent], None], started: list[bool]
-) -> int:
+    rt: Runtime, opts: HeadlessOptions, prompt: str, sink: Callable[[AgentEvent], None], started: list[bool], state: _State
+) -> None:
     """`_run` as a task that SIGINT and SIGTERM cancel: its `finally` then closes the recorder and the runtime
     (every child process group), and the exit code is 128 + the signal."""
     loop = asyncio.get_running_loop()
-    task = asyncio.ensure_future(_run(rt, opts, prompt, sink, started))
+    task = asyncio.ensure_future(_run(rt, opts, prompt, sink, started, state))
     got: list[int] = []
 
     def stop(number: int) -> None:
@@ -153,26 +254,29 @@ async def _main(
     for number in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(number, stop, number)
     try:
-        code = await task
+        await task
     except asyncio.CancelledError:
         if not got:
             raise
-        code = EXIT_FAIL
     finally:
         for number in (signal.SIGINT, signal.SIGTERM):
             loop.remove_signal_handler(number)
-    return (EXIT_INT if got[0] == signal.SIGINT else EXIT_TERM) if got else code
+    if got:
+        state.outcome = Outcome(EXIT_INT if got[0] == signal.SIGINT else EXIT_TERM, "interrupted")
 
 
 async def _run(
-    rt: Runtime, opts: HeadlessOptions, prompt: str, sink: Callable[[AgentEvent], None], started: list[bool]
-) -> int:
+    rt: Runtime, opts: HeadlessOptions, prompt: str, sink: Callable[[AgentEvent], None], started: list[bool], state: _State
+) -> None:
     started.append(True)
     status: list[str] = []
+    errors: list[str] = []  # the error notices of the turn: the last one says why it failed
 
     def emit(event: AgentEvent) -> None:
         if isinstance(event, TurnEnded):
             status.append(event.status)
+        elif isinstance(event, Notice) and event.level == "error":
+            errors.append(event.text)
         sink(event)
 
     try:
@@ -180,30 +284,48 @@ async def _run(
         try:
             if (problem := await rt.provider.check()) is not None:
                 sink(Notice("error", problem))
-                return EXIT_FAIL
+                state.outcome = Outcome(EXIT_FAIL, "error", problem)
+                return
             source = await _open_session(rt, agent, opts, sink)
+            if state.collector is not None:
+                state.collector.start(_session_id(agent), state.model, str(rt.root))
             await _start_mcp(rt, sink)
             await agent.session_started(source, sink)
             decision = await agent.prompt_hooks(prompt, sink)
             if decision.blocked:
-                return EXIT_FAIL  # the hook's line, with its reason, is already on stderr
+                state.outcome = Outcome(EXIT_FAIL, "blocked", decision.reason)  # the hook's line is already on stderr
+                return
             await agent.run_turn(prompt, emit, context=decision.context)
         except UsageError:
             raise
         except Exception as exc:  # an internal error is exit 1 with the message, never a traceback
             sink(Notice("error", f"internal error: {exc}"))
-            return EXIT_FAIL
+            state.outcome = Outcome(EXIT_FAIL, "error", f"internal error: {exc}")
+            return
         finally:
             close_recorder(agent.recorder)  # flush what is queued before the id is reported
+            state.session_id = _session_id(agent)
         done = status[-1:] == ["done"]
         if done:
-            write_stdout(_final_text(agent))
-        session_id = getattr(agent.recorder, "session_id", "")
-        if isinstance(session_id, str) and session_id:
-            sink(Notice("info", f"session {session_id} saved"))
-        return EXIT_OK if done else EXIT_FAIL
+            state.reply = _final_text(agent)
+            state.outcome = Outcome(EXIT_OK, "done")
+        else:
+            reason: StopReason = "error"
+            if status and status[-1] in ("step_limit", "interrupted"):
+                reason = status[-1]
+            state.outcome = Outcome(EXIT_FAIL, reason, errors[-1] if errors and reason == "error" else None)
+        if not state.json_mode:
+            if done:
+                write_stdout(state.reply)
+            if state.session_id:
+                sink(Notice("info", f"session {state.session_id} saved"))
     finally:
         await rt.close()
+
+
+def _session_id(agent: Agent) -> str | None:
+    session_id = getattr(agent.recorder, "session_id", "")
+    return session_id if isinstance(session_id, str) and session_id else None
 
 
 async def _start_mcp(rt: Runtime, sink: Callable[[AgentEvent], None]) -> None:

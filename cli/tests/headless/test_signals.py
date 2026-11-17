@@ -174,3 +174,30 @@ def test_a_signal_while_an_mcp_server_starts_leaves_no_server_process(tmp_path: 
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+@pytest.mark.parametrize(("sig", "code"), [(signal.SIGINT, 130), (signal.SIGTERM, 143)])
+@pytest.mark.parametrize("mode", ["json", "stream-json"])
+def test_a_signal_in_json_mode_ends_with_one_interrupted_result(
+    tmp_path: Path, ollama: ThreadingHTTPServer, sig: signal.Signals, code: int, mode: str
+) -> None:
+    pidfile = tmp_path / "pid"
+    command = f"echo $$ > {pidfile}; exec sleep 30"
+    proc = _launch(tmp_path, ollama, "--allow", f"bash({command})", "--output", mode, command=command)
+    try:
+        pid = _wait_for(pidfile)
+
+        proc.send_signal(sig)
+        out, err = proc.communicate(timeout=20)
+
+        assert proc.returncode == code, err.decode()
+        lines = [json.loads(line) for line in out.decode().splitlines()]
+        last = lines[-1]
+        assert (last["type"], last["exit_code"], last["stop_reason"], last["is_error"]) == ("result", code, "interrupted", True)
+        assert [line["type"] for line in lines].count("result") == 1
+        assert [t["name"] for t in last["tool_calls"]] == ["bash"] and last["tool_calls"][0]["summary"] == "interrupted"
+        assert _gone(pid)
+        assert b"Traceback" not in err
+    finally:
+        if proc.poll() is None:
+            proc.kill()

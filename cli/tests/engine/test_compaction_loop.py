@@ -203,7 +203,7 @@ async def test_nothing_happens_below_the_threshold(ctx: ToolContext) -> None:
     assert sent_history(provider, 0)[:12] == history
     assert recorder.compactions == []
     assert events.notices() == []
-    assert events.of(UsageUpdate) == [UsageUpdate(15, WINDOW)]  # only the model's own report
+    assert events.of(UsageUpdate) == [UsageUpdate(15, WINDOW, prompt_tokens=10, completion_tokens=5)]  # only the model's own report
 
 
 async def test_a_compaction_notice_and_an_estimated_usage_update_follow_pruning(ctx: ToolContext) -> None:

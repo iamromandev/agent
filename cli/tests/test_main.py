@@ -303,3 +303,35 @@ def test_a_prompt_after_double_dash_is_a_usage_error_naming_the_problem(headless
     assert result.exit_code == 2
     assert "--" in result.output and "-p" in result.output and "prompt" in result.output
     assert headless == []
+
+
+def test_output_defaults_to_text_and_is_passed_to_headless(headless: Headless) -> None:
+    runner.invoke(app, ["-p", "go"])
+    assert _opts(headless).output == "text"
+    runner.invoke(app, ["-p", "go", "--output", "text"])
+    assert _opts(headless).output == "text"
+
+
+@pytest.mark.parametrize("value", ["json", "stream-json"])
+def test_output_json_modes_are_passed_to_headless(headless: Headless, value: str) -> None:
+    assert runner.invoke(app, ["-p", "go", "--output", value]).exit_code == 0
+    assert _opts(headless).output == value
+
+
+def test_an_unknown_output_value_is_a_usage_error(headless: Headless) -> None:
+    result = runner.invoke(app, ["-p", "go", "--output", "xml"])
+
+    assert result.exit_code == 2
+    assert headless == []
+
+
+def test_output_json_without_p_is_a_usage_error(headless: Headless, opened: list) -> None:
+    result = runner.invoke(app, ["--output", "json"])
+
+    assert result.exit_code == 2
+    assert opened == [] and headless == []
+
+
+def test_output_text_without_p_is_accepted(opened: list) -> None:
+    assert runner.invoke(app, ["--output", "text"]).exit_code == 0
+    assert len(opened) == 1

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field
 from typing import Literal
 
 from src.engine.todo import TodoItem
@@ -20,6 +20,8 @@ class ToolStarted:
     call_id: str
     label: str
     task: bool = False  # a `task` call: the UI shows it as a block that unfolds while it runs
+    name: str = ""  # the tool name as called
+    args: Mapping[str, object] = field(default_factory=dict)  # the raw call arguments (not redacted)
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,8 @@ class UsageUpdate:
     used: int
     window: int
     estimated: bool = False  # True: a guess from text length, not a count from the model; shown with a "~"
+    prompt_tokens: int = 0  # set only on the update that follows a provider Done
+    completion_tokens: int = 0
 
 
 @dataclass(frozen=True)
