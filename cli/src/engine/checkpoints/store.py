@@ -6,6 +6,7 @@ own index file and no user config, hooks, attributes or filters (see `git.py`)."
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import hashlib
 import os
@@ -21,7 +22,11 @@ from src.engine.text import escape
 
 FILE_CAP = 10 * 1024 * 1024
 BLOB_LIMIT = 128 * 1024 * 1024  # content `read_blobs` holds at once (git's output and the blobs are two copies)
-ATTRIBUTES = "* -filter -text -eol -ident -working-tree-encoding -diff -merge\n"
+# `diff` is set, not `-diff`: git then treats every file as text (so `numstat` counts every file) and, because a set
+# attribute carries no value, selects no `diff.<driver>` (no `command`, no `textconv`), whatever the workspace's own
+# `.gitattributes` say: this file wins over them.
+ATTRIBUTES = "* -filter -text -eol -ident -working-tree-encoding diff -merge\n"
+READ_CHUNK = 64 * 1024
 AGENT_FILES = frozenset({".agent/settings.json", ".agent/mcp.json"})
 AGENT_FOLDERS = (".agent/commands/", ".agent/skills/")
 OFF_SUFFIX = "/undo restores write/edit changes only"
@@ -358,30 +363,103 @@ class CheckpointStore:
         )  # fmt: skip
         return parse_diff(out)
 
+    async def numstat(
+        self, before: str, after: str, skip: Sequence[str] = ()
+    ) -> dict[str, tuple[int, int] | None]:
+        """Lines added and removed per path between two snapshots, without the paths in `skip` (taken literally). The
+        shadow repository's `diff` attribute makes git count binary files as text too; None when git still reports `-`.
+        Raises GitError (also GitTimeout) when git fails."""
+        args = ["diff-tree", "-r", "-z", "--no-renames", "--numstat", before, after]
+        if skip:
+            args += ["--", *(f":(exclude,literal){path}" for path in skip)]
+        out = await self._started().run(*args, timeout=self._timeout, tree=False)
+        counts: dict[str, tuple[int, int] | None] = {}
+        for record in out.split(b"\0"):
+            if not record:
+                continue
+            parts = record.split(b"\t", 2)  # the path may hold tabs: only the first two split
+            if len(parts) != 3:
+                raise GitError(f"unexpected diff-tree output: {escape(record.decode('utf-8', 'replace'))}")
+            added, removed, path = parts
+            counts[os.fsdecode(path)] = None if b"-" in (added, removed) else (int(added), int(removed))
+        return counts
+
+    async def blob_sizes(self, shas: Sequence[str]) -> dict[str, int]:
+        """The size in bytes of each blob, by sha, without reading any content (`cat-file --batch-check`). Raises
+        GitError for an unknown sha or an object that is not a blob."""
+        wanted = list(dict.fromkeys(shas))
+        if not wanted:
+            return {}
+        request = "".join(f"{s}\n" for s in wanted).encode()
+        checked = await self._started().run(
+            "cat-file", "--batch-check", stdin=request, timeout=self._timeout, tree=False
+        )
+        lines = checked.split(b"\n")
+        if len(lines) <= len(wanted):
+            raise GitError("cat-file --batch-check answered too few lines")
+        sizes: dict[str, int] = {}
+        for sha, line in zip(wanted, lines, strict=False):  # one line per sha, then the empty rest
+            header = line.split()
+            if len(header) != 3 or header[1] != b"blob":
+                raise GitError(f"cannot read blob {escape(sha)}")
+            sizes[sha] = int(header[2])
+        return sizes
+
+    async def binary_blobs(self, shas: Sequence[str]) -> set[str]:
+        """The blobs that hold a NUL byte or are not UTF-8, anywhere in them. The content is read in one
+        `cat-file --batch` and only looked at, chunk by chunk, never kept: the cost is git's output and a scan, so the
+        caller keeps the blobs it asks about small (`blob_sizes`)."""
+        wanted = list(dict.fromkeys(shas))
+        if not wanted:
+            return set()
+
+        async def scan(stream: asyncio.StreamReader) -> set[str]:
+            found: set[str] = set()
+            for sha in wanted:
+                header = (await stream.readline()).split()
+                if len(header) != 3 or header[1] != b"blob":
+                    raise GitError(f"cannot read blob {escape(sha)}")
+                remaining = int(header[2])
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                binary = False
+                while remaining:
+                    chunk = await stream.read(min(remaining, READ_CHUNK))
+                    if not chunk:
+                        raise GitError("cat-file ended before the blob did")
+                    remaining -= len(chunk)
+                    if binary:
+                        continue
+                    try:
+                        binary = b"\0" in chunk
+                        decoder.decode(chunk, final=remaining == 0)
+                    except UnicodeDecodeError:
+                        binary = True
+                await stream.readexactly(1)  # the newline after the content
+                if binary:
+                    found.add(sha)
+            return found
+
+        return await self._started().stream(
+            "cat-file", "--batch", stdin="".join(f"{s}\n" for s in wanted).encode(),
+            consume=scan, timeout=self._timeout, tree=False,
+        )  # fmt: skip
+
     async def read_blobs(self, shas: Sequence[str], *, limit: int = BLOB_LIMIT) -> dict[str, bytes]:
         """The content of each blob, by sha, in one `cat-file --batch`. Raises GitError for an unknown sha.
 
-        The sizes are asked first (`--batch-check`, no content): blobs are taken in order while their total stays within
+        The sizes are asked first (`blob_sizes`, no content): blobs are taken in order while their total stays within
         `limit`, and the rest are left out of the result (the restore skips those paths as too large)."""
         wanted = list(dict.fromkeys(shas))
         if not wanted:
             return {}
         git = self._started()
-        request = "".join(f"{s}\n" for s in wanted).encode()
-        checked = await git.run("cat-file", "--batch-check", stdin=request, timeout=self._timeout, tree=False)
-        lines = checked.split(b"\n")
-        if len(lines) <= len(wanted):
-            raise GitError("cat-file --batch-check answered too few lines")
+        sizes = await self.blob_sizes(wanted)
         chosen: list[str] = []
         total = 0
-        for sha, line in zip(wanted, lines, strict=False):  # one line per sha, then the empty rest
-            header = line.split()
-            if len(header) != 3 or header[1] != b"blob":
-                raise GitError(f"cannot read blob {escape(sha)}")
-            size = int(header[2])
-            if total + size <= limit:
+        for sha in wanted:
+            if total + sizes[sha] <= limit:
                 chosen.append(sha)
-                total += size
+                total += sizes[sha]
         if not chosen:
             return {}
         out = await git.run(

@@ -59,14 +59,22 @@ def _digest(data: bytes) -> bytes:
     return hashlib.sha256(data).digest()
 
 
-def _read_nofollow(path: Path) -> bytes:
-    """The bytes of a regular file, never through a symlink."""
+def read_nofollow(path: Path, limit: int | None = None) -> bytes:
+    """The bytes of a regular file, never through a symlink. With `limit`, a file over it (by `fstat`, and by what is
+    read if it grows meanwhile) is an OSError and nothing more than `limit` bytes is held."""
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
             raise OSError("not a regular file")
+        if limit is not None and info.st_size > limit:
+            raise OSError("too large")
         chunks: list[bytes] = []
+        total = 0
         while chunk := os.read(fd, 1 << 20):
+            total += len(chunk)
+            if limit is not None and total > limit:
+                raise OSError("too large")
             chunks.append(chunk)
         return b"".join(chunks)
     finally:
@@ -140,6 +148,10 @@ class UndoLog:
     def pop(self) -> UndoTurn | None:
         return self._stack.pop() if self._stack else None
 
+    def peek(self) -> UndoTurn | None:
+        """The newest finished turn, left in place."""
+        return self._stack[-1] if self._stack else None
+
     def mark(
         self,
         before: str | None = None,
@@ -210,7 +222,7 @@ class UndoLog:
             change.too_large = True
             return
         try:
-            change.before = _read_nofollow(path)
+            change.before = read_nofollow(path)
         except OSError as exc:
             change.broken = _reason(exc)
             return

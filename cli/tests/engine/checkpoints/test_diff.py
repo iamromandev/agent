@@ -110,3 +110,111 @@ async def test_diff_before_any_snapshot_raises(store: CheckpointStore) -> None:
 
 def test_diff_entry_is_a_value() -> None:
     assert DiffEntry("a", 0, None, 0o100644, "x") == DiffEntry("a", 0, None, 0o100644, "x")
+
+
+async def test_numstat_counts_added_and_removed_lines_per_path(store: CheckpointStore, workspace: Path) -> None:
+    (workspace / "edit.txt").write_text("a\nb\nc\n")
+    (workspace / "gone.txt").write_text("x\ny\n")
+    first = await store.snapshot()
+    (workspace / "edit.txt").write_text("a\nB\nc\nd\n")
+    (workspace / "gone.txt").unlink()
+    (workspace / "new.txt").write_text("1\n2\n3\n")
+    second = await store.snapshot()
+    assert first is not None and second is not None
+
+    counts = await store.numstat(first.commit, second.commit)
+
+    assert counts == {"edit.txt": (2, 1), "gone.txt": (0, 2), "new.txt": (3, 0)}
+
+
+async def test_numstat_counts_a_binary_file_as_text_because_the_diff_attribute_is_set(store: CheckpointStore, workspace: Path) -> None:
+    first = await store.snapshot()
+    (workspace / "img.bin").write_bytes(b"\x89PNG\x00\x01\n\x02\n")
+    second = await store.snapshot()
+    assert first is not None and second is not None
+
+    counts = await store.numstat(first.commit, second.commit)
+
+    assert counts["img.bin"] is not None
+
+
+async def test_numstat_keeps_odd_path_names_intact(store: CheckpointStore, workspace: Path) -> None:
+    first = await store.snapshot()
+    (workspace / "we ird\tname\n.txt").write_text("a\n")
+    second = await store.snapshot()
+    assert first is not None and second is not None
+
+    assert await store.numstat(first.commit, second.commit) == {"we ird\tname\n.txt": (1, 0)}
+
+
+async def test_numstat_before_any_snapshot_raises(store: CheckpointStore) -> None:
+    with pytest.raises(GitError):
+        await store.numstat("a" * 40, "b" * 40)
+
+
+async def commits_with(store: CheckpointStore, workspace: Path, files: dict[str, bytes]) -> tuple[str, str]:
+    first = await store.snapshot()
+    for name, data in files.items():
+        (workspace / name).write_bytes(data)
+    second = await store.snapshot()
+    assert first is not None and second is not None
+    return first.commit, second.commit
+
+
+async def test_numstat_leaves_out_the_skipped_paths_and_takes_them_literally(
+    store: CheckpointStore, workspace: Path
+) -> None:
+    before, after = await commits_with(
+        store, workspace, {"a.txt": b"1\n", "[ab].txt": b"1\n2\n", "keep.txt": b"1\n2\n3\n"}
+    )
+
+    counts = await store.numstat(before, after, skip=["[ab].txt"])
+
+    assert counts == {"a.txt": (1, 0), "keep.txt": (3, 0)}
+
+
+async def test_numstat_skipping_every_path_is_empty_not_everything(store: CheckpointStore, workspace: Path) -> None:
+    before, after = await commits_with(store, workspace, {"a.txt": b"1\n"})
+
+    assert await store.numstat(before, after, skip=["a.txt"]) == {}
+
+
+async def test_blob_sizes_are_read_without_the_content(store: CheckpointStore, workspace: Path) -> None:
+    before, after = await commits_with(store, workspace, {"a.txt": b"12345", "e.txt": b""})
+    entries = {e.path: e for e in await store.diff(before, after)}
+    shas = [s for s in (entries["a.txt"].new_sha, entries["e.txt"].new_sha) if s]
+
+    sizes = await store.blob_sizes(shas)
+
+    assert sizes == {entries["a.txt"].new_sha: 5, entries["e.txt"].new_sha: 0}
+
+
+async def test_blob_sizes_of_an_unknown_sha_raises(store: CheckpointStore, workspace: Path) -> None:
+    await two_commits(store, workspace)
+
+    with pytest.raises(GitError):
+        await store.blob_sizes(["0123456789abcdef0123456789abcdef01234567"])
+
+
+async def test_binary_blobs_are_the_ones_with_a_nul_or_invalid_utf8_anywhere(
+    store: CheckpointStore, workspace: Path
+) -> None:
+    chunk = 64 * 1024
+    files = {
+        "text.txt": "caf\u00e9\n".encode(),
+        "empty.txt": b"",
+        "nul.bin": b"\x89PNG\x00\x01",
+        "latin1.txt": b"caf\xe9\n",
+        "late-nul.bin": b"a" * (3 * chunk) + b"\x00",
+        "straddle.txt": b"a" * (chunk - 1) + "\u00e9".encode() * 10,  # a 2-byte character across the read boundary
+    }
+    before, after = await commits_with(store, workspace, files)
+    entries = {e.path: e.new_sha for e in await store.diff(before, after)}
+
+    binary = await store.binary_blobs([sha for sha in entries.values() if sha])
+
+    assert {name for name, sha in entries.items() if sha in binary} == {"nul.bin", "latin1.txt", "late-nul.bin"}
+
+
+async def test_binary_blobs_of_nothing_runs_no_git(store: CheckpointStore) -> None:
+    assert await store.binary_blobs([]) == set()

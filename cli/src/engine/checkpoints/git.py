@@ -9,10 +9,13 @@ import re
 import shutil
 import signal
 import subprocess
-from collections.abc import Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from pathlib import Path
+from typing import TypeVar
 
 from src.engine.process import kill_group
+
+T = TypeVar("T")
 
 GIT_TIMEOUT = 5.0
 MIN_GIT = (2, 20)
@@ -117,6 +120,24 @@ class GitRunner:
         ]  # fmt: skip
         self._procs: set[asyncio.subprocess.Process] = set()
 
+    async def _spawn(
+        self, args: Sequence[str], *, piped: bool, tree: bool, work: Path | None, options: Sequence[str]
+    ) -> asyncio.subprocess.Process:
+        folder = work or self._workspace
+        env = {**self._env, "GIT_WORK_TREE": str(folder)} if tree else dict(self._env)
+        return await asyncio.create_subprocess_exec(
+            self._git,
+            *self._options,
+            *options,
+            *args,
+            stdin=asyncio.subprocess.PIPE if piped else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+            cwd=folder,
+            start_new_session=True,
+        )
+
     async def run(
         self,
         *args: str,
@@ -128,20 +149,7 @@ class GitRunner:
     ) -> bytes:
         """stdout of `git <args>`, with `work` (default: the workspace) as work tree and current folder. Raises
         GitError on a non-zero exit and GitTimeout (group killed) past `timeout`."""
-        folder = work or self._workspace
-        env = {**self._env, "GIT_WORK_TREE": str(folder)} if tree else dict(self._env)
-        proc = await asyncio.create_subprocess_exec(
-            self._git,
-            *self._options,
-            *options,
-            *args,
-            stdin=asyncio.subprocess.PIPE if stdin is not None else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=env,
-            cwd=folder,
-            start_new_session=True,
-        )
+        proc = await self._spawn(args, piped=stdin is not None, tree=tree, work=work, options=options)
         self._procs.add(proc)
         try:
             try:
@@ -158,6 +166,56 @@ class GitRunner:
             text = err.decode("utf-8", "replace").strip()[:STDERR_LIMIT]
             raise GitError(text or f"git exited with {proc.returncode}")
         return out
+
+    async def stream(
+        self,
+        *args: str,
+        stdin: bytes,
+        consume: Callable[[asyncio.StreamReader], Awaitable[T]],
+        timeout: float = GIT_TIMEOUT,
+        tree: bool = True,
+    ) -> T:
+        """Like `run`, but stdout goes through `consume` as it arrives instead of being collected, so the caller keeps
+        only what it needs of a large output. Same errors; the group is killed when `consume` raises."""
+        proc = await self._spawn(args, piped=True, tree=tree, work=None, options=())
+        self._procs.add(proc)
+        assert proc.stdin is not None and proc.stdout is not None and proc.stderr is not None
+        stdin_pipe, stdout_pipe, stderr_pipe = proc.stdin, proc.stdout, proc.stderr
+
+        async def feed() -> None:
+            with contextlib.suppress(ConnectionError):  # git quit early: its exit code says why
+                stdin_pipe.write(stdin)
+                await stdin_pipe.drain()
+                stdin_pipe.close()
+
+        async def go() -> tuple[T, bytes]:
+            feeding = asyncio.create_task(feed())
+            reading = asyncio.create_task(stderr_pipe.read())
+            try:
+                result = await consume(stdout_pipe)
+                await feeding
+                err = await reading
+                await proc.wait()
+                return result, err
+            finally:
+                feeding.cancel()
+                reading.cancel()
+
+        try:
+            try:
+                result, err = await asyncio.wait_for(go(), timeout)
+            except TimeoutError:
+                await kill_group(proc)
+                raise GitTimeout(f"git {args[0] if args else ''} took longer than {timeout:g} s") from None
+            except BaseException:
+                await asyncio.shield(kill_group(proc))
+                raise
+        finally:
+            self._procs.discard(proc)
+        if proc.returncode != 0:
+            text = err.decode("utf-8", "replace").strip()[:STDERR_LIMIT]
+            raise GitError(text or f"git exited with {proc.returncode}")
+        return result
 
     def kill_all(self) -> None:
         """Synchronous: SIGKILL every git group still running (the quit path)."""

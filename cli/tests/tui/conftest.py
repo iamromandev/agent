@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 from src.engine import Agent
 from src.engine.approval import Approver
+from src.engine.checkpoints.store import CheckpointStore
 from src.engine.commands.loader import Commands
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.setup import Hooks
@@ -109,6 +110,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         catalog: FakeCatalog | None = None,
         window_cap: int = 8192,
         launch_notices: Sequence[str] = (),
+        checkpoints: CheckpointStore | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -139,6 +141,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 task_tools=read_only_tools(task_fetcher) if task else None,
                 rules=permissions,
                 hooks=hooks,
+                checkpoints=checkpoints,
             )
 
         return AgentApp(
