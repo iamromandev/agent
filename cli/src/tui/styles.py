@@ -20,6 +20,9 @@ ACCENT = Style(color="cyan")
 DIM = Style(dim=True)
 OK = Style(color="green")
 ERROR = Style(color="red")
+MODIFIED = Style(color="yellow")  # /diff: the status letters and the added/removed lines reuse OK and ERROR
+TYPE_CHANGED = Style(color="magenta")
+PLAIN = Style()
 NOTICE = {
     "info": Style(dim=True),
     "warn": Style(color="yellow"),

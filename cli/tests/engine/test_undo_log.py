@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 
 import pytest
-from src.engine.undo import UndoLog
+from src.engine.undo import UndoLog, read_nofollow
 
 
 @pytest.fixture
@@ -301,7 +301,7 @@ def test_after_hashes_a_too_large_file_without_reading_it_whole(
     def refuse(path: Path) -> bytes:
         raise AssertionError("the whole file was read into memory")
 
-    monkeypatch.setattr("src.engine.undo._read_nofollow", refuse)
+    monkeypatch.setattr("src.engine.undo.read_nofollow", refuse)
 
     log.after(target)
 
@@ -360,3 +360,49 @@ def test_a_turn_starts_with_no_time_no_large_files_and_no_exclude_change(workspa
     turn = log.pop()
     assert turn is not None
     assert (turn.before_time, turn.large_before, turn.exclude_changed) == (None, (), False)
+
+
+def _newest(log: UndoLog) -> str | None:
+    turn = log.peek()
+    return turn.prompt if turn is not None else None
+
+
+def test_peek_returns_the_newest_finished_turn_without_removing_it(workspace: Path) -> None:
+    log = UndoLog(workspace)
+    assert log.peek() is None
+    log.begin(0, "one")
+    log.finish()
+    log.begin(2, "two")
+    assert _newest(log) == "one"  # a turn in progress is not finished
+    log.finish()
+
+    assert _newest(log) == "two" and _newest(log) == "two"
+    log.pop()
+    assert _newest(log) == "one"
+    log.clear()
+    assert log.peek() is None
+
+
+def test_read_nofollow_reads_a_regular_file_and_never_a_symlink(workspace: Path) -> None:
+    (workspace / "a.txt").write_bytes(b"data")
+    (workspace / "link").symlink_to("a.txt")
+
+    assert read_nofollow(workspace / "a.txt") == b"data"
+    with pytest.raises(OSError):
+        read_nofollow(workspace / "link")
+
+
+def test_read_nofollow_refuses_a_file_over_the_limit_before_reading_it(
+    workspace: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (workspace / "big.txt").write_bytes(b"x" * 100)
+    monkeypatch.setattr("os.read", lambda *a: pytest.fail("read a file over the limit"))
+
+    with pytest.raises(OSError, match="too large"):
+        read_nofollow(workspace / "big.txt", limit=99)
+
+
+def test_read_nofollow_with_a_limit_reads_a_file_that_fits(workspace: Path) -> None:
+    (workspace / "a.txt").write_bytes(b"x" * 100)
+
+    assert read_nofollow(workspace / "a.txt", limit=100) == b"x" * 100

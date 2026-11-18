@@ -82,9 +82,11 @@ from src.engine.session.records import model_notice
 from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalError, TerminalManager
 from src.engine.text import escape, escape_display
+from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
+from src.tui.screens.diff import DiffScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.screens.models import ModelPicker
 from src.tui.screens.permission_trust import PermissionTrustScreen
@@ -97,7 +99,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen)  # modal screens: the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, DiffScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -123,7 +125,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /help this help · /quit exit"
 )
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
@@ -431,11 +433,16 @@ class AgentApp(App[None]):
         if store.skipped:
             await self.query_one(Transcript).add_notice("warn", f"Skipped {len(store.skipped)} unreadable session file(s)")
 
+    def _cancel_diff(self) -> None:
+        """A turn, an undo or a switch is starting: a diff still being built would describe the turn before it."""
+        self.workers.cancel_group(self, "diff")
+
     def _begin_switch(self) -> bool:
         """Claim the right to switch sessions: False while a turn runs or another switch is under way."""
         if self._turn_active or self._switching:
             return False
         self._switching = True  # no message is accepted until the switch ends
+        self._cancel_diff()
         return True
 
     async def _close_old(self, old: Recorder | None) -> None:
@@ -925,6 +932,7 @@ class AgentApp(App[None]):
     def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> None:
         """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
         self._turn_active = True
+        self._cancel_diff()
         self._draft = draft
         self.query_one(StatusBar).busy = True
         self._turn_entered = False
@@ -969,6 +977,7 @@ class AgentApp(App[None]):
                     return
                 self.query_one(TodoPanel).show(self.agent.todos)
                 self._switching = True  # no message is accepted until the notice is back in the new transcript
+                self._cancel_diff()
                 handed = False  # the worker that runs the SessionStart hook releases the claim
                 try:
                     await self._close_old(old)
@@ -1010,12 +1019,15 @@ class AgentApp(App[None]):
                     await transcript.add_notice("warn", self._busy_text("/compact"))
                     return
                 self._turn_active = True
+                self._cancel_diff()
                 self._turn_entered = False
                 self.query_one(StatusBar).busy = True
                 # Like a turn: Esc cancels the "turn" group, and the same events reach the transcript.
                 self.run_worker(self._compact, group="turn")
             case "/undo":
                 await self._undo_command()
+            case "/diff":
+                await self._diff_command(rest)
             case "/model":
                 if not rest.strip():
                     if self._turn_active or self._switching:
@@ -1129,6 +1141,43 @@ class AgentApp(App[None]):
         ]
         return f"{HELP}\nCustom commands:\n" + "\n".join(lines)
 
+    async def _diff_command(self, rest: str) -> None:
+        transcript = self.query_one(Transcript)
+        if rest.strip():
+            await transcript.add_notice("warn", "/diff takes no arguments")
+            return
+        if self._turn_active or self._switching:
+            await transcript.add_notice("warn", self._busy_text("/diff"))
+            return
+        self.run_worker(self._diff, group="diff", exclusive=True, exit_on_error=False)
+
+    async def _diff(self) -> None:
+        """Build the change set off the UI path, then open the viewer (or say why not)."""
+        transcript = self.query_one(Transcript)
+        try:
+            diff = await self.agent.last_turn_diff()
+        except AgentBusy:
+            await transcript.add_notice("warn", self._busy_text("/diff"))
+            return
+        except Exception as error:
+            await transcript.add_notice("error", f"Could not build the diff: {escape(str(error)[:200])}")
+            return
+        if diff is None:
+            await transcript.add_notice("info", NOTHING)
+            return
+        if not diff.items:
+            await transcript.add_notice("info", NO_FILES)
+            if diff.fallback:
+                await transcript.add_notice("warn", BANNER)
+            return
+        # Keys and messages were handled while the list was built: look again, with no await before the push.
+        if self._turn_active or self._switching:
+            await transcript.add_notice("warn", self._busy_text("/diff"))
+            return
+        if not self.agent.is_current_diff(diff):  # a newer turn, an undo or a reset: this is not the turn to show
+            return
+        await self.push_screen(DiffScreen(diff, self.agent.load_diff_file))
+
     async def _undo_command(self) -> None:
         transcript = self.query_one(Transcript)
         if self._turn_active or self._switching:
@@ -1136,6 +1185,7 @@ class AgentApp(App[None]):
             return
         status = self.query_one(StatusBar)
         self._turn_active = True
+        self._cancel_diff()
         self._undoing = True
         status.busy = True
         events: list[AgentEvent] = []

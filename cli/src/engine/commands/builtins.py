@@ -17,5 +17,6 @@ BUILTINS: dict[str, str] = {
     "model": "switch model (/model <name>)",
     "init": "write AGENTS.md",
     "undo": "undo the last turn",
+    "diff": "show what the last turn changed",
     "quit": "exit",
 }

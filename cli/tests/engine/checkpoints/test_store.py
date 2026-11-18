@@ -197,6 +197,49 @@ async def test_the_users_repository_is_untouched_and_no_hook_or_filter_runs(
     assert attrs.stdout.strip() == "a.py: filter: unset"  # the workspace's .gitattributes cannot name a filter
 
 
+async def test_no_diff_driver_textconv_or_external_program_runs_for_diff_numstat_or_blob_reads(
+    workspace: Path, data: Path, tmp_path: Path
+) -> None:
+    ran = tmp_path / "ran"
+    ran.mkdir()
+    script = tmp_path / "evil.sh"
+    script.write_text(f"#!/bin/sh\ntouch {ran}/$1\ncat \"$2\" 2>/dev/null\n")
+    script.chmod(0o755)
+    subprocess.run(["git", "init", "-q"], cwd=workspace, check=True, capture_output=True)
+    config = (
+        f'[diff "evil"]\n\tcommand = {script} command\n\ttextconv = {script} textconv\n\tbinary = false\n'
+        f"[diff]\n\texternal = {script} external\n"
+    )
+    (workspace / ".git" / "config").write_text(config)
+    (workspace / ".gitattributes").write_text("* diff=evil\n*.bin -diff\n")
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".gitconfig").write_text(config)
+    env = {**os.environ, "HOME": str(home), "GIT_EXTERNAL_DIFF": f"{script} env", "GIT_DIFF_OPTS": "--unified=1"}
+    store = make_store(workspace, data, env)
+    (workspace / "a.txt").write_text("one\n")
+    first = await store.snapshot()
+    (workspace / "a.txt").write_text("two\nthree\n")
+    (workspace / "b.bin").write_bytes(b"\x00\x01")
+    second = await store.snapshot()
+    assert first is not None and second is not None
+
+    entries = await store.diff(first.commit, second.commit)
+    counts = await store.numstat(first.commit, second.commit)
+    shas = [e.new_sha for e in entries if e.new_sha]
+    await store.blob_sizes(shas)
+    await store.binary_blobs(shas)
+    await store.read_blobs(shas)
+
+    assert counts == {"a.txt": (2, 1), "b.bin": (1, 0)}  # `-diff` of the workspace did not hide the binary file either
+    assert list(ran.iterdir()) == []
+    attrs = subprocess.run(
+        ["git", "--git-dir", str(store.folder), "check-attr", "diff", "--cached", "--", "a.txt", "b.bin"],
+        capture_output=True, text=True, check=True, env={"PATH": os.environ["PATH"]},
+    )  # fmt: skip
+    assert attrs.stdout.split("\n")[:2] == ["a.txt: diff: set", "b.bin: diff: set"]
+
+
 async def test_the_shadow_folder_is_private_and_removed_on_close(workspace: Path, data: Path) -> None:
     (workspace / "a.py").write_text("a")
     store = make_store(workspace, data)

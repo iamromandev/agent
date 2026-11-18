@@ -68,6 +68,7 @@ from src.engine.tools.base import Prepared, Preview, Tool, ToolContext, ToolResu
 from src.engine.tools.paths import InvalidPath, resolve_path
 from src.engine.tools.skill import SkillTool
 from src.engine.tools.text import TOOL_OUTPUT_LIMIT, keep_sgr, truncate, truncate_ansi
+from src.engine.turn_diff import DiffItem, FileDiff, TurnDiff, build_diff, load_file
 from src.engine.undo import (
     NOTHING_TO_UNDO,
     SNAPSHOT_FILE_LIMIT,
@@ -606,6 +607,24 @@ class Agent:
         made = [name for name in snap.skipped_large if name not in self._large_before]
         changed = [name for name, seen in self._large_before.items() if file_signature(workspace, name) != seen]
         return tuple(dict.fromkeys([*made, *changed]))
+
+    async def last_turn_diff(self) -> TurnDiff | None:
+        """The files the newest undoable turn changed (the turn `/undo` would undo next), None when there is no turn.
+        Raises AgentBusy while a turn or an undo runs, and GitError when git fails and the file log has nothing."""
+        if self._busy:
+            raise AgentBusy("a turn is already running")
+        turn = self._undo.peek()
+        if turn is None:
+            return None
+        return await build_diff(turn, self._checkpoints, self.ctx.workspace)
+
+    def is_current_diff(self, diff: TurnDiff) -> bool:
+        """Is the turn `diff` was built from still the newest one? False after a newer turn, an undo or a reset."""
+        return self._undo.peek() is diff.turn
+
+    async def load_diff_file(self, diff: TurnDiff, item: DiffItem) -> FileDiff:
+        """The diff of one file of `diff`, read now."""
+        return await load_file(diff, item)
 
     async def undo(self, emit: EventSink) -> str | None:
         """Undo the last turn: restore its files, drop it from the history and the session. Returns its prompt.
