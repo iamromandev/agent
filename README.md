@@ -66,65 +66,247 @@ curl http://localhost:8000/health/check
 
 ## CLI
 
-```bash
-cd cli
-cp .env.example .env   # optional: AGENT_API_URL defaults to http://localhost:8000
-uv sync
-uv run agent health check
-uv run agent           # coding agent TUI; its workspace is the current directory, here `cli/` (needs a local Ollama; see cli/.env.example)
-uv run agent --continue # resume the latest saved session for this folder (also: --resume [id], /sessions inside the app)
-# /undo steps back one turn of this run: it restores files the turn's write/edit calls changed, deletes ones it created, skips files changed since, and puts the prompt back in the input box (bash and terminal effects are not undone)
-# ctrl+t opens the terminal pane (a `shell` tab in the workspace; again: back to the chat, again: hide it; ctrl+\ also goes back to the chat), ctrl+pageup / ctrl+pagedown switch its tabs, ctrl+w closes an exited terminal's tab (every other key goes to the terminal while it has focus, except ctrl+t, ctrl+\ and ctrl+pageup / ctrl+pagedown; macOS Terminal.app does not send ctrl+pageup / ctrl+pagedown, so there tabs are switched with the mouse); the model starts, reads and stops long-running processes there with term_start (needs approval), term_read and term_stop (needs approval); every terminal is stopped when the agent quits
-# MCP servers (stdio): list them in ~/.config/agent/mcp.json (or $XDG_CONFIG_HOME/agent/mcp.json) as {"servers": {"name": {"command": "uvx", "args": ["notes-mcp"], "env": {"KEY": "value"}}}}; each server starts in the background in the launch folder, its tools reach the model as mcp__<server>__<tool>, every call needs approval ("Always" covers that tool only) and is refused in plan mode, a call gives up after AGENT_MCP_TIMEOUT seconds (default 60), a server that has not started and listed its tools after AGENT_MCP_START_TIMEOUT seconds (default 120) is a warning, and every server is stopped when the agent quits; a broken file or server is a warning in the transcript, never a crash; a folder's own .agent/mcp.json (same format) adds project servers (one with the same name replaces the global one), which do not start until you trust them in a prompt that lists each name and full command line (the prompt escapes odd characters and notes that the files the commands run are not checked; the choice is remembered per folder under $XDG_DATA_HOME/agent/mcp-trust.json (not configurable from the folder) for that exact file content, so editing the file asks again; declining keeps them stopped for the run); /mcp lists every server with its source, status and, when ready, its tools
-# permission rules: ~/.config/agent/settings.json (or $XDG_CONFIG_HOME/agent/settings.json) and the folder's .agent/settings.json hold {"permissions": {"allow": ["bash(make test)", "bash(git status*)", "web_fetch(https://docs.python.org/*)", "mcp__notes__*", "write"], "deny": ["bash(rm -rf*)"]}}; a rule is a tool name (any call), tool(value) (the tool's key argument equals value: the command for bash and term_start, the URL for web_fetch; read, write, edit, glob, grep, task, term_read, term_stop and MCP tools have no such argument, so only their bare name works and a valued rule for one is a warning at launch and never applies), tool(prefix*) (starts with prefix; end a web_fetch prefix with a / after the host) or mcp__<server>__* (an MCP server whose name contains "__" or ends with "_" once odd characters are replaced by "_" is skipped with a warning, so no server can pose as another); an allow rule with a prefix only matches a bash or term_start command made of letters, digits, spaces and _ . / : = @ % + , - (quotes, ; && || | ` $( ( ) { } > < & * ? ~ ! # \ and a newline send the call to the dialog, which also covers the zsh and fish forms of running code from an argument); deny rules are matched the other way round: a deny prefix is looked for after leading whitespace and at the start of every command in the line (after ; & | a newline, a backtick, $( or a parenthesis), so bash(rm*) also refuses "echo hi; rm x", and bash(*) or a bare bash refuses every command; this is best effort, not a sandbox: env rm, sudo rm, /bin/rm, FOO=1 rm, time rm or a script that runs rm pass a deny rule, and a prefix allow rule such as find* or git* also accepts dangerous flags (find . -delete), so prefer exact or narrow rules; a web_fetch prefix rule is checked against the URL the model asked for, so it also covers a redirect to another public host; deny beats allow from any file and refuses without a dialog (also tools that need no approval, also in plan mode), then allow rules run without asking (never in plan mode), then this launch's "Always", then the dialog; the dialog's "Always here: <rule>" saves exactly that rule to .agent/settings.json (not offered for a command that contains *, which a rule would read as a prefix); a write or edit of .agent/settings.json or .agent/mcp.json always shows the dialog (no rule or grant skips it) and offers neither Always nor Always here; a folder's allow rules do nothing until you trust that exact file content in a prompt at launch (the broadest rules are listed first; remembered per folder under $XDG_DATA_HOME/agent/permission-trust.json, not configurable from the folder; editing the file asks again; its deny rules always apply); files are read once at launch, must be regular files of at most 1 MiB, and a bad file, list or rule (also one nested too deeply) is a warning, never a crash; an allow list that is not a list of strings loses only the allow rules, a bad deny list only the deny rules; /permissions lists every rule with its source, the untrusted ones as inactive, and the project file's trust state; text from a file is shown with odd characters escaped
-# custom slash commands: save a prompt as a Markdown file in ~/.config/agent/commands/ (or $XDG_CONFIG_HOME/agent/commands/) or in the folder's .agent/commands/ (a project command replaces a global one of the same name; a built-in name is skipped with a warning) and run it as /name args: `---\ndescription: Review the staged diff\n---\nReview it. Focus on: $ARGUMENTS`; $ARGUMENTS is replaced by the text after the name (or appended after a blank line when the body has none), the transcript shows the full prompt (escaped) under a /name (project|global) label, /help lists the commands, and typing / suggests names (Up/Down, Tab or Enter completes, Esc closes; Enter on a fully typed name sends it with no arguments); files are read once at launch, must be UTF-8 regular files of at most 64 KiB, and a bad one is a warning
-# the model can hand an investigation to a read-only subagent with the task tool (read, glob, grep, plus web_fetch and web_search when set up; no approval needed, also in plan mode): it runs in its own fresh context, you see its tool calls folded under one block, and only its final report goes back to the model; it is not saved in the session, and AGENT_TASK_MAX_STEPS (default 15) caps its model calls
-# web search: set AGENT_SEARCH_URL to your own SearXNG to give the model a web_search tool (query, limit 1-10, default 5; titles, URLs and snippets, shown to the model as untrusted data; no approval, also in plan mode; a deny rule `web_search` turns it off; it then reads a result with web_fetch). Run SearXNG with `docker run -d -p 8888:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng`, add `json` to the `search.formats` list in searxng/settings.yml (`formats: [html, json]`, else SearXNG answers 403) and restart it, then `AGENT_SEARCH_URL=http://localhost:8888`; the request uses AGENT_FETCH_TIMEOUT, redirects are not followed, and the tool is hidden while the variable is unset
-# the model keeps a checklist for multi-step work with the todo tool (no approval, also in plan mode): the list shows in a panel above the input, is reminded to the model on every request, and survives --continue, /undo and compaction; it clears with /new
-# the agent loads every AGENTS.md from the git root down to the launch folder (up to AGENT_INSTRUCTIONS_SHARE of the context window); /init has the model write one from facts scanned (statically) from makefiles, pyproject.toml, package.json and CI, then warns about make and script commands the scan did not find
-```
+`agent` is a terminal coding agent (Textual TUI) that runs on a local Ollama model. It also has a headless mode (`-p`) for scripts and `agent health check` for the API. Every command below runs from the repo root unless a step says `cd`.
 
-### Install on macOS
+### 1. Prerequisites
 
-Install `agent` as a command on your PATH, so you can run it in any folder.
+| Tool | Why | Install (macOS) |
+| --- | --- | --- |
+| [uv](https://docs.astral.sh/uv/) | Python tooling; fetches Python 3.15.0 if missing | `brew install uv` |
+| [Ollama](https://ollama.com) | Runs the model | `brew install ollama` |
+| git 2.20+ | `/undo` and `/diff` checkpoints (without it, `/undo` only restores `write`/`edit` changes) | `xcode-select --install` or `brew install git` |
+| Docker | Only for `agent health check` (it needs the API) | Docker Desktop |
 
-Prerequisites: [uv](https://docs.astral.sh/uv/) (`brew install uv`), Ollama running at `AGENT_OLLAMA_URL`, and Python 3.15.0 (uv fetches it if missing).
+### 2. Start Ollama and pull the model
 
 ```bash
-cd /path/to/agent
-make cli-tool-install   # editable install of cli/ as the uv tool `agent-cli`
-cd ~/projects/other-app
-agent                   # workspace is the current folder
+brew services start ollama
 ```
 
-- If `agent` is not found, uv's tool bin folder is not on your PATH: run `uv tool update-shell` and open a new shell. `command -v agent` shows which `agent` runs (another `agent` earlier on the PATH would shadow this one).
-- `.env` is read from the launch folder, so export `AGENT_*` variables in `~/.zshrc` or use that folder's `.env`.
-- Upgrading: the install is editable, so `git pull` is enough. Rerun `make cli-tool-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout (a moved or deleted checkout breaks `agent`).
+```bash
+ollama pull qwen2.5:7b-instruct
+```
+
+```bash
+ollama list
+```
+
+`ollama serve` runs it in the foreground instead of `brew services`. The default model is `qwen2.5:7b-instruct`. For another one, pull it and set `AGENT_MODEL` (step 3) or pass `--model`.
+
+### 3. Install the dependencies and configure
+
+```bash
+make cli-install
+```
+
+```bash
+cp cli/.env.example cli/.env
+```
+
+`make cli-install` runs `uv sync` in `cli/`. The `.env` file is optional: every value has a default. `.env` is read from the folder the agent is launched in, so for other folders export the variables in `~/.zshrc` or put a `.env` there. Main settings (all in [cli/.env.example](cli/.env.example)):
+
+| Variable | Default | What it sets |
+| --- | --- | --- |
+| `AGENT_OLLAMA_URL` | `http://localhost:11434` | Ollama server |
+| `AGENT_MODEL` | `qwen2.5:7b-instruct` | Model (`--model` and `/model` override it) |
+| `AGENT_NUM_CTX` | `8192` | Context window, in tokens |
+| `AGENT_MAX_STEPS` | `25` | Model calls per turn |
+| `AGENT_BASH_TIMEOUT` | `120` | Seconds before a `bash` call is killed |
+| `AGENT_COMPACT_AT` | `0.8` | Share of the window at which the history is compacted |
+| `AGENT_SESSIONS_DIR` | `~/.local/share/agent/sessions` | Where sessions are saved |
+| `AGENT_MCP_TIMEOUT` | `60` | Seconds before an MCP tool call gives up |
+| `AGENT_MCP_START_TIMEOUT` | `120` | Seconds an MCP server may take to start |
+| `AGENT_SEARCH_URL` | unset | SearXNG URL; turns on `web_search` (step 9) |
+| `AGENT_API_URL` | `http://localhost:8000` | API for `agent health check` |
+
+### 4. Check the setup
+
+```bash
+make cli-run ARGS="--version"
+```
+
+```bash
+make cli-run ARGS='-p "say hello" < /dev/null'
+```
+
+The second command makes one real model call and prints the reply. The first call can take a minute or more while Ollama loads the model. It exits 1 if Ollama is not reachable or the model is not installed. To check the API too:
+
+```bash
+make api-up
+```
+
+```bash
+make cli-run ARGS="health check"
+```
+
+### 5. Run the agent
+
+```bash
+make cli-run
+```
+
+The workspace is the folder the agent runs in: `cli/` for `make cli-run` (same as `cd cli && uv run agent`). To work on another project, either install the command (step 6) or run it from that project's folder without installing:
+
+```bash
+cd /path/to/your/project && uv run --project /path/to/agent/cli agent
+```
+
+Use `--project`, not `--directory`: `--project` keeps the current folder as the workspace, while `--directory` switches to `cli/`.
+
+### 6. Install `agent` on your PATH (optional)
+
+```bash
+make cli-tool-install
+```
+
+```bash
+cd ~/projects/other-app && agent
+```
+
+- This is an editable install of `cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. Rerun `make cli-tool-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout.
+- `agent` not found: run `uv tool update-shell` and open a new shell. `command -v agent` shows which `agent` runs.
 - Uninstall: `make cli-tool-uninstall`.
 
-### Real-model smoke test
+### 7. Launch options
 
-`make -C cli eval` (or `make cli-eval`) runs four fixed tasks (`find`, `rename`, `rules`, `command`) against the configured Ollama model, each in a throwaway copy of `cli/evals/fixtures/sample` with its own config and data folders. It prints pass counts and median steps, tokens and time per task, and saves a JSON report to `cli/.eval/<UTC timestamp>.json` (gitignored) to compare runs over time. Settings: the usual `AGENT_*` variables, plus `EVAL_RUNS` (default 3), `EVAL_TASKS` (comma-separated), `EVAL_TIMEOUT` (seconds per run, default 300) and `EVAL_KEEP=1` (keep the temp folders and print their paths). Without Ollama it prints a skip line and exits 0. Isolation covers the agent's config, data and sessions folders and the workspace copy only: `bash` commands run with your real environment and `HOME`, so every task allows just fixed commands (exact `python -m pytest` rules, everything else refused). It is not part of `make test` or CI.
+| Command | What it does |
+| --- | --- |
+| `agent` | New session in the current folder |
+| `agent --continue` | Resume the latest session for this folder |
+| `agent --resume` | Pick a session of this folder from a list |
+| `agent --resume <id-prefix>` | Resume one session by id |
+| `agent --model <name>` | Use another installed Ollama model for this launch |
+| `agent --version` | Print the version |
+| `agent health check [--json]` | Check the API |
 
-### Open the agent in another project
+Sessions are saved per folder under `~/.local/share/agent/sessions/`, never inside the project.
 
-The agent's workspace is the folder it is launched from. To work on another project, run it from that project's folder:
+### 8. Inside the app
 
-```bash
-cd /path/to/your/project
-agent             # new session in this project (installed, see above)
-agent --continue  # resume this project's latest session
+Type a message and press Enter. The agent asks before it runs a command or changes a file: allow once, Always (this run) or Always here (saves the rule to `.agent/settings.json`).
 
-# without installing:
-uv run --project /path/to/agent/cli agent
-uv run --project /path/to/agent/cli agent --continue
+| Slash command | What it does |
+| --- | --- |
+| `/help` | List commands, including custom ones |
+| `/new`, `/clear` | Start a new session |
+| `/sessions` | Switch to another session |
+| `/undo` | Undo the last turn (files and `bash`/terminal changes in the workspace); repeat to go further back |
+| `/diff` | Show what the last turn changed |
+| `/compact` | Shrink the context (also automatic) |
+| `/usage` | Token totals, model calls and speed for the session |
+| `/model [name]` | Pick or switch the model (saved to `.agent/settings.json`) |
+| `/init` | Have the model write `AGENTS.md` for this folder |
+| `/permissions`, `/guardrails`, `/hooks`, `/mcp`, `/skills` | Show the loaded rules, sandbox, hooks, MCP servers and skills |
+| `/quit` | Exit |
+
+| Key or input | What it does |
+| --- | --- |
+| `Tab` | Switch between build and plan mode (plan mode hides `write`, `edit`, terminals and MCP tools, and skips allow rules) |
+| `Esc` | Interrupt the running turn |
+| `ctrl+c` | Interrupt, or quit when idle |
+| `@path` / `@"path with spaces"` | Attach a workspace file to the message (`@` suggests paths) |
+| `/` | Suggest commands (Up/Down, Tab or Enter to complete) |
+| `ctrl+t` | Open the terminal pane / move focus between it and the chat / hide it |
+| `ctrl+\` | Back to the chat from the terminal |
+| `ctrl+pageup`, `ctrl+pagedown` | Switch terminal tabs (not sent by macOS Terminal.app: use the mouse) |
+| `ctrl+w` | Close an exited terminal tab |
+
+The model can use the terminal pane too: `term_start` and `term_stop` (both need approval) start and stop long-running processes, and `term_read` reads their output. Every terminal is stopped when the agent quits.
+
+### 9. Configure (optional)
+
+Files are read once at launch. A bad file is a warning, never a crash. Global files are in `~/.config/agent/` (or `$XDG_CONFIG_HOME/agent/`), project files in the launch folder's `.agent/`. Project allow rules, hooks and MCP servers (`.agent/settings.json`, `.agent/mcp.json`) stay off until you trust that exact file content in a prompt at launch. The choice is remembered per folder in `~/.local/share/agent/permission-trust.json` and `mcp-trust.json`, so editing the file asks again.
+
+| File | What it holds |
+| --- | --- |
+| `settings.json` | `permissions` (allow/deny rules), `guardrails` (sandbox, protected paths), `hooks`, `model` |
+| `mcp.json` | stdio MCP servers; their tools appear as `mcp__<server>__<tool>`, every call needs approval and is refused in plan mode |
+| `commands/<name>.md` | Custom slash command `/name` (`$ARGUMENTS` is the text after it) |
+| `skills/<name>/SKILL.md` | A skill the model can load with the `skill` tool |
+| `AGENTS.md` (in the project) | Instructions loaded from the git root down to the launch folder |
+
+`~/.config/agent/settings.json`:
+
+```json
+{
+  "permissions": {
+    "allow": ["bash(make test)", "bash(git status*)", "web_fetch(https://docs.python.org/*)", "mcp__notes__*"],
+    "deny": ["bash(rm -rf*)"]
+  },
+  "guardrails": { "sandbox": { "network": true, "write": ["~/go"] }, "keepEnv": ["GITHUB_TOKEN"] },
+  "hooks": { "PostToolUse": [{ "matcher": "edit", "command": "make test", "timeout": 60 }] }
+}
 ```
 
-- Without the install, use `--project`, not `--directory`: `--project` keeps the current folder as the workspace, `--directory` switches to `cli/`.
-- Sessions are saved per folder (under `~/.local/share/agent/sessions/`, never inside the project), so `--continue` and `--resume` only see that project's sessions.
-- The project's `AGENTS.md` files (from its git root down to the launch folder) are loaded; run `/init` to write one.
-- `.env` is read from the current folder, so set `AGENT_*` variables (such as `AGENT_OLLAMA_URL`) in your shell or in that project's `.env`.
-- To get a plain `agent` command, see [Install on macOS](#install-on-macos).
+- Rules: `tool`, `tool(exact value)`, `tool(prefix*)` or `mcp__<server>__*`. Deny wins over allow and also applies in plan mode. A prefix allow rule only matches plain commands (no quotes, `;`, `|`, `$(` and the like).
+- Guardrails: the agent's file tools never touch protected paths (`~/.ssh`, `.env`, `*.pem`, ...). On macOS, `bash`, terminals, hooks and MCP servers run in a sandbox that can write only to the workspace, temp and cache folders. Secret-looking variables (`*TOKEN*`, `*_KEY`, ...) are removed from their environment unless listed in `keepEnv`. Tool output is redacted for secrets.
+- Hooks run at `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop` and `SessionStart`. Exit 2 blocks (where the event allows it).
+
+`~/.config/agent/mcp.json`:
+
+```json
+{ "servers": { "notes": { "command": "uvx", "args": ["notes-mcp"], "env": { "KEY": "value" } } } }
+```
+
+`~/.config/agent/commands/review.md`:
+
+```markdown
+---
+description: Review the staged diff
+---
+Review it. Focus on: $ARGUMENTS
+```
+
+Web search (optional) uses your own SearXNG:
+
+```bash
+docker run -d -p 8888:8080 -v "$PWD/searxng:/etc/searxng" searxng/searxng
+```
+
+Add `json` to `search.formats` in `searxng/settings.yml` (`formats: [html, json]`, otherwise SearXNG answers 403), restart the container, then set `AGENT_SEARCH_URL=http://localhost:8888`.
+
+### 10. Headless mode
+
+One turn without the UI. The final reply goes to stdout; tool lines and warnings go to stderr.
+
+```bash
+agent -p "summarise the README"
+```
+
+```bash
+git diff | agent -p "review this diff"
+```
+
+```bash
+agent -p "run the tests and fix failures" --allow 'bash(make test)' --allow edit
+```
+
+```bash
+agent -p "list the TODOs" --output json < /dev/null
+```
+
+| Option (with `-p`) | What it does |
+| --- | --- |
+| `--allow '<rule>'` | Allow a call for this run (repeatable). Anything else that needs approval is refused |
+| `--output text\|json\|stream-json` | Plain reply, one JSON result, or one JSON line per event |
+| `--quiet` | Only warnings and errors on stderr |
+| `--continue`, `--resume <id>`, `--model <name>` | As in the app |
+| `--trust-project` | Trust the project's settings and `mcp.json` for this run (runs its hooks and servers) |
+
+- `-p` with no prompt reads the prompt from stdin. A piped stdin is added below the prompt, so use `< /dev/null` when there is none.
+- Exit codes: `0` done, `1` model or hook error or step limit, `2` usage error, `130`/`143` interrupted.
+
+### 11. Develop and test
+
+| Command | What it does |
+| --- | --- |
+| `make cli-check` | `ruff check --fix` + `ty check` (fixes files) |
+| `make -C cli check-ci` | The same without fixes, as CI runs it |
+| `make cli-test` | pytest suite |
+| `uv run --directory cli pytest tests/path/test_file.py::test_name -q` | One test |
+| `make cli-eval` | Real-model smoke test (needs Ollama) |
+
+`make cli-eval` runs four fixed tasks (`find`, `rename`, `rules`, `command`) headlessly, each in a throwaway copy of `cli/evals/fixtures/sample`. It prints pass counts and median steps, tokens and time, and writes `cli/.eval/<UTC timestamp>.json`. Settings: `EVAL_RUNS` (default 3), `EVAL_TASKS=find,rename`, `EVAL_TIMEOUT` (seconds, default 300), `EVAL_KEEP=1` (keep the temp folders). Without Ollama it prints a skip line and exits 0. `bash` runs with your real environment, so the tasks allow only fixed commands. It is not part of `make test` or CI.
 
 ## UI
 
