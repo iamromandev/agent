@@ -84,6 +84,10 @@ def test_stream_json_events_come_in_order(ws: Path, capsys: pytest.CaptureFixtur
     go(ws, two_calls(), "stream-json")
 
     events = lines(capsys.readouterr().out)
+    launch = 1
+    while events[launch]["type"] == "notice":  # launch warnings come right after `start` (on Linux: no sandbox)
+        launch += 1
+    events = events[:1] + events[launch:]
     assert [e["type"] for e in events] == ["start", "tool_call", "tool_result", "tool_call", "tool_result", "result"]
     assert events[0]["model"] == "fake" and events[0]["cwd"] == str(ws.resolve())
     assert events[1]["name"] == "read" and events[2]["id"] == "c1" and events[2]["name"] == "read"

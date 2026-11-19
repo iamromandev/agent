@@ -22,6 +22,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
+from src.engine.checkpoints.birth import birth_time
 from src.engine.checkpoints.store import DiffEntry
 from src.engine.undo import CHANGED, TOO_LARGE, FileChange, UndoResult, UndoTurn, _hash_nofollow, restore_turn
 
@@ -30,7 +31,6 @@ EXEC_BIT = 0o100
 TMP_PREFIX = ".agent-undo-"
 EXISTED_BEFORE = "existed before the turn"
 IGNORE_CHANGED = "ignore rules changed in the turn"
-CTIME_SLACK = 0.05  # without a birth time, ctime comes from the kernel's coarse clock (a few ms behind)
 DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 Kind = Literal["restored", "deleted", "skipped"]
@@ -129,15 +129,17 @@ def _safe_name(rel: str) -> bool:
     return bool(rel) and not rel.startswith("/") and all(p not in ("", ".", "..") for p in parts)
 
 
-def _is_new(info: os.stat_result, before_time: float | None) -> bool:
-    """Was the file or folder made after the `before` snapshot? Its birth time where the system keeps one (macOS),
-    else its ctime, which also moves when the file is written or renamed (so a file changed since counts as new)."""
+def _is_new(parent: int, name: str, info: os.stat_result, before_time: float | None) -> bool:
+    """Was `name` in `parent` (whose `lstat` is `info`) made after the `before` snapshot? Its birth time where the
+    system keeps one (macOS, Linux `statx`), else, for a file, its ctime, which also moves when the file is written or
+    renamed (so a file changed since counts as new). A folder without a birth time never counts as new: its ctime
+    moves whenever an entry is added or removed, so one the turn wrote into, or emptied, would always look new."""
     if before_time is None:
         return False
-    born = getattr(info, "st_birthtime", None)
+    born = birth_time(parent, name, info)
     if born is None:
-        return info.st_ctime > before_time - CTIME_SLACK
-    return bool(born > before_time)
+        return not stat.S_ISDIR(info.st_mode) and info.st_ctime > before_time
+    return born > before_time
 
 
 def _with_exec(mode: int, executable: bool) -> int:
@@ -293,7 +295,7 @@ def _remove(
         name = entry.path.rpartition("/")[2]
         if _state(parent, name) != _expected(entry):
             return CHANGED
-        if not _is_new(os.lstat(name, dir_fd=parent), before_time):
+        if not _is_new(parent, name, os.lstat(name, dir_fd=parent), before_time):
             return EXISTED_BEFORE
         os.unlink(name, dir_fd=parent)
     finally:
@@ -309,7 +311,7 @@ def _remove_folder(root_fd: int, rel: str, before_time: float | None) -> None:
     try:
         name = rel.rpartition("/")[2]
         info = os.lstat(name, dir_fd=parent)
-        if stat.S_ISDIR(info.st_mode) and _is_new(info, before_time):
+        if stat.S_ISDIR(info.st_mode) and _is_new(parent, name, info, before_time):
             os.rmdir(name, dir_fd=parent)  # fails when something is in it
     finally:
         os.close(parent)
