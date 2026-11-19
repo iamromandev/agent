@@ -13,6 +13,7 @@ from pathlib import Path, PurePath
 from typing import Literal
 
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
+from src.engine.checkpoints.birth import settle
 from src.engine.checkpoints.restore import restore_checkpoint, restore_unsnapshotted
 from src.engine.checkpoints.store import CheckpointStore, DiffEntry, Snapshot, exclude_signature, file_signature
 from src.engine.compaction import (
@@ -587,8 +588,11 @@ class Agent:
                     workspace = self.ctx.workspace
                     self._large_before = {name: file_signature(workspace, name) for name in snap.skipped_large}
                     self._exclude_before = exclude_signature(workspace)
-                    # the time is taken after the snapshot: what the turn creates is born later
-                    self._undo.mark(before=snap.commit, before_time=time.time(), large_before=snap.skipped_large)
+                    # the time is taken after the snapshot, and the file clock is let pass it: what the turn
+                    # creates is born later (Linux stamps files from a coarse clock, up to a tick behind)
+                    before_time = time.time()
+                    await asyncio.to_thread(settle, before_time)  # it sleeps: not on the event loop
+                    self._undo.mark(before=snap.commit, before_time=before_time, large_before=snap.skipped_large)
             if self._checkpoint_warning is None:
                 self._checkpoint_warning = store.take_warning()
             if self._checkpoint_warning is not None:

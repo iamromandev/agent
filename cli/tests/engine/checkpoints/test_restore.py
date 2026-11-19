@@ -564,6 +564,33 @@ async def test_a_folder_that_was_empty_before_the_turn_is_kept(store: Checkpoint
     assert (ws / "empty").is_dir()
 
 
+@pytest.fixture
+def no_birth_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A file system without birth times (tmpfs on older kernels, NFS, FUSE): only `ctime` is left."""
+    monkeypatch.setattr(restore_module, "birth_time", lambda *_: None)
+
+
+@pytest.mark.usefixtures("no_birth_times")
+async def test_without_birth_times_a_folder_written_into_is_kept(store: CheckpointStore, ws: Path) -> None:
+    """Deleting the turn's file moves the folder's ctime, so ctime cannot tell an old folder from a new one: skip."""
+    (ws / "empty").mkdir()
+
+    await undo_turn(store, ws, lambda: (ws / "empty" / "f.txt").write_text("f"))
+
+    assert not (ws / "empty" / "f.txt").exists()
+    assert (ws / "empty").is_dir()
+
+
+@pytest.mark.usefixtures("no_birth_times")
+async def test_without_birth_times_a_file_the_turn_made_is_still_deleted(store: CheckpointStore, ws: Path) -> None:
+    (ws / "keep.txt").write_text("k")
+
+    await undo_turn(store, ws, lambda: (ws / "new.txt").write_text("n"))
+
+    assert not (ws / "new.txt").exists()
+    assert (ws / "keep.txt").read_text() == "k"
+
+
 async def test_an_empty_folder_the_user_made_where_the_turn_deleted_a_file_is_kept(
     store: CheckpointStore, ws: Path
 ) -> None:
