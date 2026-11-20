@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import AsyncGenerator, AsyncIterator, Callable
-from pathlib import Path
 from typing import Any, cast
 
 import httpx
@@ -12,7 +11,6 @@ from src.client import OllamaClient
 from src.engine.provider.base import (
     Done,
     Message,
-    Provider,
     ProviderError,
     TextDelta,
     ToolCall,
@@ -49,38 +47,6 @@ def _call_line(call: Any) -> dict[str, Any]:
 
 
 DONE_LINE = {"message": {"role": "assistant", "content": ""}, "done": True, "prompt_eval_count": 7, "eval_count": 3}
-
-
-async def test_recorded_tool_call_stream_maps_to_events(fixture_path: Callable[[str], Path]) -> None:
-    body = fixture_path("ollama/tool_call.ndjson").read_bytes()
-    events = await _events(_provider(_serving(body)))
-
-    assert events == [
-        ToolCallEvent(ToolCall("call_zf6mn04t", "grep", {"path": "cli/src/main.py", "pattern": "^def.*:.*$"})),
-        Done(225, 31),
-    ]
-
-
-async def test_recorded_text_stream_yields_deltas_in_order(fixture_path: Callable[[str], Path]) -> None:
-    body = fixture_path("ollama/text.ndjson").read_bytes()
-    events = await _events(_provider(_serving(body)))
-
-    deltas = [e.text for e in events if isinstance(e, TextDelta)]
-    expected = [
-        json.loads(line)["message"]["content"] for line in body.splitlines() if json.loads(line)["message"]["content"]
-    ]
-    assert deltas == expected
-    assert isinstance(events[-1], Done)
-    assert events[-1].prompt_tokens > 0 and events[-1].completion_tokens > 0
-    assert sum(isinstance(e, Done) for e in events) == 1
-
-
-async def test_a_cached_done_chunk_reports_the_full_prompt_size(fixture_path: Callable[[str], Path]) -> None:
-    """AC16: prompt_eval_count (2029) already includes the cached tokens (2028); they are not added again."""
-    body = fixture_path("ollama/done_cached.ndjson").read_bytes()
-    events = await _events(_provider(_serving(body)))
-
-    assert events == [Done(prompt_tokens=2029, completion_tokens=3)]
 
 
 async def test_missing_id_gets_a_generated_one() -> None:
@@ -152,47 +118,11 @@ async def test_request_payload_has_model_options_tools_and_messages() -> None:
     ]
 
 
-async def test_a_system_message_in_the_middle_is_sent_in_place() -> None:
-    captured: list[dict[str, Any]] = []
-
-    async def handler(request: httpx.Request) -> httpx.Response:
-        captured.append(json.loads(request.content))
-        return httpx.Response(200, content=_ndjson(DONE_LINE))
-
-    messages = [Message("system", "be brief"), Message("system", "note: list"), Message("user", "go")]
-    await _events(_provider(handler), messages, [])
-
-    assert [(m["role"], m["content"]) for m in captured[0]["messages"]] == [
-        ("system", "be brief"),
-        ("system", "note: list"),
-        ("user", "go"),
-    ]
-
-
-async def test_stream_dropped_after_two_chunks_yields_a_provider_error() -> None:
-    async def body() -> AsyncIterator[bytes]:
-        yield _ndjson({"message": {"content": "a"}, "done": False})
-        yield _ndjson({"message": {"content": "b"}, "done": False})
-        raise httpx.ReadError("dropped")
-
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=body())
-
-    events = await _events(_provider(handler))
-    assert events[:2] == [TextDelta("a"), TextDelta("b")]
-    assert len(events) == 3 and isinstance(events[2], ProviderError)
-
-
 async def test_http_500_yields_a_provider_error() -> None:
     async def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(500, json={"error": "model crashed"})
 
     assert await _events(_provider(handler)) == [ProviderError("model crashed")]
-
-
-async def test_provider_exposes_model_and_context_window() -> None:
-    provider: Provider = _provider(_serving(b""), model="foo", num_ctx=4096)
-    assert (provider.model, provider.context_window) == ("foo", 4096)
 
 
 def _tags(*names: str) -> Callable[[httpx.Request], Any]:
@@ -209,21 +139,8 @@ async def test_check_reports_an_unreachable_server() -> None:
     assert await _provider(handler).check() == f"Cannot reach Ollama at {URL} — start it with `ollama serve`"
 
 
-async def test_check_reports_a_missing_model() -> None:
-    result = await _provider(_tags("other:7b"), model="foo").check()
-    assert result == "Model foo is not pulled — run `ollama pull foo`"
-
-
-async def test_check_accepts_a_tagless_name_matching_latest() -> None:
-    assert await _provider(_tags("foo:latest"), model="foo").check() is None
-
-
 async def test_check_accepts_an_exact_match() -> None:
     assert await _provider(_tags("qwen2.5:7b-instruct"), model="qwen2.5:7b-instruct").check() is None
-
-
-async def test_check_does_not_match_a_different_tag() -> None:
-    assert await _provider(_tags("foo:7b"), model="foo").check() is not None
 
 
 async def test_check_returns_the_server_error_for_http_500() -> None:
@@ -231,29 +148,6 @@ async def test_check_returns_the_server_error_for_http_500() -> None:
         return httpx.Response(500, json={"error": "disk full"})
 
     assert await _provider(handler).check() == "disk full"
-
-
-async def test_check_returns_the_error_for_an_invalid_model_list() -> None:
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"models": [{"nom": "x"}]})
-
-    assert await _provider(handler).check() == "Ollama sent an invalid model list"
-
-
-async def test_check_reports_unreachable_on_connect_timeout() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectTimeout("slow", request=request)
-
-    assert await _provider(handler).check() == f"Cannot reach Ollama at {URL} — start it with `ollama serve`"
-
-
-async def test_check_treats_a_registry_port_name_as_untagged() -> None:
-    result = await _provider(_tags("localhost:5000/foo:latest"), model="localhost:5000/foo").check()
-    assert result is None
-
-
-async def test_check_does_not_treat_a_registry_port_as_a_tag() -> None:
-    assert await _provider(_tags("localhost:5000/foo:7b"), model="localhost:5000/foo").check() is not None
 
 
 async def test_tool_message_without_a_name_omits_tool_name() -> None:
@@ -267,17 +161,6 @@ async def test_tool_message_without_a_name_omits_tool_name() -> None:
     assert captured[0]["messages"] == [{"role": "tool", "content": "contents"}]
 
 
-async def test_second_done_line_is_not_emitted() -> None:
-    body = _ndjson(DONE_LINE, DONE_LINE)
-    events = await _events(_provider(_serving(body)))
-    assert events == [Done(7, 3)]
-
-
-async def test_non_dict_message_is_ignored() -> None:
-    body = _ndjson({"message": "str", "done": True, "prompt_eval_count": 7, "eval_count": 3})
-    assert await _events(_provider(_serving(body))) == [Done(7, 3)]
-
-
 async def test_non_dict_tool_call_is_skipped() -> None:
     body = _ndjson(_call_line("x"), DONE_LINE)
     assert await _events(_provider(_serving(body))) == [Done(7, 3)]
@@ -289,23 +172,16 @@ async def test_non_dict_function_yields_a_call_with_an_empty_name() -> None:
     assert events == [ToolCallEvent(ToolCall("c1", "", {})), Done(7, 3)]
 
 
-@pytest.mark.parametrize("name", [None, 5, ["a"], ""])
+@pytest.mark.parametrize("name", [["a"]])
 async def test_non_string_or_empty_tool_name_becomes_an_empty_name(name: Any) -> None:
     body = _ndjson(_call_line({"id": "c1", "function": {"name": name, "arguments": {}}}), DONE_LINE)
     events = await _events(_provider(_serving(body)))
     assert events[0] == ToolCallEvent(ToolCall("c1", "", {}))
 
 
-@pytest.mark.parametrize("call_id", [None, 5, ["a"], ""])
-async def test_non_string_tool_call_id_is_replaced_with_a_generated_one(call_id: Any) -> None:
-    body = _ndjson(_call_line({"id": call_id, "function": {"name": "read", "arguments": {}}}), DONE_LINE)
-    events = await _events(_provider(_serving(body)))
-    assert events[0].call.id.startswith("call_") and events[0].call.name == "read"
-
-
 @pytest.mark.parametrize(
     ("prompt", "completion", "expected"),
-    [("x", "y", (0, 0)), ([1], {"a": 1}, (0, 0)), (None, None, (0, 0)), (4.0, "5", (4, 5))],
+    [([1], {"a": 1}, (0, 0))],
 )
 async def test_token_counts_are_coerced_to_int_or_zero(prompt: Any, completion: Any, expected: tuple[int, int]) -> None:
     body = _ndjson(

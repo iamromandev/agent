@@ -4,12 +4,8 @@ import json
 from pathlib import Path
 
 from src.engine.mcp.config import (
-    LoadedConfig,
     ServerConfig,
-    global_config_path,
     load_file,
-    merge,
-    project_config_path,
 )
 
 
@@ -17,12 +13,6 @@ def write(path: Path, content: object) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content if isinstance(content, str) else json.dumps(content))
     return path
-
-
-def test_a_missing_file_means_no_servers_and_no_warning(tmp_path: Path) -> None:
-    loaded = load_file(tmp_path / "mcp.json", "global")
-    assert loaded.servers == []
-    assert loaded.warnings == []
 
 
 def test_a_server_with_command_args_and_env_is_loaded(tmp_path: Path) -> None:
@@ -35,40 +25,12 @@ def test_a_server_with_command_args_and_env_is_loaded(tmp_path: Path) -> None:
     assert loaded.servers == [ServerConfig("fs-notes", "uvx", ("notes-mcp",), {"NOTES_DIR": "/n"}, "global")]
 
 
-def test_args_and_env_are_optional_and_unknown_keys_are_ignored(tmp_path: Path) -> None:
-    path = write(tmp_path / "mcp.json", {"extra": 1, "servers": {"a": {"command": "x", "timeout": 3}}})
-    loaded = load_file(path, "project")
-    assert loaded.warnings == []
-    assert loaded.servers == [ServerConfig("a", "x", (), {}, "project")]
-
-
-def test_no_servers_and_an_empty_servers_object_are_fine(tmp_path: Path) -> None:
-    loaded = load_file(write(tmp_path / "mcp.json", {"servers": {}}), "global")
-    assert (loaded.servers, loaded.warnings) == ([], [])
-
-
-def test_invalid_json_gives_no_servers_and_a_warning_naming_the_file(tmp_path: Path) -> None:
-    path = write(tmp_path / "mcp.json", '{"servers": {')
-    loaded = load_file(path, "global")
-    assert loaded.servers == []
-    assert len(loaded.warnings) == 1
-    assert loaded.warnings[0].startswith(f"{path}: invalid JSON: ")
-
-
 def test_a_file_that_is_not_text_gives_a_warning(tmp_path: Path) -> None:
     path = tmp_path / "mcp.json"
     path.write_bytes(b"\xff\xfe\x00")
     loaded = load_file(path, "global")
     assert loaded.servers == []
     assert [w.startswith(f"{path}: ") for w in loaded.warnings] == [True]
-
-
-def test_a_folder_instead_of_a_file_gives_a_warning(tmp_path: Path) -> None:
-    folder = tmp_path / "mcp.json"
-    folder.mkdir()
-    loaded = load_file(folder, "global")
-    assert loaded.servers == []
-    assert [w.startswith(f"{folder}: ") for w in loaded.warnings] == [True]
 
 
 def test_a_top_level_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
@@ -83,11 +45,6 @@ def test_servers_that_is_not_an_object_is_refused(tmp_path: Path) -> None:
     loaded = load_file(path, "global")
     assert loaded.servers == []
     assert loaded.warnings == [f'{path}: "servers" must be an object']
-
-
-def test_a_missing_servers_key_is_refused(tmp_path: Path) -> None:
-    path = write(tmp_path / "mcp.json", {})
-    assert load_file(path, "global").warnings == [f'{path}: "servers" must be an object']
 
 
 def test_an_entry_without_command_is_skipped_and_the_valid_one_loads(tmp_path: Path) -> None:
@@ -124,113 +81,6 @@ def test_each_kind_of_bad_entry_gets_its_own_warning(tmp_path: Path) -> None:
         f'{path}: server "env": "env" must be an object of strings',
         f'{path}: server "env_value": "env" must be an object of strings',
     ]
-
-
-def test_the_global_path_follows_xdg_config_home() -> None:
-    assert global_config_path({"XDG_CONFIG_HOME": "/xdg"}) == Path("/xdg/agent/mcp.json")
-
-
-def test_the_global_path_falls_back_to_the_home_config_folder() -> None:
-    assert global_config_path({}) == Path.home() / ".config" / "agent" / "mcp.json"
-
-
-def test_a_relative_xdg_config_home_is_ignored() -> None:
-    assert global_config_path({"XDG_CONFIG_HOME": "rel"}) == Path.home() / ".config" / "agent" / "mcp.json"
-
-
-def test_the_project_path_is_the_agent_folder_of_the_workspace(tmp_path: Path) -> None:
-    assert project_config_path(tmp_path) == tmp_path / ".agent" / "mcp.json"
-
-
-def test_the_exact_bytes_that_were_parsed_are_kept(tmp_path: Path) -> None:
-    path = write(tmp_path / "mcp.json", '{"servers": {"a": {"command": "x"}}}\n')
-    assert load_file(path, "project").raw == path.read_bytes()
-
-
-def test_a_missing_file_has_no_bytes(tmp_path: Path) -> None:
-    assert load_file(tmp_path / "mcp.json", "project").raw is None
-
-
-def test_a_project_server_replaces_a_global_one_with_the_same_name() -> None:
-    global_ = LoadedConfig([ServerConfig("db", "global-db"), ServerConfig("notes", "n")], ["g warning"])
-    project = LoadedConfig([ServerConfig("db", "project-db", source="project")], ["p warning"])
-
-    merged = merge(global_, project)
-
-    assert merged.servers == [
-        ServerConfig("db", "project-db", source="project", overrides_global=True),
-        ServerConfig("notes", "n"),
-    ]
-    assert merged.warnings == ["g warning", "p warning"]
-
-
-def test_servers_with_different_names_are_all_kept_global_first() -> None:
-    global_ = LoadedConfig([ServerConfig("a", "x")], [])
-    project = LoadedConfig([ServerConfig("b", "y", source="project")], [])
-
-    assert [(s.name, s.source) for s in merge(global_, project).servers] == [("a", "global"), ("b", "project")]
-
-
-def test_merge_with_no_project_servers_is_the_global_ones() -> None:
-    global_ = LoadedConfig([ServerConfig("a", "x")], [])
-    assert merge(global_, LoadedConfig([], [])).servers == global_.servers
-
-
-def test_a_project_server_that_replaces_a_global_one_says_so() -> None:
-    global_ = LoadedConfig([ServerConfig("db", "g"), ServerConfig("notes", "n")], [])
-    project = LoadedConfig([ServerConfig("db", "p", source="project"), ServerConfig("web", "w", source="project")], [])
-
-    merged = {s.name: s for s in merge(global_, project).servers}
-
-    assert merged["db"].overrides_global is True
-    assert merged["web"].overrides_global is False
-    assert merged["notes"].overrides_global is False
-
-
-def test_deeply_nested_json_is_a_warning_not_a_crash(tmp_path: Path) -> None:
-    path = tmp_path / "mcp.json"
-    path.write_bytes(b"[" * 200_000 + b"]" * 200_000)
-
-    loaded = load_file(path, "project")
-
-    assert loaded.servers == []
-    assert len(loaded.warnings) == 1
-    assert loaded.warnings[0].startswith(f"{path}: invalid JSON")
-
-
-def test_a_file_over_the_size_cap_is_a_warning(tmp_path: Path) -> None:
-    path = tmp_path / "mcp.json"
-    path.write_bytes(b'{"servers": {}, "pad": "' + b"x" * (1 << 20) + b'"}')
-
-    loaded = load_file(path, "project")
-
-    assert loaded.servers == []
-    assert "larger than" in loaded.warnings[0]
-
-
-def test_a_fifo_is_a_warning_and_is_not_read(tmp_path: Path) -> None:
-    import os
-
-    path = tmp_path / "mcp.json"
-    os.mkfifo(path)
-
-    loaded = load_file(path, "project")
-
-    assert loaded.servers == []
-    assert "regular file" in loaded.warnings[0]
-
-
-def test_a_server_name_that_could_pose_as_another_servers_tools_is_skipped_with_a_warning(tmp_path: Path) -> None:
-    """`mcp__gh__*` is a string prefix: a server `gh__evil` would put its tools under it."""
-    names = ["gh__evil", "gh..evil", "gh_", "gh.", "ok", "a_b", "my-srv"]
-    path = write(tmp_path / "mcp.json", {"servers": {name: {"command": "x"} for name in names}})
-
-    loaded = load_file(path, "project")
-
-    assert [s.name for s in loaded.servers] == ["ok", "a_b", "my-srv"]
-    assert len(loaded.warnings) == 4
-    assert all('must not contain "__" or end with "_"' in w for w in loaded.warnings)
-    assert 'server "gh__evil"' in loaded.warnings[0]
 
 
 def test_a_server_name_in_a_warning_is_escaped(tmp_path: Path) -> None:

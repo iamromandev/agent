@@ -39,13 +39,18 @@ SCAN_SKIP = frozenset({".git", "node_modules", ".venv", "__pycache__"})  # the w
 type FileId = tuple[int, int]  # (st_dev, st_ino)
 
 
+def strip_firmlink(text: str) -> str:
+    """`text` without a leading macOS `/System/Volumes/Data` (`Path.resolve()` keeps it); unchanged elsewhere."""
+    # APFS is case-insensitive: `/system/volumes/data/...` is the same place, so the prefix is matched without case
+    if STRIP_FIRMLINK and text[: len(FIRMLINK)].lower() == FIRMLINK_LOWER and text[len(FIRMLINK) :][:1] in ("", "/"):
+        return text[len(FIRMLINK) :] or "/"
+    return text
+
+
 def _canonical(text: str) -> str:
     """The spelling patterns are matched in: no macOS firmlink prefix, Unicode NFC (APFS and HFS+ treat the
     decomposed and composed forms of a name as one)."""
-    # APFS is case-insensitive: `/system/volumes/data/...` is the same place, so the prefix is matched without case
-    if STRIP_FIRMLINK and text[: len(FIRMLINK)].lower() == FIRMLINK_LOWER and text[len(FIRMLINK) :][:1] in ("", "/"):
-        text = text[len(FIRMLINK) :] or "/"
-    return unicodedata.normalize("NFC", text)
+    return unicodedata.normalize("NFC", strip_firmlink(text))
 
 
 def login_home() -> Path | None:

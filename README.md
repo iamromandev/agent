@@ -201,7 +201,7 @@ Type a message and press Enter. The agent asks before it runs a command or chang
 
 | Key or input | What it does |
 | --- | --- |
-| `Tab` | Switch between build and plan mode (plan mode hides `write`, `edit`, terminals and MCP tools, and skips allow rules) |
+| `Tab` | Cycle `BUILD → EDITS → PLAN` (accept-edits mode, shown as `EDITS`, runs `write`/`edit` inside the workspace without asking, except `.agent/settings.json`, `.agent/mcp.json`, `.agent/commands`, `.agent/skills`, anything under `.git/` and the agent's own config, data and sessions folders, which still ask (names compared case-insensitively); plan mode hides `write`, `edit`, terminals and MCP tools, and skips allow rules) |
 | `Esc` | Interrupt the running turn |
 | `ctrl+c` | Interrupt, or quit when idle |
 | `@path` / `@"path with spaces"` | Attach a workspace file to the message (`@` suggests paths) |

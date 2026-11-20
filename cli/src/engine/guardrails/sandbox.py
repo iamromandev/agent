@@ -247,6 +247,15 @@ def _xdg(env: Mapping[str, str], name: str, fallback: Path) -> Path:
     return Path(value) if value and Path(value).is_absolute() else fallback
 
 
+def agent_folders(env: Mapping[str, str], home: Path, sessions: Path | None = None) -> tuple[Path, ...]:
+    """The agent's own folders: `<config>/agent` (settings, MCP servers, commands, skills), `<data>/agent` (trust
+    stores, checkpoints) and the sessions folder when given. No command may write them (the profile denies it) and
+    accept-edits mode never approves a write into them."""
+    config = _xdg(env, "XDG_CONFIG_HOME", home / ".config") / "agent"
+    data = _xdg(env, "XDG_DATA_HOME", home / ".local" / "share") / "agent"
+    return (config, data) if sessions is None else (config, data, sessions)
+
+
 def _extra_writable(entries: Sequence[str], home: Path) -> tuple[list[Path], list[str]]:
     """The global `sandbox.write` entries as paths (`~/x` and absolute ones), and a warning for each other one."""
     paths: list[Path] = []
@@ -322,11 +331,7 @@ def make_sandbox(
                 *extra,
             )
         )
-        agent_config = _xdg(env, "XDG_CONFIG_HOME", home / ".config") / "agent"
-        agent_data = _xdg(env, "XDG_DATA_HOME", home / ".local" / "share") / "agent"
-        deny_write = [agent_config, agent_data]
-        if sessions is not None:
-            deny_write.append(sessions)
+        deny_write = list(agent_folders(env, home, sessions))
         agent = workspace / ".agent"
         deny_write += [agent / "settings.json", agent / "mcp.json", agent / "commands", agent / "skills"]
         paths = protected if protected is not None else ProtectedPaths(home, cfg.extra_protected)

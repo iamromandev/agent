@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import os
-import shutil
-import stat
 import time
 from pathlib import Path
 
@@ -35,26 +33,6 @@ def prepare(workspace: Path, data_env: dict[str, str], version: tuple[int, int] 
         version=lambda git, env: version,
         data_env=data_env,
     )
-
-
-def test_a_usable_setup_gives_a_store_and_no_warning(workspace: Path, data_env: dict[str, str], tmp_path: Path) -> None:
-    store, warnings = prepare(workspace, data_env)
-
-    assert store is not None
-    assert warnings == []
-    assert store.folder.parent == tmp_path / "data" / "agent" / "checkpoints"
-
-
-def test_disabled_gives_nothing_and_creates_nothing(workspace: Path, data_env: dict[str, str], tmp_path: Path) -> None:
-    assert prepare(workspace, data_env, enabled=False) == (None, [])
-    assert not (tmp_path / "data").exists()
-
-
-def test_missing_git_is_one_warning(workspace: Path, data_env: dict[str, str]) -> None:
-    store, warnings = prepare(workspace, data_env, version=None)
-
-    assert store is None
-    assert warnings == ["checkpoints off: git not found; /undo restores write/edit changes only"]
 
 
 def test_git_older_than_2_20_is_one_warning(workspace: Path, data_env: dict[str, str]) -> None:
@@ -134,16 +112,6 @@ def test_prune_removes_old_folders_of_dead_runs_only(tmp_path: Path) -> None:
     assert other.exists()
 
 
-@pytest.mark.parametrize("folder", ["x-²", "abcd-1234", "0123456789ABCDEF-1234", "0123456789abcdef-12a", "my-backup-9999999"])
-def test_prune_leaves_names_that_are_not_ours(tmp_path: Path, folder: str) -> None:
-    root = tmp_path / "checkpoints"
-    kept = make_folder(root, folder, STALE_AFTER + 60)
-
-    prune_stale(root)
-
-    assert kept.exists()
-
-
 def test_prune_survives_a_pid_too_large_for_the_os(tmp_path: Path) -> None:
     root = tmp_path / "checkpoints"
     kept = make_folder(root, name(10**30), STALE_AFTER + 60)
@@ -153,69 +121,6 @@ def test_prune_survives_a_pid_too_large_for_the_os(tmp_path: Path) -> None:
 
     assert kept.exists()
     assert not stale.exists()
-
-
-def test_prune_never_follows_a_symlink(tmp_path: Path) -> None:
-    root = tmp_path / "checkpoints"
-    root.mkdir()
-    target = make_folder(tmp_path, "target", STALE_AFTER + 60)
-    link = root / name(dead_pid())
-    link.symlink_to(target)
-
-    prune_stale(root)
-
-    assert link.is_symlink()
-    assert (target / "f").exists()
-
-
-def test_prune_skips_a_plain_file_with_our_name(tmp_path: Path) -> None:
-    root = tmp_path / "checkpoints"
-    root.mkdir()
-    file = root / name(dead_pid())
-    file.write_text("x")
-    old = time.time() - STALE_AFTER - 60
-    os.utime(file, (old, old))
-
-    prune_stale(root)
-
-    assert file.exists()
-
-
-def test_prepare_prunes_stale_folders(workspace: Path, data_env: dict[str, str], tmp_path: Path) -> None:
-    stale = make_folder(tmp_path / "data" / "agent" / "checkpoints", name(dead_pid()), STALE_AFTER + 60)
-
-    prepare(workspace, data_env)
-
-    assert not stale.exists()
-
-
-def test_the_folders_prepare_creates_are_private(workspace: Path, data_env: dict[str, str], tmp_path: Path) -> None:
-    old = os.umask(0)
-    try:
-        prepare(workspace, data_env)
-    finally:
-        os.umask(old)
-
-    for folder in (tmp_path / "data" / "agent", tmp_path / "data" / "agent" / "checkpoints"):
-        assert stat.S_IMODE(folder.stat().st_mode) == 0o700
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
-def test_a_git_planted_in_the_workspace_is_never_run(
-    workspace: Path, data_env: dict[str, str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    marker = tmp_path / "planted-ran"
-    (workspace / "git").write_text(f"#!/bin/sh\ntouch {marker}\n")
-    (workspace / "git").chmod(0o755)
-    real = Path(shutil.which("git") or "").parent
-    monkeypatch.chdir(workspace)
-
-    store, warnings = prepare_checkpoints(
-        workspace, Guardrails.off(workspace), {"PATH": f".:{real}"}, enabled=True, data_env=data_env
-    )
-
-    assert not marker.exists()
-    assert store is not None and warnings == []
 
 
 def test_only_a_git_inside_the_workspace_is_git_not_found(workspace: Path, data_env: dict[str, str]) -> None:

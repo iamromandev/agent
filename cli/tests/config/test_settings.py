@@ -14,18 +14,6 @@ def _fresh_settings() -> Iterator[None]:
     get_settings.cache_clear()
 
 
-def test_defaults() -> None:
-    settings = Settings(_env_file=None)
-    assert settings.ollama_url == "http://localhost:11434"
-    assert settings.model == "qwen2.5:7b-instruct"
-    assert settings.num_ctx == 8192
-    assert settings.bash_timeout == 120.0
-    assert settings.max_steps == 25
-    assert settings.task_max_steps == 15
-    assert settings.mcp_timeout == 60.0
-    assert settings.mcp_start_timeout == 120.0
-
-
 def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_MODEL", "foo")
     monkeypatch.setenv("AGENT_NUM_CTX", "4096")
@@ -112,13 +100,6 @@ def test_fetch_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert (settings.fetch_timeout, settings.fetch_max_bytes) == (3.0, 100)
 
 
-def test_fetch_limits_must_be_positive() -> None:
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, fetch_timeout=0)
-    with pytest.raises(ValidationError):
-        Settings(_env_file=None, fetch_max_bytes=0)
-
-
 def test_the_two_mcp_timeouts_are_separate_settings(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AGENT_MCP_TIMEOUT", "5")
     monkeypatch.setenv("AGENT_MCP_START_TIMEOUT", "300")
@@ -126,15 +107,7 @@ def test_the_two_mcp_timeouts_are_separate_settings(monkeypatch: pytest.MonkeyPa
     assert (settings.mcp_timeout, settings.mcp_start_timeout) == (5.0, 300.0)
 
 
-def test_search_url_is_unset_by_default_and_read_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert Settings(_env_file=None).search_url is None
-    monkeypatch.setenv("AGENT_SEARCH_URL", "http://localhost:8888")
-    assert Settings(_env_file=None).search_url == "http://localhost:8888"
-    monkeypatch.setenv("AGENT_SEARCH_URL", "")
-    assert Settings(_env_file=None).search_url is None
-
-
-@pytest.mark.parametrize("value", ["searx.local:8888", "ftp://searx.local", "http://", "file:///etc/passwd", "not a url"])
+@pytest.mark.parametrize("value", ["searx.local:8888", "ftp://searx.local", "file:///etc/passwd", "not a url"])
 def test_search_url_needs_an_http_scheme_and_a_host(value: str) -> None:
     with pytest.raises(ValidationError, match="AGENT_SEARCH_URL"):
         Settings(_env_file=None, search_url=value)

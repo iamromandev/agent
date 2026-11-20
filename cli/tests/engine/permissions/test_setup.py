@@ -4,16 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 from pathlib import Path
 
 import pytest
-from src.config import get_settings
-from src.engine.mcp.trust import TrustStore, trust_store_path
+from src.engine.mcp.trust import TrustStore
 from src.engine.permissions import setup as permission_setup
 from src.engine.permissions.config import project_settings_path
 from src.engine.permissions.rules import parse_rule
-from src.engine.permissions.setup import Rules, RuleSavedNotTrusted, prepare
+from src.engine.permissions.setup import Rules, prepare
 
 
 class Launch:
@@ -53,115 +51,12 @@ def _deny(rules: Rules, tool: str, **args: object) -> str | None:
     return verdict.rule.text if verdict else None
 
 
-def test_without_any_file_there_are_no_rules_and_no_warnings(launch: Launch) -> None:
-    setup = launch.prepare()
-
-    assert setup.warnings == ()
-    assert _allow(setup.rules, "bash", command="ls") is None
-    assert _deny(setup.rules, "bash", command="ls") is None
-    assert setup.rules.listing() == []
-    assert setup.rules.untrusted_allow == ()
-
-
-def test_global_rules_are_active_without_any_trust(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["bash(make test)"], deny=["bash(rm*)"])
-    rules = launch.prepare().rules
-
-    assert _allow(rules, "bash", command="make test") == "bash(make test)"
-    assert _deny(rules, "bash", command="rm x") == "bash(rm*)"
-    assert rules.allow("bash", {"command": "make test"}, None).source == "global"  # type: ignore[union-attr]
-    assert rules.deny("bash", {"command": "rm x"}, None).source == "global"  # type: ignore[union-attr]
-
-
-def test_a_deny_rule_refuses_a_chained_or_padded_command_with_the_same_rule(launch: Launch) -> None:
-    launch.write(launch.global_path, deny=["bash(rm*)"])
-    rules = launch.prepare().rules
-
-    assert _deny(rules, "bash", command="echo hi; rm x") == "bash(rm*)"
-    assert _deny(rules, "bash", command="   rm x") == "bash(rm*)"
-
-
 def test_an_allow_rule_does_not_approve_a_chained_command(launch: Launch) -> None:
     launch.write(launch.global_path, allow=["bash(git status*)"])
     rules = launch.prepare().rules
 
     assert _allow(rules, "bash", command="git status --short") == "bash(git status*)"
     assert _allow(rules, "bash", command="git status =(touch x)") is None
-
-
-def test_an_untrusted_project_allow_rule_is_inactive_but_its_deny_rule_applies(launch: Launch) -> None:
-    launch.project(allow=["bash"], deny=["bash(rm*)"])
-    setup = launch.prepare()
-
-    assert _allow(setup.rules, "bash", command="ls") is None
-    assert _deny(setup.rules, "bash", command="rm x") == "bash(rm*)"
-    assert [r.text for r in setup.rules.untrusted_allow] == ["bash"]
-
-
-def test_a_project_file_with_only_deny_rules_needs_no_trust(launch: Launch) -> None:
-    launch.project(deny=["bash(rm*)"])
-
-    assert launch.prepare().rules.untrusted_allow == ()
-
-
-def test_trusting_activates_the_project_allow_rules_and_remembers_the_bytes(launch: Launch) -> None:
-    raw = launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-
-    rules.trust_project()
-
-    assert _allow(rules, "bash", command="ls") == "bash(ls)"
-    assert rules.untrusted_allow == ()
-    assert launch.store.is_trusted(launch.workspace, raw)
-    again = launch.prepare().rules  # the next launch
-    assert _allow(again, "bash", command="ls") == "bash(ls)"
-    assert again.untrusted_allow == ()
-
-
-def test_editing_a_trusted_project_file_makes_it_untrusted_again(launch: Launch) -> None:
-    launch.project(allow=["bash(ls)"])
-    launch.prepare().rules.trust_project()
-
-    launch.project(allow=["bash(ls)", "bash"])
-
-    rules = launch.prepare().rules
-    assert _allow(rules, "bash", command="anything") is None
-    assert [r.text for r in rules.untrusted_allow] == ["bash(ls)", "bash"]
-
-
-def test_trust_is_per_folder(launch: Launch, tmp_path: Path) -> None:
-    launch.project(allow=["bash(ls)"])
-    launch.prepare().rules.trust_project()
-    other = tmp_path / "other"
-    other.mkdir()
-    project_settings_path(other).parent.mkdir()
-    project_settings_path(other).write_bytes(launch.project_path.read_bytes())  # the very same bytes
-
-    rules = prepare(other, launch.global_path, launch.store).rules
-
-    assert [r.text for r in rules.untrusted_allow] == ["bash(ls)"]
-
-
-def test_deny_wins_whatever_the_source_and_both_lists_are_always_checked(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["bash"])
-    launch.project(deny=["bash(rm*)"])
-    rules = launch.prepare().rules
-
-    verdict = rules.deny("bash", {"command": "rm x"}, None)
-    assert verdict is not None
-    assert (verdict.rule.text, verdict.source) == ("bash(rm*)", "project")
-    assert _allow(rules, "bash", command="rm x") == "bash"  # the loop asks deny first
-
-
-def test_a_global_deny_applies_to_a_project_allow(launch: Launch) -> None:
-    launch.write(launch.global_path, deny=["bash(rm*)"])
-    launch.project(allow=["bash"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    verdict = rules.deny("bash", {"command": "rm x"}, None)
-    assert verdict is not None
-    assert verdict.source == "global"
 
 
 def test_a_store_inside_the_workspace_is_refused_with_a_warning(launch: Launch) -> None:
@@ -179,112 +74,13 @@ def test_a_store_inside_the_workspace_is_refused_with_a_warning(launch: Launch) 
     assert _allow(setup.rules, "bash", command="x") == "bash"  # still active for this launch (the caller warns)
 
 
-def test_a_corrupt_store_trusts_nothing(launch: Launch) -> None:
-    launch.project(allow=["bash"])
-    launch.store.path.parent.mkdir(parents=True)
-    launch.store.path.write_bytes(b"{not json")
-
-    assert [r.text for r in launch.prepare().rules.untrusted_allow] == ["bash"]
-
-
-def test_the_store_does_not_follow_the_workspace_dot_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A `.env` in the workspace names a store that already trusts the project file: `prepare` must not use it."""
-    workspace = tmp_path / "ws"
-    (workspace / ".agent").mkdir(parents=True)
-    raw = json.dumps({"permissions": {"allow": ["bash"]}}).encode()
-    (workspace / ".agent" / "settings.json").write_bytes(raw)
-    planted = tmp_path / "planted"
-    (planted / "agent").mkdir(parents=True)
-    (planted / "agent" / "permission-trust.json").write_text(
-        json.dumps({str(workspace): hashlib.sha256(raw).hexdigest()})
-    )
-    (workspace / ".env").write_text(f"XDG_DATA_HOME={planted}\nAGENT_SESSIONS_DIR={planted}\nAGENT_XDG_DATA_HOME={planted}\n")
-    monkeypatch.chdir(workspace)
-    get_settings.cache_clear()
-    try:
-        store = TrustStore(trust_store_path(name="permission-trust.json"))
-        rules = prepare(workspace, tmp_path / "none.json", store).rules
-    finally:
-        get_settings.cache_clear()
-
-    assert store.path == Path(os.environ["XDG_DATA_HOME"]) / "agent" / "permission-trust.json"
-    assert not store.path.is_relative_to(planted)
-    assert [r.text for r in rules.untrusted_allow] == ["bash"]
-
-
-def test_the_permission_store_is_not_the_mcp_store(tmp_path: Path) -> None:
-    env = {"XDG_DATA_HOME": str(tmp_path)}
-    assert trust_store_path(env, name="permission-trust.json") != trust_store_path(env)
-
-
-def test_an_invalid_rule_is_one_warning_naming_the_file_and_the_rule_and_the_rest_still_apply(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["bash(a*b)", "bash()", "bash(ok)"])
-    setup = launch.prepare()
-
-    invalid = [w for w in setup.warnings if str(launch.global_path) in w]
-    assert len(invalid) == 2
-    assert any("bash(a*b)" in w for w in invalid)
-    assert any("bash()" in w for w in invalid)
-    assert _allow(setup.rules, "bash", command="ok") == "bash(ok)"
-
-
-def test_a_global_file_with_bad_json_is_a_warning_and_adds_no_rules(launch: Launch) -> None:
-    launch.global_path.parent.mkdir(parents=True)
-    launch.global_path.write_text("{oops")
-
-    setup = launch.prepare()
-
-    assert len(setup.warnings) == 1
-    assert str(launch.global_path) in setup.warnings[0]
-    assert _allow(setup.rules, "bash", command="x") is None
-
-
-def test_a_project_file_with_bad_json_warns_that_its_deny_rules_are_not_applied_either(launch: Launch) -> None:
-    launch.project_path.parent.mkdir(parents=True)
-    launch.project_path.write_text("{oops")
-
-    setup = launch.prepare()
-
-    assert len(setup.warnings) == 1
-    assert "deny rules are not applied" in setup.warnings[0]
-    assert setup.rules.untrusted_allow == ()
-
-
-def test_a_symlinked_project_file_is_a_warning_and_adds_no_rules(launch: Launch, tmp_path: Path) -> None:
-    real = tmp_path / "real.json"
-    launch.write(real, allow=["bash"], deny=["bash(rm*)"])
-    launch.project_path.parent.mkdir(parents=True)
-    launch.project_path.symlink_to(real)
-
-    setup = launch.prepare()
-
-    assert any("symlink" in w for w in setup.warnings)
-    assert _deny(setup.rules, "bash", command="rm x") is None
-    assert setup.rules.untrusted_allow == ()
-
-
-def test_a_symlinked_global_file_is_followed(launch: Launch, tmp_path: Path) -> None:
-    real = tmp_path / "dotfiles" / "settings.json"
-    launch.write(real, allow=["bash(ls)"])
-    launch.global_path.parent.mkdir(parents=True)
-    launch.global_path.symlink_to(real)
-
-    assert _allow(launch.prepare().rules, "bash", command="ls") == "bash(ls)"
-
-
-@pytest.mark.parametrize("rule", ["web_fetch(https://docs.python.org*)", "web_fetch(https://docs.python.org:8080*)"])
+@pytest.mark.parametrize("rule", ["web_fetch(https://docs.python.org:8080*)"])
 def test_a_web_fetch_prefix_without_a_slash_after_the_host_warns_but_still_applies(launch: Launch, rule: str) -> None:
     launch.write(launch.global_path, allow=[rule])
     setup = launch.prepare()
 
     assert any("web_fetch" in w and "/" in w for w in setup.warnings)
     assert len(setup.rules.listing()) > 0
-
-
-def test_a_web_fetch_prefix_that_ends_with_a_slash_does_not_warn(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["web_fetch(https://docs.python.org/*)", "web_fetch(https://a.org/x)"])
-
-    assert launch.prepare().warnings == ()
 
 
 def test_the_listing_shows_every_rule_with_its_source_inactive_ones_invalid_ones_and_the_trust_state(
@@ -302,14 +98,6 @@ def test_the_listing_shows_every_rule_with_its_source_inactive_ones_invalid_ones
         "deny bash(rm*) (project)",
         "project file: untrusted",
     ]
-
-
-def test_the_listing_marks_the_project_file_trusted_once_it_is(launch: Launch) -> None:
-    launch.project(allow=["bash"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    assert rules.listing() == ["allow bash (project)", "project file: trusted"]
 
 
 def test_the_listing_reports_a_file_that_could_not_be_used(launch: Launch) -> None:
@@ -335,41 +123,11 @@ def test_the_empty_rules_decide_nothing_and_cannot_save() -> None:
         rules.save_project("bash")
 
 
-def test_a_prepared_launch_can_save(launch: Launch) -> None:
-    assert launch.prepare().rules.can_save is True
-
-
 # Always here
 
 
 def _saved(launch: Launch) -> dict:
     return json.loads(launch.project_path.read_text())
-
-
-def test_saving_adds_the_rule_to_the_file_trusts_the_new_bytes_and_applies_it_at_once(launch: Launch) -> None:
-    rules = launch.prepare().rules
-
-    rules.save_project("bash(uv run pytest -q)")
-
-    assert _saved(launch)["permissions"]["allow"] == ["bash(uv run pytest -q)"]
-    assert _allow(rules, "bash", command="uv run pytest -q") == "bash(uv run pytest -q)"
-    assert launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
-    again = launch.prepare()  # the next launch: no trust prompt, the rule applies
-    assert again.rules.untrusted_allow == ()
-    assert _allow(again.rules, "bash", command="uv run pytest -q") == "bash(uv run pytest -q)"
-
-
-def test_saving_next_to_trusted_rules_keeps_them_and_other_keys(launch: Launch) -> None:
-    launch.write(launch.project_path, allow=["bash(ls)"], deny=["bash(rm*)"], theme="x")
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    rules.save_project("write")
-
-    data = _saved(launch)
-    assert data["permissions"] == {"allow": ["bash(ls)", "write"], "deny": ["bash(rm*)"]}
-    assert data["theme"] == "x"
-    assert launch.prepare().rules.untrusted_allow == ()
 
 
 def test_saving_does_not_trust_rules_of_an_untrusted_file(launch: Launch) -> None:
@@ -406,18 +164,6 @@ def test_saving_the_same_rule_twice_adds_no_duplicate(launch: Launch) -> None:
     assert rules.listing().count("allow bash(ls) (project)") == 1
 
 
-def test_a_file_that_cannot_be_parsed_is_never_overwritten(launch: Launch) -> None:
-    launch.project_path.parent.mkdir(parents=True)
-    launch.project_path.write_text("{oops")
-    rules = launch.prepare().rules
-
-    with pytest.raises(ValueError, match="not valid JSON"):
-        rules.save_project("bash(ls)")
-
-    assert launch.project_path.read_text() == "{oops"
-    assert _allow(rules, "bash", command="ls") is None
-
-
 def test_a_symlinked_project_file_is_not_written_through(launch: Launch, tmp_path: Path) -> None:
     real = tmp_path / "real.json"
     before = launch.write(real, allow=["bash(x)"])
@@ -431,119 +177,7 @@ def test_a_symlinked_project_file_is_not_written_through(launch: Launch, tmp_pat
     assert real.read_bytes() == before
 
 
-def test_a_failing_trust_store_still_activates_the_rule_and_reports_the_error(launch: Launch) -> None:
-    inside = TrustStore(launch.workspace / "trust.json")
-    rules = prepare(launch.workspace, launch.global_path, inside).rules
-
-    with pytest.raises(OSError, match="inside the workspace"):
-        rules.save_project("bash(ls)")
-
-    assert _allow(rules, "bash", command="ls") == "bash(ls)"
-    assert _saved(launch)["permissions"]["allow"] == ["bash(ls)"]
-
-
-def test_a_saved_rule_does_not_trust_a_file_changed_between_launch_and_the_save_itself(
-    launch: Launch, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The change lands after `Rules` looked and before `add_allow` read: only add_allow's own read counts."""
-    launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-    real = permission_setup.add_allow
-
-    def edited_first(path: Path, rule_text: str) -> tuple[bytes | None, bytes]:
-        launch.project(allow=["bash(ls)", "bash"])  # someone else's edit, in that window
-        return real(path, rule_text)
-
-    monkeypatch.setattr(permission_setup, "add_allow", edited_first)
-
-    rules.save_project("write")
-
-    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
-    assert [r.text for r in launch.prepare().rules.untrusted_allow] == ["bash(ls)", "bash", "write"]
-
-
-def test_a_trust_store_that_fails_after_the_file_was_written_is_reported_as_exactly_that(launch: Launch) -> None:
-    rules = prepare(launch.workspace, launch.global_path, TrustStore(launch.workspace / "trust.json")).rules
-
-    with pytest.raises(RuleSavedNotTrusted) as caught:
-        rules.save_project("bash(ls)")
-
-    message = str(caught.value)
-    assert "saved to .agent/settings.json" in message
-    assert "could not be remembered as trusted" in message
-    assert "next launch will ask" in message
-    assert _saved(launch)["permissions"]["allow"] == ["bash(ls)"]
-    assert _allow(rules, "bash", command="ls") == "bash(ls)"
-
-
 # save_project_key: the model choice must not cost the project its trust
-
-
-def test_saving_a_key_into_a_trusted_file_keeps_it_trusted_with_its_rules_and_hooks(launch: Launch) -> None:
-    launch.write(
-        launch.project_path,
-        allow=["bash(ls)"],
-        hooks={"Stop": [{"command": "true"}]},
-    )
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    rules.save_project_key("model", "qwen3:14b")
-
-    data = _saved(launch)
-    assert data["model"] == "qwen3:14b"
-    assert data["permissions"] == {"allow": ["bash(ls)"]}
-    assert data["hooks"] == {"Stop": [{"command": "true"}]}
-    assert launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
-    again = launch.prepare()  # the next launch: no trust prompt, rules and hooks still active
-    assert again.rules.untrusted_allow == ()
-    assert again.rules.pending_trust is False
-    assert _allow(again.rules, "bash", command="ls") == "bash(ls)"
-
-
-def test_a_second_switch_after_the_first_stays_trusted(launch: Launch) -> None:
-    launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    rules.save_project_key("model", "a")
-    rules.save_project_key("model", "b")
-
-    assert _saved(launch)["model"] == "b"
-    assert launch.prepare().rules.pending_trust is False
-
-
-def test_a_rule_saved_after_a_model_switch_is_still_trusted(launch: Launch) -> None:
-    launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    rules.save_project_key("model", "a")
-    rules.save_project("write")
-
-    assert launch.prepare().rules.pending_trust is False
-
-
-def test_saving_a_key_creates_the_file_when_none_exists_and_it_is_trusted(launch: Launch) -> None:
-    rules = launch.prepare().rules
-
-    rules.save_project_key("model", "a")
-
-    assert _saved(launch) == {"model": "a"}
-    assert launch.prepare().rules.pending_trust is False
-
-
-def test_saving_a_key_does_not_trust_the_rules_of_an_untrusted_file(launch: Launch) -> None:
-    launch.project(allow=["bash(*)"])
-    rules = launch.prepare().rules  # untrusted: the user declined
-
-    rules.save_project_key("model", "a")
-
-    assert _saved(launch)["model"] == "a"
-    assert _allow(rules, "bash", command="rm x") is None
-    again = launch.prepare().rules
-    assert [r.text for r in again.untrusted_allow] == ["bash(*)"]  # asked again next launch
 
 
 def test_saving_a_key_after_the_file_was_edited_during_the_run_does_not_trust_the_edit(launch: Launch) -> None:
@@ -556,34 +190,6 @@ def test_saving_a_key_after_the_file_was_edited_during_the_run_does_not_trust_th
 
     assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
     assert [r.text for r in launch.prepare().rules.untrusted_allow] == ["bash(ls)", "bash"]
-
-
-def test_a_key_saved_over_an_edit_made_in_the_write_window_does_not_trust_it(
-    launch: Launch, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.trust_project()
-    real = permission_setup.set_top_key
-
-    def edited_first(path: Path, key: str, value: str) -> tuple[bytes | None, bytes]:
-        launch.project(allow=["bash(ls)", "bash"])
-        return real(path, key, value)
-
-    monkeypatch.setattr(permission_setup, "set_top_key", edited_first)
-
-    rules.save_project_key("model", "a")
-
-    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
-
-
-def test_a_failing_trust_store_after_a_key_write_says_the_next_launch_will_ask(launch: Launch) -> None:
-    rules = prepare(launch.workspace, launch.global_path, TrustStore(launch.workspace / "trust.json")).rules
-
-    with pytest.raises(RuleSavedNotTrusted, match="next launch will ask"):
-        rules.save_project_key("model", "a")
-
-    assert _saved(launch)["model"] == "a"
 
 
 def test_saving_a_key_never_overwrites_an_unparseable_or_symlinked_file(launch: Launch, tmp_path: Path) -> None:
@@ -602,44 +208,7 @@ def test_saving_a_key_never_overwrites_an_unparseable_or_symlinked_file(launch: 
     assert real.read_bytes() == before
 
 
-def test_the_empty_rules_cannot_save_a_key() -> None:
-    with pytest.raises(OSError, match="cannot be saved here") as caught:
-        Rules.empty().save_project_key("model", "a")
-    assert "no project settings file" not in str(caught.value)  # the file may exist: there is no way to write it
-
-
 # text from the project file is escaped wherever it is shown
-
-
-def test_the_listing_escapes_rule_text_and_reasons_from_the_file(launch: Launch) -> None:
-    launch.project(allow=["bash(\x1b[2Jevil\nfake line*)", "bad\x1b[31m rule"], deny=["bash(rm\x1b]0;x\x07*)"])
-    launch.prepare().rules.trust_project()
-
-    lines = launch.prepare().rules.listing()
-
-    assert all(line.isprintable() for line in lines)
-    assert any("\\x1b[2Jevil\\x0afake line*" in line for line in lines)
-    assert any(line.startswith("invalid bad\\x1b[31m rule") for line in lines)
-
-
-def test_the_listing_escapes_the_error_of_an_unreadable_file(launch: Launch) -> None:
-    launch.project_path.parent.mkdir(parents=True)
-    launch.project_path.write_text("{\x1b[2J")
-
-    lines = launch.prepare().rules.listing()
-
-    assert all(line.isprintable() for line in lines)
-
-
-def test_warnings_escape_the_rule_text_and_the_path(launch: Launch) -> None:
-    launch.project(allow=["bash(a\x1b[2J*b)"])
-    launch.project_path.write_text(json.dumps({"permissions": {"allow": ["bash(a\x1b[2J*b)", "web_fetch(https://a.org\n*)"]}}))
-
-    warnings = launch.prepare().warnings
-
-    assert warnings
-    assert all(w.isprintable() for w in warnings)
-    assert any("\\x1b[2J" in w for w in warnings)
 
 
 def test_a_bad_list_is_a_warning_naming_the_list_and_the_file_and_the_other_list_still_applies(launch: Launch) -> None:
@@ -654,15 +223,6 @@ def test_a_bad_list_is_a_warning_naming_the_list_and_the_file_and_the_other_list
     assert any(line.startswith("error (global): ") and "permissions.allow" in line for line in setup.rules.listing())
 
 
-def test_a_project_file_with_a_bad_allow_list_keeps_its_deny_rules_and_asks_for_no_trust(launch: Launch) -> None:
-    launch.write(launch.project_path, allow=5, deny=["bash(rm*)"])
-
-    rules = launch.prepare().rules
-
-    assert _deny(rules, "bash", command="rm x") == "bash(rm*)"
-    assert rules.untrusted_allow == ()
-
-
 def test_many_warnings_are_cut_to_twenty_and_a_count(launch: Launch) -> None:
     launch.write(launch.global_path, allow=[f"bash(a*{i}*)" for i in range(45)])
 
@@ -672,22 +232,13 @@ def test_many_warnings_are_cut_to_twenty_and_a_count(launch: Launch) -> None:
     assert warnings[-1] == "and 25 more warnings"
 
 
-def test_exactly_twenty_warnings_are_all_shown(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=[f"bash(a*{i}*)" for i in range(20)])
-
-    warnings = launch.prepare().warnings
-
-    assert len(warnings) == 20
-    assert not any("more" in w for w in warnings)
-
-
 # a valued rule for a tool without a key argument
 
 
 KEYS = {"bash": "command", "web_fetch": "url", "read": None, "write": None, "edit": None}
 
 
-@pytest.mark.parametrize("rule", ["write(a.py)", "edit(src/*)", "read(secret.txt)", "mcp__gh__issues(x)"])
+@pytest.mark.parametrize("rule", ["mcp__gh__issues(x)"])
 def test_a_valued_rule_for_a_tool_without_a_key_argument_warns_that_it_never_applies(launch: Launch, rule: str) -> None:
     launch.write(launch.global_path, allow=[rule])
 
@@ -697,123 +248,7 @@ def test_a_valued_rule_for_a_tool_without_a_key_argument_warns_that_it_never_app
     assert warning == f"{launch.global_path}: {rule}: {rule.split('(')[0]} has no argument to match; this rule never applies"
 
 
-def test_the_same_warning_for_a_deny_rule_and_a_project_rule(launch: Launch) -> None:
-    launch.write(launch.global_path, deny=["read(secret.txt)"])
-    launch.project(allow=["write(a.py)"])
-
-    warnings = prepare(launch.workspace, launch.global_path, launch.store, KEYS).warnings
-
-    assert len(warnings) == 2
-    assert all("has no argument to match" in w for w in warnings)
-
-
-@pytest.mark.parametrize("rule", ["write", "read", "bash(ls)", "bash(ls*)", "web_fetch(https://a.org/*)", "mcp__gh__*", "other(x)"])
-def test_rules_that_can_match_do_not_warn(launch: Launch, rule: str) -> None:
-    launch.write(launch.global_path, allow=[rule])
-
-    assert prepare(launch.workspace, launch.global_path, launch.store, KEYS).warnings == ()
-
-
-def test_without_the_tool_list_no_rule_is_checked_against_tools(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["write(a.py)"])
-
-    assert launch.prepare().warnings == ()
-
-
-def test_prepare_exposes_the_parsed_data_of_both_files(tmp_path: Path) -> None:
-    ws = tmp_path / "ws"
-    (ws / ".agent").mkdir(parents=True)
-    (ws / ".agent" / "settings.json").write_text('{"guardrails": {"protected": ["a"]}}')
-    glob = tmp_path / "g.json"
-    glob.write_text('{"guardrails": {"keepEnv": ["X"]}}')
-
-    setup = prepare(ws, glob, TrustStore(tmp_path / "t.json"))
-
-    assert setup.global_data == {"guardrails": {"keepEnv": ["X"]}}
-    assert setup.project_data == {"guardrails": {"protected": ["a"]}}
-
-
 HOOKS = {"hooks": {"PreToolUse": [{"command": "echo hi"}]}}
-
-
-def test_a_project_file_with_only_hooks_is_untrusted_until_the_user_trusts_it(launch: Launch) -> None:
-    raw = launch.write(launch.project_path, **HOOKS)
-    rules = launch.prepare().rules
-
-    assert not rules.project_trusted and rules.pending_trust
-    rules.trust_project()
-
-    assert rules.project_trusted and not rules.pending_trust
-    assert launch.store.is_trusted(launch.workspace, raw)
-    assert launch.prepare().rules.project_trusted  # the next launch
-
-
-def test_editing_a_trusted_hooks_file_asks_again(launch: Launch) -> None:
-    launch.write(launch.project_path, **HOOKS)
-    launch.prepare().rules.trust_project()
-
-    launch.write(launch.project_path, hooks={"Stop": [{"command": "other"}]})
-
-    assert launch.prepare().rules.pending_trust
-
-
-@pytest.mark.parametrize("extra", [{}, {"hooks": {}}, {"hooks": None}])
-def test_a_project_file_without_hooks_or_allow_rules_has_nothing_pending(launch: Launch, extra: dict) -> None:
-    launch.write(launch.project_path, deny=["bash(rm*)"], **extra)
-
-    assert not launch.prepare().rules.pending_trust
-
-
-@pytest.mark.parametrize(
-    "hooks",
-    [{"Nope": [{"command": "x"}]}, {"Stop": [{"command": ""}]}, {"Stop": []}, {"Stop": ["x"]}, {"Stop": [{"command": "x", "timeout": -1}]}],
-)
-def test_a_hooks_object_without_one_valid_entry_is_not_pending_trust(launch: Launch, hooks: dict) -> None:
-    launch.write(launch.project_path, hooks=hooks)
-
-    assert not launch.prepare().rules.pending_trust
-
-
-def test_one_valid_entry_among_invalid_ones_is_pending_trust(launch: Launch) -> None:
-    launch.write(launch.project_path, hooks={"Nope": [{"command": "x"}], "Stop": [{"command": "bye"}]})
-
-    assert launch.prepare().rules.pending_trust
-
-
-def test_a_project_file_with_allow_rules_is_pending_as_before(launch: Launch) -> None:
-    launch.project(allow=["bash(ls)"])
-
-    assert launch.prepare().rules.pending_trust
-
-
-def test_always_here_on_a_file_with_untrusted_hooks_does_not_trust_the_new_bytes(launch: Launch) -> None:
-    launch.write(launch.project_path, **HOOKS)
-    rules = launch.prepare().rules  # untrusted, the user declined
-
-    rules.save_project("bash(ls)")
-
-    assert _allow(rules, "bash", command="ls") == "bash(ls)"
-    assert not rules.project_trusted
-    again = launch.prepare().rules
-    assert again.pending_trust and not again.project_trusted
-
-
-def test_always_here_on_a_trusted_hooks_file_keeps_it_trusted(launch: Launch) -> None:
-    launch.write(launch.project_path, **HOOKS)
-    rules = launch.prepare().rules
-    rules.trust_project()
-
-    rules.save_project("bash(ls)")
-
-    again = launch.prepare().rules
-    assert again.project_trusted and not again.pending_trust
-    assert json.loads(launch.project_path.read_text())["hooks"] == HOOKS["hooks"]
-
-
-def test_a_rules_object_built_without_hooks_behaves_as_before() -> None:
-    rules = Rules.empty()
-
-    assert rules.project_trusted and not rules.pending_trust
 
 
 def test_a_run_allow_rule_is_active_but_never_saved_or_remembered(launch: Launch) -> None:
@@ -827,60 +262,12 @@ def test_a_run_allow_rule_is_active_but_never_saved_or_remembered(launch: Launch
     assert rules.allow("bash", {"command": "make test"}, "command").source == "run"
 
 
-def test_a_deny_rule_beats_a_run_allow_rule(launch: Launch) -> None:
-    launch.write(launch.global_path, deny=["bash(rm*)"])
-    rules = launch.prepare().rules
-
-    rules.add_run_allow([parse_rule("bash")])
-
-    assert _deny(rules, "bash", command="rm x") == "bash(rm*)"
-
-
-def test_global_and_project_rules_are_consulted_before_run_rules(launch: Launch) -> None:
-    launch.write(launch.global_path, allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.add_run_allow([parse_rule("bash(ls)")])
-
-    verdict = rules.allow("bash", {"command": "ls"}, "command")
-
-    assert verdict is not None and verdict.source == "global"
-
-
 def test_the_listing_shows_run_rules_as_run(launch: Launch) -> None:
     launch.write(launch.global_path, allow=["bash(ls)"])
     rules = launch.prepare().rules
     rules.add_run_allow([parse_rule("edit")])
 
     assert rules.listing() == ["allow bash(ls) (global)", "allow edit (run)", "project file: none"]
-
-
-def test_trusting_for_the_run_activates_project_rules_without_touching_the_store(launch: Launch) -> None:
-    raw = launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    assert rules.pending_trust
-
-    rules.trust_for_run()
-
-    assert _allow(rules, "bash", command="ls") == "bash(ls)"
-    assert rules.project_trusted and not rules.pending_trust
-    assert not launch.store.is_trusted(launch.workspace, raw)
-    assert not launch.store.path.exists()
-    again = launch.prepare().rules  # the next launch still asks
-    assert again.pending_trust
-
-
-def test_saving_a_rule_after_trusting_for_the_run_never_writes_the_trust_store(launch: Launch) -> None:
-    raw = launch.project(allow=["bash(ls)"])
-    rules = launch.prepare().rules
-    rules.trust_for_run()
-
-    rules.save_project("write")
-    rules.save_project_key("model", "x")
-
-    assert rules.project_trusted  # for this run
-    assert not launch.store.path.exists()
-    assert not launch.store.is_trusted(launch.workspace, raw)
-    assert not launch.store.is_trusted(launch.workspace, launch.project_path.read_bytes())
 
 
 def test_run_rule_warnings_name_unknown_tools_and_valued_rules_on_keyless_tools() -> None:

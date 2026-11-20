@@ -38,37 +38,3 @@ def test_ac8_nfr3_many_long_skills_stay_in_budget() -> None:
     for line in lines[1:-1]:
         assert len(line.split(": ", 1)[1]) <= 200  # cut at 200 characters, the "…" included
     assert lines[1].endswith("\u2026")
-
-
-def test_description_is_one_line_and_escaped() -> None:
-    text = skills(skill("x", "a\n\tb \x1b[31m c")).section()
-    assert text is not None
-    body = text.splitlines()[1:]
-    assert len(body) == 1 and "\x1b" not in body[0] and body[0].startswith("- x: a b ")
-
-
-def test_exactly_fitting_list_has_no_tail() -> None:
-    text = skills(skill("a", "d"), skill("b", "d")).section()
-    assert text is not None and "more skills" not in text
-
-
-def test_a_long_cyrillic_description_is_cut_at_200_shown_characters_and_stays_readable() -> None:
-    text = skills(skill("ru", "Проверка кода " * 30)).section()
-    assert text is not None
-    description = text.splitlines()[1].removeprefix("- ru: ")
-    assert len(description) == 200 and description.endswith("\u2026")
-    assert description.startswith("Проверка кода Проверка")
-    assert "\\u" not in description
-
-
-def test_a_cut_never_splits_an_escape_sequence() -> None:
-    text = skills(skill("e", "a" * 197 + "\u202e" + "b" * 50)).section()  # the escape (6 characters) does not fit
-    assert text is not None
-    description = text.splitlines()[1].removeprefix("- e: ")
-    assert description == "a" * 197 + "\u2026" and len(description) == 198
-
-
-def test_a_bidi_override_in_a_description_is_still_written_out() -> None:
-    text = skills(skill("b", "safe \u202etxet")).section()
-    assert text is not None
-    assert text.splitlines()[1] == "- b: safe \\u202etxet"

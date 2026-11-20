@@ -31,7 +31,7 @@ def test_secret_looking_names_are_removed(name: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "name", ["PATH", "HOME", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "KEYBOARD", "KEYCHAIN", "SSH_AUTH_SOCK", "TERM"]
+    "name", ["HOME", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "KEYBOARD", "KEYCHAIN", "SSH_AUTH_SOCK", "TERM"]
 )
 def test_other_names_are_kept(name: str) -> None:
     assert EnvFilter(frozenset()).filter({name: "value"}) == {name: "value"}

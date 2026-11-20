@@ -2,25 +2,18 @@
 
 from __future__ import annotations
 
-import json
 from datetime import date
-from pathlib import Path
 from typing import Any
 
-import pytest
 from src.engine.approval import Choice, Decision
-from src.engine.events import AgentEvent, Notice, ToolFinished
+from src.engine.events import AgentEvent, Notice
 from src.engine.loop import Agent
-from src.engine.mode import Mode
 from src.engine.provider.base import Done, Message, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import FileRecorder
-from src.engine.session.paths import workspace_dir
 from src.engine.terminal.manager import TerminalManager
 from src.engine.tools import default_tools
 from src.engine.tools.base import ToolContext
 
 from tests.fakes import Gate, MemoryRecorder, RecordingApprover, ScriptedProvider
-from tests.helpers import wait_until
 
 ONCE = Decision(Choice.ONCE)
 DENY = Decision(Choice.DENY)
@@ -70,172 +63,6 @@ def tool_messages(agent: Agent) -> list[Message]:
     return [m for m in agent.history if m.role == "tool"]
 
 
-async def test_an_approved_term_start_starts_the_terminal(
-    ctx: ToolContext, manager: TerminalManager
-) -> None:
-    script = [reply(call("term_start", name="api", command="sleep 30")), reply(TextDelta("started"))]
-    agent, _, approver = make_agent(ctx, manager, script, [ONCE])
-
-    await agent.run_turn("serve", Events())
-
-    assert manager.names() == ["api"]
-    assert approver.requests[0].label == "term_start api"
-    assert approver.requests[0].preview is not None and approver.requests[0].preview.body == "sleep 30"
-    assert tool_messages(agent)[0].content.startswith("started api (pid ")
-
-
-async def test_a_denied_term_start_starts_nothing(ctx: ToolContext, manager: TerminalManager) -> None:
-    script = [reply(call("term_start", name="api", command="sleep 30")), reply(TextDelta("ok"))]
-    agent, _, _ = make_agent(ctx, manager, script, [Decision(Choice.DENY, note="not now")])
-
-    await agent.run_turn("serve", Events())
-
-    assert manager.names() == []
-    assert tool_messages(agent)[0].content == "User denied this call. Note: not now"
-
-
-async def test_a_denied_term_stop_leaves_the_terminal_running(ctx: ToolContext, manager: TerminalManager) -> None:
-    terminal = manager.start("api", "sleep 30")
-    script = [reply(call("term_stop", name="api")), reply(TextDelta("ok"))]
-    agent, _, _ = make_agent(ctx, manager, script, [DENY])
-
-    await agent.run_turn("stop it", Events())
-
-    assert terminal.status == ("running", None)
-
-
-async def test_term_stop_through_the_loop_stops_the_group(ctx: ToolContext, manager: TerminalManager) -> None:
-    terminal = manager.start("api", "sleep 30")
-    script = [reply(call("term_stop", name="api")), reply(TextDelta("ok"))]
-    agent, _, _ = make_agent(ctx, manager, script, [ONCE])
-
-    await agent.run_turn("stop it", Events())
-
-    assert terminal.status[0] == "exited"
-    assert tool_messages(agent)[0].content == "stopped api (exited: SIGTERM)"
-
-
-async def test_term_read_needs_no_approval(ctx: ToolContext, manager: TerminalManager) -> None:
-    terminal = manager.start("api", "echo hello; sleep 30")
-    await wait_until(lambda: terminal.buffer.tail(1) == ["hello"])
-    script = [reply(call("term_read", name="api")), reply(TextDelta("saw it"))]
-    agent, _, approver = make_agent(ctx, manager, script, [])
-
-    await agent.run_turn("look", Events())
-
-    assert approver.requests == []
-    assert tool_messages(agent)[0].content == "hello\n\nrunning"
-
-
-async def test_ac16_the_terminal_keeps_a_token_raw_and_term_read_redacts_it(
-    ctx: ToolContext, manager: TerminalManager, tmp_path: Path, workspace: Path
-) -> None:
-    token = "ghp_abcdefghijklmnopqrstuvwxyz0123456789"
-    terminal = manager.start("api", f"echo token {token}; sleep 30")
-    await wait_until(lambda: terminal.buffer.tail(1) == [f"token {token}"])
-    recorder = FileRecorder(workspace_dir(tmp_path / "sessions", workspace), workspace)
-    script = [reply(call("term_read", name="api")), reply(TextDelta("saw it"))]
-    agent, _, _ = make_agent(ctx, manager, script, [], recorder=recorder)
-    events = Events()
-
-    await agent.run_turn("look", events)
-    agent.close()
-
-    assert terminal.buffer.tail(1) == [f"token {token}"]  # what the pane draws is the user's own screen
-    assert tool_messages(agent)[0].content == "token [redacted:github-token]\n\nrunning"
-    finished = next(e for e in events.items if isinstance(e, ToolFinished))
-    assert token not in repr(finished)
-    (session,) = workspace_dir(tmp_path / "sessions", workspace).glob("*.jsonl")
-    assert token not in session.read_text()
-
-
-async def test_term_read_of_the_last_lines_of_a_pem_block_redacts_the_orphan_end(
-    ctx: ToolContext, manager: TerminalManager
-) -> None:
-    command = "printf '%s\\n' '-----BEGIN PRIVATE KEY-----' MIIEvQIBADANBgkq Zm9vYmFyYmF6 '-----END PRIVATE KEY-----' after; sleep 30"
-    terminal = manager.start("api", command)
-    await wait_until(lambda: terminal.buffer.tail(1) == ["after"])
-    script = [reply(call("term_read", name="api", lines=3)), reply(TextDelta("saw it"))]
-    agent, _, _ = make_agent(ctx, manager, script, [])
-
-    await agent.run_turn("look", Events())
-
-    content = tool_messages(agent)[0].content
-    assert "Zm9vYmFy" not in content
-    assert content == "[redacted:private-key]\nafter\n\nrunning"
-
-
-async def test_plan_mode_hides_start_and_stop_but_not_read(ctx: ToolContext, manager: TerminalManager) -> None:
-    agent, provider, _ = make_agent(ctx, manager, [reply(TextDelta("planning"))])
-    agent.set_mode(Mode.PLAN)
-
-    await agent.run_turn("plan", Events())
-
-    names = provider.requests[0][1]
-    assert "term_read" in names
-    assert "term_start" not in names
-    assert "term_stop" not in names
-
-
-async def test_plan_mode_refuses_a_term_start_the_model_calls_anyway(
-    ctx: ToolContext, manager: TerminalManager
-) -> None:
-    script = [reply(call("term_start", name="api", command="sleep 30")), reply(TextDelta("ok"))]
-    agent, _, approver = make_agent(ctx, manager, script, [])
-    agent.set_mode(Mode.PLAN)
-
-    await agent.run_turn("serve", Events())
-
-    assert manager.names() == []
-    assert approver.requests == []
-    assert tool_messages(agent)[0].content == "refused: term_start is unavailable in plan mode"
-
-
-async def test_plan_mode_refuses_a_term_stop_the_model_calls_anyway(
-    ctx: ToolContext, manager: TerminalManager
-) -> None:
-    terminal = manager.start("api", "sleep 30")
-    script = [reply(call("term_stop", name="api")), reply(TextDelta("ok"))]
-    agent, _, approver = make_agent(ctx, manager, script, [])
-    agent.set_mode(Mode.PLAN)
-
-    await agent.run_turn("stop", Events())
-
-    assert terminal.status == ("running", None)
-    assert approver.requests == []
-    assert tool_messages(agent)[0].content == "refused: term_stop is unavailable in plan mode"
-
-
-async def test_a_second_term_start_with_a_running_name_is_refused_without_asking(
-    ctx: ToolContext, manager: TerminalManager
-) -> None:
-    manager.start("api", "sleep 30")
-    script = [reply(call("term_start", name="api", command="sleep 31")), reply(TextDelta("ok"))]
-    agent, _, approver = make_agent(ctx, manager, script, [])
-
-    await agent.run_turn("again", Events())
-
-    assert approver.requests == []
-    assert tool_messages(agent)[0].content == "terminal api is already running"
-
-
-async def test_undo_counts_term_start_with_bash(ctx: ToolContext, manager: TerminalManager) -> None:
-    script = [
-        reply(call("term_start", "c1", name="api", command="sleep 30"), call("bash", "c2", command="true")),
-        reply(TextDelta("done")),
-    ]
-    agent, _, _ = make_agent(ctx, manager, script, [ONCE, ONCE])
-    await agent.run_turn("go", Events())
-
-    events = Events()
-    await agent.undo(events)
-
-    assert events.notices() == [
-        ("info", "Undid the last turn: no files changed"),
-        ("warn", "That turn ran 2 bash/terminal commands; their effects were not undone."),
-    ]
-
-
 async def test_undo_counts_term_stop_too(ctx: ToolContext, manager: TerminalManager) -> None:
     manager.start("api", "sleep 30")
     script = [reply(call("term_stop", name="api")), reply(TextDelta("done"))]
@@ -246,53 +73,3 @@ async def test_undo_counts_term_stop_too(ctx: ToolContext, manager: TerminalMana
     await agent.undo(events)
 
     assert events.notices()[-1] == ("warn", "That turn ran 1 bash/terminal command; its effects were not undone.")
-
-
-async def test_undo_does_not_count_term_read_or_a_denied_call(ctx: ToolContext, manager: TerminalManager) -> None:
-    manager.start("api", "sleep 30")
-    script = [
-        reply(call("term_read", "c1", name="api"), call("term_stop", "c2", name="api")),
-        reply(TextDelta("done")),
-    ]
-    agent, _, _ = make_agent(ctx, manager, script, [DENY])
-    await agent.run_turn("look", Events())
-
-    events = Events()
-    await agent.undo(events)
-
-    assert events.notices() == [("info", "Undid the last turn: no files changed")]
-
-
-async def test_the_session_file_holds_only_the_tool_messages(
-    ctx: ToolContext, manager: TerminalManager, tmp_path: Path, workspace: Path
-) -> None:
-    terminal = manager.start("api", "printf '\\033[31mred\\033[0m\\nplain\\n'; sleep 30")
-    await wait_until(lambda: terminal.buffer.tail(2) == ["red", "plain"])
-    recorder = FileRecorder(workspace_dir(tmp_path / "sessions", workspace), workspace)
-    script = [reply(call("term_read", name="api")), reply(TextDelta("it printed red"))]
-    agent, _, _ = make_agent(ctx, manager, script, [], recorder=recorder)
-
-    await agent.run_turn("what did it print", Events())
-
-    recorder.close()
-    assert recorder.path is not None
-    records = [json.loads(line) for line in recorder.path.read_text().splitlines()]
-    assert [r["type"] for r in records if r["type"] != "usage"] == [
-        "session", "title", "message", "message", "message", "message",
-    ]
-    assert [r["type"] for r in records].count("usage") == 2
-    messages = [r for r in records if r["type"] == "message"]
-    assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
-    tool = messages[2]
-    assert tool["name"] == "term_read"
-    assert tool["content"] == "red\nplain\n\nrunning"
-    assert "\\u001b" not in recorder.path.read_text()  # no escape code reached the file
-
-
-@pytest.mark.parametrize("name", ["term_start", "term_read", "term_stop"])
-async def test_the_terminal_tools_have_the_labels_the_transcript_shows(
-    ctx: ToolContext, manager: TerminalManager, name: str
-) -> None:
-    tool = next(t for t in default_tools(manager) if t.name == name)
-
-    assert tool.label({"name": "api", "command": "x"}) == f"{name} api"

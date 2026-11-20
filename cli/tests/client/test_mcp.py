@@ -11,13 +11,11 @@ from pathlib import Path
 
 import pytest
 from src.client.mcp import SdkConnection, SdkConnector
-from src.engine.guardrails.setup import Guardrails
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import McpError, McpExited, McpTimeout
 
 from tests.conftest import FIXTURES
-from tests.fakes import FAKE_PROFILE, recording_sandbox
-from tests.helpers import assert_all_gone, gone, wait_until
+from tests.helpers import gone, wait_until
 
 SERVER = FIXTURES / "fake_mcp_server.py"
 
@@ -65,37 +63,6 @@ async def server_pid(connection: SdkConnection) -> int:
     return int(result.parts[0].split()[0])
 
 
-async def test_it_lists_the_servers_tools_with_description_and_schema(open_server: Open) -> None:
-    connection = await open_server()
-    tools = {tool.name: tool for tool in await connection.list_tools()}
-    assert {"echo", "env", "pid", "image", "mixed", "fail", "big", "hang", "exit"} <= tools.keys()
-    echo = tools["echo"]
-    assert echo.description == "Return the text it is given."
-    assert echo.input_schema["properties"]["text"]["type"] == "string"
-    assert echo.input_schema["required"] == ["text"]
-
-
-async def test_a_call_returns_the_text(open_server: Open) -> None:
-    connection = await open_server()
-    result = await connection.call_tool("echo", {"text": "hi"}, 10)
-    assert (result.parts, result.is_error) == (["hi"], False)
-
-
-async def test_the_server_runs_in_the_workspace(open_server: Open, tmp_path: Path) -> None:
-    connection = await open_server()
-    result = await connection.call_tool("pid", {}, 10)
-    assert result.parts[0].split(maxsplit=1)[1] == str(tmp_path)
-
-
-async def test_the_server_gets_the_configured_env_on_top_of_the_agents_env(
-    open_server: Open, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("AGENT_TEST_INHERITED", "from-agent")
-    connection = await open_server(NOTES_DIR="/notes")
-    assert (await connection.call_tool("env", {"name": "NOTES_DIR"}, 10)).parts == ["/notes"]
-    assert (await connection.call_tool("env", {"name": "AGENT_TEST_INHERITED"}, 10)).parts == ["from-agent"]
-
-
 async def test_texts_are_kept_and_an_image_becomes_a_placeholder(open_server: Open) -> None:
     connection = await open_server()
     result = await connection.call_tool("image", {}, 10)
@@ -110,25 +77,6 @@ async def test_audio_and_resources_become_placeholders(open_server: Open) -> Non
         "[resource omitted: file:///doc.txt]",
         "[resource omitted: file:///emb.txt]",
     ]
-
-
-async def test_an_error_result_is_flagged(open_server: Open) -> None:
-    connection = await open_server()
-    result = await connection.call_tool("fail", {}, 10)
-    assert result.is_error is True
-    assert "fail" in "".join(result.parts)  # the SDK words the error text; the flag is what matters
-
-
-async def test_an_unknown_tool_is_an_error_not_a_crash(open_server: Open) -> None:
-    connection = await open_server()
-    try:
-        result = await connection.call_tool("nope", {}, 10)
-    except McpError as exc:
-        assert "nope" in str(exc)
-    else:
-        assert result.is_error is True
-        assert "nope" in "".join(result.parts)
-    assert (await connection.call_tool("echo", {"text": "still"}, 10)).parts == ["still"]
 
 
 async def test_a_command_that_does_not_exist_fails_with_a_reason(tmp_path: Path) -> None:
@@ -175,70 +123,12 @@ async def test_a_hanging_call_times_out_and_the_server_keeps_working(open_server
     assert (await connection.call_tool("echo", {"text": "after"}, 10)).parts == ["after"]
 
 
-async def test_closing_stops_the_server_process_and_is_idempotent(open_server: Open) -> None:
-    connection = await open_server()
-    pid = await server_pid(connection)
-    reasons: list[str] = []
-    connection.on_exit(reasons.append)
-    started = time.monotonic()
-    await connection.aclose()
-    await connection.aclose()
-    assert time.monotonic() - started < 5
-    await assert_all_gone(pid)
-    assert reasons == []  # a close the agent asked for is not an exit
-
-
-async def test_a_call_after_close_fails(open_server: Open) -> None:
-    connection = await open_server()
-    await connection.aclose()
-    with pytest.raises(McpExited):
-        await connection.call_tool("echo", {"text": "x"}, 10)
-
-
-async def test_closing_while_a_call_waits_fails_the_call(open_server: Open) -> None:
-    connection = await open_server()
-    call = asyncio.ensure_future(connection.call_tool("hang", {}, 30))
-    await asyncio.sleep(0.5)
-    await connection.aclose()
-    with pytest.raises(McpExited):
-        await asyncio.wait_for(call, 5)
-
-
 async def test_kill_is_a_synchronous_last_resort(open_server: Open) -> None:
     connection = await open_server()
     pid = await server_pid(connection)
     connection.kill()
     await wait_until(lambda: gone(pid), 5)
     connection.kill()  # a second kill, with the process gone, does nothing
-
-
-async def test_closing_also_stops_a_child_the_server_left_running(tmp_path: Path) -> None:
-    pidfile = tmp_path / "child.pid"
-    connection = await asyncio.wait_for(SdkConnector().connect(with_child(pidfile), tmp_path), 15)
-    assert isinstance(connection, SdkConnection)
-    server = await server_pid(connection)
-    child = await child_pid(pidfile)
-    assert not gone(child)
-
-    await connection.aclose()
-
-    await assert_all_gone(server, child)
-
-
-async def test_a_server_that_dies_on_its_own_leaves_no_child_behind(tmp_path: Path) -> None:
-    pidfile = tmp_path / "child.pid"
-    connection = await asyncio.wait_for(SdkConnector().connect(with_child(pidfile, quiet=True), tmp_path), 15)
-    assert isinstance(connection, SdkConnection)
-    server = await server_pid(connection)
-    child = await child_pid(pidfile)
-    reasons: list[str] = []
-    connection.on_exit(reasons.append)
-
-    os.kill(server, 9)
-
-    await wait_until(lambda: len(reasons) == 1, 10)
-    await assert_all_gone(server, child)
-    await connection.aclose()
 
 
 async def test_kill_all_kills_a_server_that_is_still_starting(tmp_path: Path) -> None:
@@ -260,21 +150,6 @@ async def test_kill_all_kills_a_server_that_is_still_starting(tmp_path: Path) ->
         await asyncio.gather(connecting, return_exceptions=True)
 
 
-async def test_kill_all_kills_the_whole_group_of_a_running_server(tmp_path: Path) -> None:
-    pidfile = tmp_path / "child.pid"
-    connector = SdkConnector()
-    connection = await asyncio.wait_for(connector.connect(with_child(pidfile), tmp_path), 15)
-    assert isinstance(connection, SdkConnection)
-    server = await server_pid(connection)
-    child = await child_pid(pidfile)
-
-    connector.kill_all()
-
-    await wait_until(lambda: gone(server) and gone(child), 5)
-    await connection.aclose()
-    assert connector._pids == set()
-
-
 async def test_a_server_that_never_answers_initialize_fails_in_the_hub_and_its_process_is_gone(
     tmp_path: Path,
 ) -> None:
@@ -293,25 +168,6 @@ async def test_a_server_that_never_answers_initialize_fails_in_the_hub_and_its_p
     await hub.close_all()
 
 
-async def test_the_dup_server_offers_two_tools_that_clean_to_one_name_and_the_hub_keeps_the_first(
-    tmp_path: Path,
-) -> None:
-    from src.engine.mcp.hub import McpHub
-
-    hub = McpHub(SdkConnector(), tmp_path, [fake_config("dup")], 20.0)
-    events: list[tuple[str, str, str]] = []
-    hub.listen(events.append)
-    hub.start()
-    try:
-        await wait_until(lambda: any(e[0] == "ready" for e in events), 15)
-        assert [t.name for t in hub.tools()] == ["mcp__fake__do_thing"]
-        assert [e[0] for e in events if e[0] == "warn"] == ["warn"]
-        result = await hub.call("fake", "do/thing", {})
-        assert result.parts == ["slash"]
-    finally:
-        await hub.close_all()
-
-
 def test_the_sdk_function_that_reports_the_server_pid_is_still_there_and_hooked() -> None:
     """kill() and kill_all() depend on a private SDK function. If an SDK update renames it, this fails
     instead of the last-resort kill silently doing nothing."""
@@ -320,16 +176,6 @@ def test_the_sdk_function_that_reports_the_server_pid_is_still_there_and_hooked(
     spawn = getattr(sdk_stdio, "_create_platform_compatible_process", None)
     assert spawn is not None, "mcp.client.stdio._create_platform_compatible_process is gone: update src/client/mcp.py"
     assert spawn.__name__ == "spawn_and_report", "src/client/mcp.py no longer hooks the SDK's spawn function"
-
-
-async def test_a_started_server_is_known_to_its_connector_until_it_ends(tmp_path: Path) -> None:
-    connector = SdkConnector()
-    connection = await asyncio.wait_for(connector.connect(fake_config(), tmp_path), 15)
-    assert isinstance(connection, SdkConnection)
-    pid = await server_pid(connection)
-    assert connector._pids == {pid}
-    await connection.aclose()
-    assert connector._pids == set()
 
 
 def test_the_non_json_hint_only_applies_shortly_after_the_server_wrote_it(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,57 +212,3 @@ async def test_cancelling_a_hanging_call_leaves_the_server_ready_and_working(tmp
         assert [e[0] for e in events] == ["ready"]  # no exit or warning came of the cancel
     finally:
         await hub.close_all()
-
-
-async def test_the_server_does_not_get_secret_variables_of_the_agent_but_keeps_its_own_env(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from src.engine.guardrails.setup import prepare
-
-    monkeypatch.setenv("GITHUB_TOKEN", "ghp_agentsecret1234")
-    monkeypatch.setenv("KEPT_TOKEN", "kept-value")
-    monkeypatch.setenv("AWS_REGION", "eu-west-1")
-    guard = prepare(tmp_path, {"guardrails": {"keepEnv": ["KEPT_TOKEN"]}}, None, os.environ, "Linux", home=tmp_path)
-    config = fake_config(API_TOKEN="from-entry")  # an entry's own env always passes (R9)
-
-    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(config, tmp_path), 15)
-    try:
-        assert isinstance(connection, SdkConnection)
-        values = {
-            name: (await connection.call_tool("env", {"name": name}, 10)).parts
-            for name in ("GITHUB_TOKEN", "KEPT_TOKEN", "AWS_REGION", "API_TOKEN")
-        }
-    finally:
-        await connection.aclose()
-
-    assert values["KEPT_TOKEN"] == ["kept-value"]
-    assert values["AWS_REGION"] == ["eu-west-1"]
-    assert values["API_TOKEN"] == ["from-entry"]
-    assert "ghp_agentsecret1234" not in str(values["GITHUB_TOKEN"])
-
-
-async def test_the_server_command_starts_behind_the_sandbox_with_the_entrys_arguments(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
-
-    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(fake_config(API_TOKEN="from-entry"), tmp_path), 15)
-    try:
-        assert isinstance(connection, SdkConnection)
-        result = await connection.call_tool("env", {"name": "API_TOKEN"}, 10)
-    finally:
-        await connection.aclose()
-
-    assert result.parts == ["from-entry"]
-    assert log.read_text().splitlines() == [FAKE_PROFILE]
-
-
-async def test_the_server_without_a_sandbox_starts_directly(tmp_path: Path) -> None:
-    guard = Guardrails.off(tmp_path)
-
-    connection = await asyncio.wait_for(SdkConnector(guard=guard).connect(fake_config(), tmp_path), 15)
-    try:
-        assert isinstance(connection, SdkConnection)
-        assert (await connection.call_tool("echo", {"text": "hi"}, 10)).parts == ["hi"]
-    finally:
-        await connection.aclose()

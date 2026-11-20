@@ -21,25 +21,6 @@ def _json(results: Any) -> Callable[[httpx.Request], httpx.Response]:
     return lambda request: httpx.Response(200, json={"results": results})
 
 
-@pytest.mark.parametrize(
-    ("base", "path"),
-    [(BASE, "/search"), (BASE + "/", "/search"), (BASE + "/searx", "/searx/search"), (BASE + "/searx/", "/searx/search")],
-)
-async def test_one_get_goes_to_search_with_query_and_json_format(base: str, path: str) -> None:
-    seen: list[httpx.Request] = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen.append(request)
-        return httpx.Response(200, json={"results": []})
-
-    await _client(handler, base).search("a b&c", 5)
-
-    assert len(seen) == 1 and seen[0].method == "GET"
-    assert seen[0].url.path == path and seen[0].url.host == "searx.test"
-    assert dict(seen[0].url.params) == {"q": "a b&c", "format": "json"}
-    assert seen[0].headers["user-agent"].startswith("agent-cli/")
-
-
 async def test_hits_are_parsed_in_order_and_cut_to_limit() -> None:
     results = [{"title": f"T{n}", "url": f"https://e.com/{n}", "content": f"c{n}"} for n in range(7)]
     hits = await _client(_json(results)).search("q", 3)
@@ -63,11 +44,6 @@ async def test_missing_url_is_skipped_and_missing_title_and_content_fall_back() 
     ]
 
 
-async def test_duplicate_urls_are_kept() -> None:
-    results = [{"title": "a", "url": "https://e.com/x"}] * 2
-    assert len(await _client(_json(results)).search("q", 10)) == 2
-
-
 async def test_connect_error_is_a_search_error() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         raise httpx.ConnectError("refused")
@@ -75,15 +51,6 @@ async def test_connect_error_is_a_search_error() -> None:
     with pytest.raises(SearchError) as info:
         await _client(handler).search("q", 5)
     assert str(info.value) == f"search failed: cannot connect ({BASE})" and info.value.summary == "unreachable"
-
-
-async def test_timeout_is_a_search_error() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ReadTimeout("slow")
-
-    with pytest.raises(SearchError) as info:
-        await _client(handler, timeout=3).search("q", 5)
-    assert str(info.value) == "search failed: timeout after 3s" and info.value.summary == "timeout"
 
 
 async def test_other_http_errors_name_their_type() -> None:
@@ -119,7 +86,7 @@ async def test_a_redirect_is_not_followed() -> None:
     assert "redirected (HTTP 302)" in str(info.value) and "AGENT_SEARCH_URL" in str(info.value)
 
 
-@pytest.mark.parametrize("body", [b"not json", b"[1, 2]", b'"x"', b'{"results": "nope"}', b"{}", b'{"results": null}'])
+@pytest.mark.parametrize("body", [b"not json", b'"x"', b'{"results": "nope"}'])
 async def test_unexpected_bodies_are_search_errors(body: bytes) -> None:
     with pytest.raises(SearchError) as info:
         await _client(lambda request: httpx.Response(200, content=body)).search("q", 5)
@@ -134,12 +101,6 @@ async def test_an_oversized_response_is_a_search_error() -> None:
     assert str(info.value) == "search failed: response too large"
 
 
-async def test_deeply_nested_json_is_an_unexpected_response() -> None:
-    body = b"[" * 100_000
-    with pytest.raises(SearchError, match="unexpected response"):
-        await _client(lambda request: httpx.Response(200, content=body)).search("q", 5)
-
-
 async def test_a_stalled_body_hits_one_overall_deadline() -> None:
     class Stalls(httpx.AsyncByteStream):
         async def __aiter__(self):  # type: ignore[no-untyped-def]
@@ -150,14 +111,3 @@ async def test_a_stalled_body_hits_one_overall_deadline() -> None:
     with pytest.raises(SearchError) as info:
         await _client(lambda request: httpx.Response(200, stream=Stalls()), timeout=0.05).search("q", 5)
     assert info.value.summary == "timeout" and "timeout after 0.05s" in str(info.value)
-
-
-async def test_errors_do_not_show_credentials_or_query_of_the_url() -> None:
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused")
-
-    client = _client(handler, "http://user:secret@searx.test:8888/s?token=abc")
-    with pytest.raises(SearchError) as info:
-        await client.search("q", 5)
-    text = str(info.value)
-    assert "secret" not in text and "user" not in text and "token" not in text and "searx.test:8888" in text

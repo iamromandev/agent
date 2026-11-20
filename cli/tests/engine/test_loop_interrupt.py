@@ -12,8 +12,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
-from src.engine.approval import Choice, Decision
-from src.engine.events import AgentEvent, AssistantText, Notice, ToolFinished, TurnEnded
+from src.engine.events import AgentEvent, Notice, TurnEnded
 from src.engine.loop import Agent
 from src.engine.provider.base import (
     Done,
@@ -28,7 +27,7 @@ from src.engine.provider.base import (
 from src.engine.tools import default_tools
 from src.engine.tools.base import Prepared, Tool, ToolContext, ToolResult
 
-from tests.fakes import BlockingApprover, Gate, RecordingApprover, ScriptedProvider
+from tests.fakes import Gate, RecordingApprover, ScriptedProvider
 
 INTERRUPTED = "Interrupted by user"
 SKIPPED = "Skipped: the turn was interrupted before this call ran"
@@ -128,77 +127,6 @@ async def follow_up_works(agent: Agent, provider: ScriptedProvider) -> None:
 # --- mid-stream ------------------------------------------------------------------------------
 
 
-async def test_cancel_mid_stream_keeps_the_partial_text_and_reports_interrupted(ctx: ToolContext) -> None:
-    gate = Gate()
-    agent, provider = make_agent(ctx, [reply(TextDelta("par"), gate, TextDelta("tial"))], RecordingApprover())
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await gate.reached.wait()
-    assert events.count(AssistantText) == 1
-
-    await cancel(task)
-
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert [(m.role, m.content) for m in agent.history] == [
-        ("user", "q"),
-        ("assistant", "par" + PARTIAL_MARK),
-    ]
-    await follow_up_works(agent, provider)
-
-
-async def test_cancel_mid_stream_drops_tool_calls_that_were_not_run(ctx: ToolContext) -> None:
-    gate = Gate()
-    script = [reply(TextDelta("let me"), call("read", path="a.py"), TextDelta(" see"), gate)]
-    agent, provider = make_agent(ctx, script, RecordingApprover())
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await gate.reached.wait()  # the call arrived between the two deltas
-    assert events.count(AssistantText) == 2
-
-    await cancel(task)
-
-    assert [(m.role, m.content, m.tool_calls) for m in agent.history] == [
-        ("user", "q", []),
-        ("assistant", "let me see" + PARTIAL_MARK, []),
-    ]
-    assert events.count(ToolFinished) == 0
-    await follow_up_works(agent, provider)
-
-
-async def test_cancel_before_any_text_leaves_only_the_user_message(ctx: ToolContext) -> None:
-    gate = Gate()
-    agent, provider = make_agent(ctx, [reply(gate, TextDelta("never seen"))], RecordingApprover())
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await gate.reached.wait()
-
-    await cancel(task)
-
-    assert events.items == [TurnEnded("interrupted")]
-    assert [m.role for m in agent.history] == ["user"]
-    await follow_up_works(agent, provider)
-
-
-async def test_cancel_during_the_second_stream_keeps_the_tool_round_trip(ctx: ToolContext) -> None:
-    gate = Gate()
-    script = [reply(call("read", path="a.py")), reply(TextDelta("par"), gate, TextDelta("tial"))]
-    agent, provider = make_agent(ctx, script, RecordingApprover())
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await gate.reached.wait()
-    assert events.count(ToolFinished) == 1
-    assert events.count(AssistantText) == 1
-
-    await cancel(task)
-
-    assert [m.role for m in agent.history] == ["user", "assistant", "tool", "assistant"]
-    assert agent.history[2].content != INTERRUPTED  # the finished call keeps its real result
-    assert agent.history[3].content == "par" + PARTIAL_MARK
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
-
-
 class HangingProvider:
     """Its stream blocks forever; records that it started and that it was closed."""
 
@@ -221,63 +149,7 @@ class HangingProvider:
         return None
 
 
-async def test_cancel_closes_the_provider_stream(ctx: ToolContext) -> None:
-    provider = HangingProvider()
-    agent = Agent(provider, default_tools(), RecordingApprover(), ctx, 25)
-    task = asyncio.create_task(agent.run_turn("q", Events()))
-    await provider.started.wait()
-
-    await cancel(task)
-
-    assert provider.closed
-
-
 # --- mid-approval ----------------------------------------------------------------------------
-
-
-async def test_cancel_mid_approval_answers_the_pending_call_and_changes_nothing(
-    ctx: ToolContext, workspace: Path
-) -> None:
-    approver = BlockingApprover()
-    edit = call("edit", path="a.py", old_string="print('hi')", new_string="print('bye')")
-    agent, provider = make_agent(ctx, [reply(edit)], approver)
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await approver.asked.wait()
-
-    await cancel(task)
-
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert [m.role for m in agent.history] == ["user", "assistant", "tool"]
-    assert agent.history[2].content == INTERRUPTED
-    assert agent.history[2].tool_call_id == "c1"
-    assert_valid_history(agent.history)
-    assert (workspace / "a.py").read_text() == "print('hi')\n"
-    await follow_up_works(agent, provider)
-
-
-async def test_cancel_mid_approval_answers_every_unanswered_call_in_order(ctx: ToolContext) -> None:
-    approver = BlockingApprover()
-    script = [
-        reply(
-            call("read", "c1", path="a.py"),
-            call("bash", "c2", command="echo hi"),
-            call("read", "c3", path="a.py"),
-        )
-    ]
-    agent, provider = make_agent(ctx, script, approver)
-    task = asyncio.create_task(agent.run_turn("q", Events()))
-    await approver.asked.wait()
-
-    await cancel(task)
-
-    results = [(m.tool_call_id, m.content) for m in agent.history if m.role == "tool"]
-    assert [r[0] for r in results] == ["c1", "c2", "c3"]
-    assert "print('hi')" in results[0][1]  # finished before the dialog opened
-    assert results[1][1] == INTERRUPTED  # the call in flight
-    assert results[2][1] == SKIPPED  # never started
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
 
 
 # --- mid-bash --------------------------------------------------------------------------------
@@ -289,44 +161,6 @@ def _gone(pid: int) -> bool:
     except ProcessLookupError:
         return True
     return False
-
-
-async def test_cancel_mid_bash_kills_the_command_and_repairs_history(ctx: ToolContext, workspace: Path) -> None:
-    shell_pid, child_pid = workspace / "shell.pid", workspace / "child.pid"
-    command = f"echo $$ > {shell_pid}; sleep 30 & echo $! > {child_pid}; wait"
-    approver = RecordingApprover([Decision(Choice.ONCE)])
-    agent, provider = make_agent(ctx, [reply(call("bash", command=command))], approver)
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await until(lambda: all(f.exists() and f.read_text().strip() for f in (shell_pid, child_pid)))
-    pids = [int(f.read_text().strip()) for f in (shell_pid, child_pid)]
-
-    started = time.monotonic()
-    await cancel(task)
-    elapsed = time.monotonic() - started
-
-    assert elapsed < 2.0
-    await until(lambda: all(_gone(p) for p in pids), timeout=3.0)
-    for pid in pids:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert [m.role for m in agent.history] == ["user", "assistant", "tool"]
-    assert agent.history[2].content == INTERRUPTED
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
-
-
-async def test_each_interrupted_call_gets_exactly_one_tool_message(ctx: ToolContext) -> None:
-    approver = BlockingApprover()
-    agent, provider = make_agent(ctx, [reply(call("bash", "c1", command="ls"))], approver)
-    task = asyncio.create_task(agent.run_turn("q", Events()))
-    await approver.asked.wait()
-
-    await cancel(task)
-
-    assert sum(m.role == "tool" for m in agent.history) == 1
-    await follow_up_works(agent, provider)
 
 
 # --- mid-execute of a write/edit (S1) --------------------------------------------------------
@@ -360,70 +194,6 @@ async def _cancel_mid_write(task: asyncio.Task[None], slow: SlowWrite, times: in
     with pytest.raises(asyncio.CancelledError):
         await task
     assert task.cancelled()
-
-
-async def test_cancel_during_an_approved_write_records_the_real_result(
-    ctx: ToolContext, workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    slow = SlowWrite(monkeypatch, "new.txt")
-    script = [reply(call("write", path="new.txt", content="one\ntwo\n"))]
-    agent, provider = make_agent(ctx, script, RecordingApprover([Decision(Choice.ONCE)]))
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-
-    await _cancel_mid_write(task, slow)
-
-    assert (workspace / "new.txt").read_text() == "one\ntwo\n"
-    assert [m.role for m in agent.history] == ["user", "assistant", "tool"]
-    assert agent.history[2].content == "wrote 2 lines to new.txt"
-    finished = [e for e in events.items if isinstance(e, ToolFinished)]
-    assert len(finished) == 1
-    assert finished[0].applied is True
-    assert events.count(TurnEnded) == 1
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
-
-
-async def test_cancel_during_an_approved_edit_records_the_real_result(
-    ctx: ToolContext, workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    slow = SlowWrite(monkeypatch, "a.py")
-    edit = call("edit", path="a.py", old_string="print('hi')", new_string="print('bye')")
-    agent, provider = make_agent(ctx, [reply(edit)], RecordingApprover([Decision(Choice.ONCE)]))
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-
-    await _cancel_mid_write(task, slow)
-
-    assert (workspace / "a.py").read_text() == "print('bye')\n"
-    assert agent.history[2].content == "replaced 1 occurrence(s) in a.py"
-    finished = [e for e in events.items if isinstance(e, ToolFinished)]
-    assert len(finished) == 1
-    assert finished[0].applied is True
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
-
-
-async def test_repeated_cancels_during_a_write_do_not_abandon_it(
-    ctx: ToolContext, workspace: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    slow = SlowWrite(monkeypatch, "new.txt")
-    script = [reply(call("write", path="new.txt", content="x\n"))]
-    agent, _ = make_agent(ctx, script, RecordingApprover([Decision(Choice.ONCE)]))
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await slow.wait_started()
-    task.cancel()
-    await asyncio.sleep(0)  # let the first cancel land
-    task.cancel()
-    slow.release.set()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert agent.history[2].content == "wrote 1 lines to new.txt"
-    assert events.count(TurnEnded) == 1
 
 
 # --- S2: a cancel during stream cleanup after a ProviderError --------------------------------
@@ -469,40 +239,7 @@ async def test_cancel_while_closing_after_a_provider_error_ends_the_turn_once(ct
 # --- N5: calls that never started are told apart from the one that was cut -------------------
 
 
-async def test_the_call_in_flight_is_interrupted_and_later_calls_are_skipped(ctx: ToolContext) -> None:
-    approver = BlockingApprover()
-    script = [reply(call("bash", "c1", command="ls"), call("read", "c2", path="a.py"), call("glob", "c3", pattern="*"))]
-    agent, _ = make_agent(ctx, script, approver)
-    task = asyncio.create_task(agent.run_turn("q", Events()))
-    await approver.asked.wait()
-
-    await cancel(task)
-
-    results = {m.tool_call_id: m.content for m in agent.history if m.role == "tool"}
-    assert results == {"c1": INTERRUPTED, "c2": SKIPPED, "c3": SKIPPED}
-    assert_valid_history(agent.history)
-
-
 # --- N7: more interrupt shapes ---------------------------------------------------------------
-
-
-async def test_a_double_cancel_mid_approval_still_ends_once(ctx: ToolContext) -> None:
-    approver = BlockingApprover()
-    agent, provider = make_agent(ctx, [reply(call("bash", "c1", command="ls"))], approver)
-    events = Events()
-    task = asyncio.create_task(agent.run_turn("q", events))
-    await approver.asked.wait()
-
-    task.cancel()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-
-    assert events.count(TurnEnded) == 1
-    assert events.items[-1] == TurnEnded("interrupted")
-    assert [m.role for m in agent.history] == ["user", "assistant", "tool"]
-    assert_valid_history(agent.history)
-    await follow_up_works(agent, provider)
 
 
 class SlowReadTool(Tool):

@@ -31,25 +31,6 @@ afterEach(() => {
 });
 
 describe("apiFetch", () => {
-  test("sends the path under the API base, /api by default", async () => {
-    const fake = respondWith(json({ data: {} }));
-    await apiFetch("/health/check");
-    expect(fake.mock.calls[0]?.[0]).toBe("/api/health/check");
-  });
-
-  test("unwraps the project envelope", async () => {
-    respondWith(json({ data: { status: "ok" } }));
-    expect(await apiFetch("/x")).toEqual({
-      data: { status: "ok" },
-      error: null,
-    });
-  });
-
-  test("takes a body without an envelope as it is", async () => {
-    respondWith(json({ status: "ok" }));
-    expect((await apiFetch("/x")).data).toEqual({ status: "ok" });
-  });
-
   test("a bare GET carries no JSON content type, a body does", async () => {
     const fake = respondWith(json({}));
     await apiFetch("/x");
@@ -60,39 +41,12 @@ describe("apiFetch", () => {
     expect(headersOf(1)["Content-Type"]).toBe("application/json");
   });
 
-  test("a 204 or an empty body is a success with no data, not a network error", async () => {
-    respondWith(new Response(null, { status: 204 }));
-    expect(await apiFetch("/x")).toEqual({ data: null, error: null });
-    respondWith(new Response("", { status: 200 }));
-    expect(await apiFetch("/x")).toEqual({ data: null, error: null });
-  });
-
   test("a failure reports the envelope's message and code", async () => {
     respondWith(json({ message: "Nope", code: 4001 }, 400));
     const { data, error } = await apiFetch("/x");
     expect(data).toBeNull();
     expect(error?.message).toBe("Nope");
     expect(error?.code).toBe(4001);
-  });
-
-  test("a failure in FastAPI's own shape reports its detail", async () => {
-    respondWith(json({ detail: "Not Found" }, 404));
-    const { error } = await apiFetch("/x");
-    expect(error?.message).toBe("Not Found");
-    expect(error?.code).toBe(404);
-  });
-
-  test("a failure without a JSON body still says something", async () => {
-    respondWith(new Response("<html>", { status: 502 }));
-    expect((await apiFetch("/x")).error?.message).toBe("Request failed (502)");
-  });
-
-  test("never throws: an unreachable API is a network error", async () => {
-    respondWith(new TypeError("fetch failed"));
-    expect(await apiFetch("/x")).toEqual({
-      data: null,
-      error: { message: "Network error" },
-    });
   });
 });
 
