@@ -81,3 +81,24 @@ def test_task_prompt_has_skills_section_only_when_given(tmp_path: Path) -> None:
     empty = Instructions("", (), None)
     assert "Available skills" not in build_task_prompt(tmp_path, TODAY, "Linux", empty)
     assert SECTION in build_task_prompt(tmp_path, TODAY, "Linux", empty, skills=SECTION)
+
+
+def test_agents_section_follows_the_skills_section_and_is_absent_when_not_given(tmp_path: Path) -> None:
+    from src.engine.instructions import Instructions
+
+    instructions = Instructions("RULES-TEXT", (), None)
+    agents = "Available agents (...):\n- r: reviews"
+    prompt = build_system_prompt(
+        tmp_path, Mode.BUILD, TODAY, "Linux", instructions=instructions, skills=SECTION, agents=agents
+    )
+    assert prompt.index(SECTION) < prompt.index(agents) < prompt.index("RULES-TEXT")
+    assert "Available agents" not in build_system_prompt(tmp_path, Mode.BUILD, TODAY, "Linux", instructions=instructions)
+
+
+def test_task_prompt_role_replaces_the_research_role(tmp_path: Path) -> None:
+    from src.engine.instructions import Instructions
+
+    empty = Instructions("", (), None)
+    prompt = build_task_prompt(tmp_path, TODAY, "Linux", empty, role="You are the reviewer.")
+    assert prompt.startswith("You are the reviewer.\n\nWorkspace:")
+    assert "research subagent" not in prompt

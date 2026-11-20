@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     from src.client.ollama import OllamaCatalog
     from src.config.settings import Settings
     from src.engine import Agent
+    from src.engine.agents.loader import Agents
     from src.engine.approval import Approver
     from src.engine.checkpoints.store import CheckpointStore
     from src.engine.commands.loader import Commands
@@ -70,6 +71,7 @@ class Runtime:
     terminals: TerminalManager | None
     commands: Commands
     skills: Skills
+    agents: Agents
     catalog: OllamaCatalog
     model_notices: list[str]
     warnings: tuple[str, ...]
@@ -120,6 +122,7 @@ def build_runtime(
     from src.client.ollama import OllamaCatalog
     from src.config.settings import get_settings
     from src.engine import Agent
+    from src.engine.agents.loader import load_agents
     from src.engine.checkpoints.setup import prepare_checkpoints
     from src.engine.commands.loader import load_commands
     from src.engine.guardrails.setup import prepare as prepare_guardrails
@@ -152,6 +155,7 @@ def build_runtime(
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
         skills = load_skills(root)  # read once, like the commands
+        agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
@@ -233,6 +237,7 @@ def build_runtime(
                 instructions_share=settings.instructions_share,
                 extra_tools=mcp.tools,
                 task_tools=read_only_tools(web, search, skills),
+                agents=agents,
                 task_max_steps=settings.task_max_steps,
                 rules=permissions.rules,
                 hooks=hooks,
@@ -279,9 +284,10 @@ def build_runtime(
             terminals=manager,
             commands=commands,
             skills=skills,
+            agents=agents,
             catalog=OllamaCatalog(client),
             model_notices=model_notices,
-            warnings=(*permissions.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
+            warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,
         )
     except BaseException:

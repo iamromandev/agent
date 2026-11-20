@@ -12,6 +12,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
 
+from src.engine.agents.loader import Agents
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
 from src.engine.checkpoints.birth import settle
 from src.engine.checkpoints.restore import restore_checkpoint, restore_unsnapshotted
@@ -186,8 +187,13 @@ class Agent:
         rules: Rules | None = None,
         hooks: Hooks | None = None,
         checkpoints: CheckpointStore | None = None,
+        agents: Agents | None = None,
+        subagent: str = "",
+        role_prompt: str | None = None,
     ) -> None:
         self.provider = provider
+        self.subagent = subagent  # the custom agent this child runs, "" otherwise
+        self.role_prompt = role_prompt  # a custom child's own system prompt, in place of the research role
         self._checkpoints = checkpoints  # the `task` child never gets one
         self._checkpoint_warning: str | None = None  # taken from the store, not yet shown
         self._large_before: dict[str, tuple[int, int] | None] = {}  # files over the size cap when the turn began
@@ -198,7 +204,7 @@ class Agent:
         self.role = role
         self.tools = list(tools)
         if task_tools is not None and role == "main":
-            self.tools.append(TaskTool(self, list(task_tools), task_max_steps))
+            self.tools.append(TaskTool(self, list(task_tools), task_max_steps, agents))
         self._extra_tools = extra_tools  # asked at every use: tools that come and go while the agent runs (MCP)
         self._granted_extra: dict[str, Tool] = {}  # "Always" given to an extra tool, to revoke it when that tool is gone
         self.approver = approver
@@ -356,10 +362,17 @@ class Agent:
         skills = skill_tool.skills.section() if skill_tool is not None else None
         if self.role == "task":
             prompt = build_task_prompt(
-                self.ctx.workspace, self.today(), platform.system(), loaded, skills=skills, paths=guard_of(self.ctx).paths
+                self.ctx.workspace,
+                self.today(),
+                platform.system(),
+                loaded,
+                skills=skills,
+                paths=guard_of(self.ctx).paths,
+                role=self.role_prompt,
             )
             return Message("system", prompt)
         todo = any(t.name == "todo" for t in self.tools)
+        task_tool = next((t for t in self.tools if isinstance(t, TaskTool)), None)
         prompt = build_system_prompt(
             self.ctx.workspace,
             mode,
@@ -368,6 +381,7 @@ class Agent:
             instructions=loaded,
             todo=todo,
             skills=skills,
+            agents=task_tool.agents.section() if task_tool is not None else None,
             paths=guard_of(self.ctx).paths,
         )
         return Message("system", prompt)

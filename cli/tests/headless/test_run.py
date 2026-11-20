@@ -390,3 +390,22 @@ def test_a_sigterm_during_the_runtime_build_exits_143_and_restores_the_handler(
 
     assert code == 143
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_an_agent_file_warning_is_shown_at_launch_and_valid_agents_are_offered(
+    ws: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = ws / ".agent" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "bad.md").write_text("no front matter")
+    (folder / "reviewer.md").write_text("---\ndescription: Reviews code\n---\nYou review.\n")
+    provider = ScriptedProvider([call("task", description="d", prompt="p", agent="reviewer"), say("report"), say("done")])
+
+    code = go(ws, provider)
+
+    assert code == EXIT_OK
+    assert "bad.md" in capsys.readouterr().err
+    assert "- reviewer: Reviews code" in provider.requests[0][0][0].content
+    child_system = provider.requests[1][0][0].content
+    assert child_system.startswith("You review.")
+    assert "Available agents" not in child_system

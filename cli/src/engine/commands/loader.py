@@ -64,7 +64,7 @@ def project_commands_dir(workspace: Path) -> Path:
 
 
 def front_matter(text: str) -> tuple[dict[str, str] | None, str]:
-    """`(keys, body)`: the `name:` and `description:` lines of a leading `---` block. `None` keys when there is no block.
+    """`(keys, body)`: the `name:`, `description:`, `tools:` and `model:` lines of a leading `---` block. `None` keys when there is no block.
 
     Raises `ValueError` when the block is opened and never closed.
     """
@@ -77,7 +77,7 @@ def front_matter(text: str) -> tuple[dict[str, str] | None, str]:
         raise ValueError("front matter is not closed") from None
     keys: dict[str, str] = {}
     for line in lines[1:end]:
-        for key in ("name", "description"):
+        for key in ("name", "description", "tools", "model"):
             if line.startswith(f"{key}:"):
                 keys[key] = line[len(key) + 1 :].strip()
     return keys, "\n".join(lines[end + 1 :])

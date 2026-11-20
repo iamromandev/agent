@@ -36,6 +36,7 @@ from src.engine import (
     TurnEnded,
     UsageUpdate,
 )
+from src.engine.agents.loader import READ_ONLY_TOOLS, Agents
 from src.engine.approval import Approver
 from src.engine.commands.builtins import BUILTINS
 from src.engine.commands.loader import Commands
@@ -127,7 +128,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /help this help · /quit exit"
 )
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
@@ -169,6 +170,7 @@ class AgentApp(App[None]):
         permission_warnings: Sequence[str] = (),
         commands: Commands | None = None,
         skills: Skills | None = None,
+        agents: Agents | None = None,
         guard: Guardrails | None = None,
         hooks: Hooks | None = None,
         catalog: ModelCatalog | None = None,
@@ -184,6 +186,7 @@ class AgentApp(App[None]):
         self._permission_warnings = tuple(permission_warnings)
         self.commands = commands if commands is not None else Commands({}, ())
         self.skills = skills if skills is not None else Skills({}, ())
+        self.agents = agents if agents is not None else Agents.empty()
         self.guard = guard if guard is not None else Guardrails.off(workspace)
         self.hooks = hooks if hooks is not None else Hooks.empty()
         self.store = store
@@ -472,6 +475,18 @@ class AgentApp(App[None]):
         ]
         lines.extend(self.skills.warnings)
         return "\n".join(lines) if lines else "No skills."
+
+    def _agents_summary(self) -> str:
+        """Per agent `<name> (<source>)[ model <model>]: <description>` and its tools, then the launch warnings."""
+        lines: list[str] = []
+        for a in self.agents.sorted():
+            shown = a.resolved_model or a.model
+            model = f" model {escape_display(shown)}" if shown else ""
+            lines.append(f"{escape(a.name)} ({a.source}){model}: {escape_display(' '.join(a.description.split()))}")
+            tools = READ_ONLY_TOOLS if a.tools is None else a.tools
+            lines.append(f"  tools: {', '.join(tools) or 'none'}")
+        lines.extend(self.agents.warnings)
+        return "\n".join(lines) if lines else "No agents."
 
     def _guardrails_summary(self) -> str:
         """What the guardrails do in this run. Names and paths only, never a value; all of it escaped."""
@@ -966,6 +981,8 @@ class AgentApp(App[None]):
                 await transcript.add_notice("info", "\n".join(lines) if lines else "No hooks.")
             case "/skills":
                 await transcript.add_notice("info", self._skills_summary())
+            case "/agents":
+                await transcript.add_notice("info", self._agents_summary())
             case "/quit":
                 self.exit()
             case "/sessions":

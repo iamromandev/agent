@@ -147,3 +147,13 @@ def test_warnings_are_capped(dirs) -> None:
     result = load(dirs)
     assert len(result.warnings) == 21
     assert result.warnings[-1] == "and 5 more warnings"
+
+
+def test_front_matter_returns_tools_and_model_keys_and_parse_ignores_them() -> None:
+    from src.engine.commands.loader import front_matter
+
+    text = "---\ndescription: d\ntools: read, grep\nmodel: m:1\n---\nbody"
+    keys, body = front_matter(text)
+    assert keys == {"description": "d", "tools": "read, grep", "model": "m:1"}
+    assert body == "body"
+    assert parse(text) == ("d", "body")
