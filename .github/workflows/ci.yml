@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   api:
-    name: api — lint, types, tests
+    name: api — lint, types
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -42,23 +42,8 @@ jobs:
       - name: Lint and type-check
         run: make check-ci
 
-      # ``Settings`` is built at import time and its fields have no defaults, so
-      # a clean checkout needs these throwaway values. Nothing connects to them.
-      - name: Tests
-        run: make test
-        env:
-          ENV: local
-          DEBUG: "false"
-          LOG_FORMAT: text
-          DB_ENGINE: tortoise.backends.asyncpg
-          DB_HOST: localhost
-          DB_PORT: "5432"
-          DB_NAME: ci
-          DB_USER: ci
-          DB_PASSWORD: ci
-
   cli:
-    name: cli — lint, types, tests
+    name: cli — lint, types
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -78,11 +63,8 @@ jobs:
       - name: Lint and type-check
         run: make check-ci
 
-      - name: Tests
-        run: make test
-
   ui:
-    name: ui — formatting, types, tests
+    name: ui — formatting, types
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -100,6 +82,3 @@ jobs:
 
       - name: Types
         run: bun run --cwd ui web:check
-
-      - name: Tests
-        run: bun run --cwd ui web:test

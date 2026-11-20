@@ -8,7 +8,7 @@ Agent: placeholder project (purpose TBD) — FastAPI API (Python 3.15) + Typer C
 | --- | --- |
 | `make check` | API and CLI `ruff check --fix` + `ty check`, then UI `tsc`. **Fixes Python files**; does not check UI formatting. |
 | `make -C api check-ci` / `make -C cli check-ci` | Lint + types without fixes — what CI runs. Use this before committing. |
-| `make test` | API and CLI pytest suites. |
+| `make test` | API and CLI pytest suites. Not run in CI (CI only lints, type-checks and checks formatting): run it, and `bun run --cwd ui web:test`, before committing. |
 | `uv run --directory api pytest tests/path/test_file.py::test_name -q` | One API test. |
 | `bun run --cwd ui web:test` | UI tests (`bun test test/`). |
 | `bun run --cwd ui web:format` / `web:format.check` | Prettier write / check. |
