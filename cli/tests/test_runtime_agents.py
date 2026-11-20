@@ -105,3 +105,17 @@ def test_one_list_call_when_the_project_model_key_decides_and_an_agent_names_a_m
     assert rt.provider.model == "proj:1"
     assert rt.agents.by_name["a"].resolved_model == "other:latest"
     assert (ws / ".agent" / "settings.json").read_text() == settings_before
+
+
+def test_the_runtime_builds_one_vision_check_over_its_catalog_and_gives_it_to_the_agent(ws: Path) -> None:
+    catalog = CountingCatalog(["v"], capabilities={"v": ("completion", "vision")})
+    rt = _build(ws, catalog, ScriptedProvider([]))
+    assert asyncio.run(rt.vision.has("v")) is True
+    assert asyncio.run(rt.vision.has("other")) is False
+    agent = rt.agent_factory(_NoApprover())
+    assert agent.vision is rt.vision
+
+
+class _NoApprover:
+    async def ask(self, request):  # pragma: no cover
+        raise AssertionError

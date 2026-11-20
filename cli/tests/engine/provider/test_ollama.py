@@ -275,3 +275,43 @@ async def test_pinned_provider_asks_for_its_model_and_leaves_the_original_alone(
     assert [c["model"] for c in captured] == ["bar", "foo"]
     assert captured[0]["options"] == {"num_ctx": 4096}
     assert (original.model, other.model) == ("foo", "bar")
+
+
+def _sent(messages: list[Message]) -> list[dict[str, Any]]:
+    from src.engine.provider.ollama import _message_payload
+
+    return [_message_payload(m) for m in messages]
+
+
+def test_user_images_go_as_base64_next_to_the_content() -> None:
+    import base64
+
+    from src.engine.provider.base import Image
+
+    data = b"\x89PNG\r\n\x1a\nxyz"
+    (payload,) = _sent([Message("user", "see", images=(Image("png", data, "a.png"),))])
+    assert payload == {"role": "user", "content": "see", "images": [base64.b64encode(data).decode("ascii")]}
+
+
+def test_messages_without_images_have_no_images_key() -> None:
+    sent = _sent(
+        [
+            Message("user", "hi"),
+            Message("assistant", "ok", [ToolCall("c1", "read", {"path": "a"})]),
+            Message("tool", "contents", tool_call_id="c1", name="read"),
+        ]
+    )
+    assert sent == [
+        {"role": "user", "content": "hi"},
+        {"role": "assistant", "content": "ok", "tool_calls": [{"function": {"name": "read", "arguments": {"path": "a"}}}]},
+        {"role": "tool", "content": "contents", "tool_name": "read"},
+    ]
+    assert all("images" not in p for p in sent)
+
+
+def test_tool_images_stay_on_the_tool_payload_for_now() -> None:
+    from src.engine.provider.base import Image
+
+    (payload,) = _sent([Message("tool", "image x.png", name="read", images=(Image("png", b"\x89PNG\r\n\x1a\n", "x.png"),))])
+    assert payload["role"] == "tool"
+    assert len(payload["images"]) == 1

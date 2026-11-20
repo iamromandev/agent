@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import contextlib
 import json
 from collections.abc import AsyncGenerator, Sequence
@@ -12,18 +13,24 @@ from src.client import OllamaClient, OllamaError, OllamaUnreachable
 
 from .base import Done, Message, ProviderError, ProviderEvent, TextDelta, ToolCall, ToolCallEvent, ToolSpec
 
+# Images on a `tool` message stay on its payload. Step 9's spike decides whether Ollama reads them there or they
+# must move to a user payload after the run of tool messages.
+TOOL_IMAGES_INLINE = True
+
 
 def _message_payload(message: Message) -> dict[str, Any]:
     if message.role == "tool":
         payload: dict[str, Any] = {"role": "tool", "content": message.content}
         if message.name is not None:
             payload["tool_name"] = message.name
-        return payload
-    payload = {"role": message.role, "content": message.content}
-    if message.role == "assistant" and message.tool_calls:
-        payload["tool_calls"] = [
-            {"function": {"name": call.name, "arguments": call.arguments}} for call in message.tool_calls
-        ]
+    else:
+        payload = {"role": message.role, "content": message.content}
+        if message.role == "assistant" and message.tool_calls:
+            payload["tool_calls"] = [
+                {"function": {"name": call.name, "arguments": call.arguments}} for call in message.tool_calls
+            ]
+    if message.images:  # only when there are some: a request without images is as it always was
+        payload["images"] = [base64.b64encode(image.data).decode("ascii") for image in message.images]
     return payload
 
 

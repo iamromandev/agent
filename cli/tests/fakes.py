@@ -96,8 +96,11 @@ class FakeCatalog:
         lengths: Mapping[str, int] | None = None,
         delay: float = 0.0,
         fail: bool = False,
+        capabilities: Mapping[str, Sequence[str]] | None = None,
     ) -> None:
         self.models = [m if isinstance(m, ModelInfo) else ModelInfo(m) for m in models]
+        self.caps = {name: tuple(c) for name, c in (capabilities or {}).items()}  # missing: ("completion",)
+        self.capability_calls: list[str] = []
         self.lengths = dict(lengths or {})
         self.delay = delay
         self.fail = fail
@@ -118,6 +121,14 @@ class FakeCatalog:
         if self.fail or name in self.fail_length:
             raise CatalogError(f"Could not read {name}")
         return self.lengths.get(name)
+
+    async def capabilities(self, name: str) -> tuple[str, ...]:
+        self.capability_calls.append(name)
+        if self.delay:
+            await asyncio.sleep(self.delay)
+        if self.fail:
+            raise CatalogError(f"Could not read {name}")
+        return self.caps.get(name, ("completion",))
 
 
 class RecordingApprover:

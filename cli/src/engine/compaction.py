@@ -8,6 +8,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from src.engine.provider.base import Message, ToolSpec
+from src.engine.provider.images import IMAGE_TOKENS
 from src.engine.session.records import ToolMeta
 
 STOP_NOTE_PREFIX = "[hook Stop] "  # starts the user message a `Stop` hook block records: it continues a turn, it is not one
@@ -35,7 +36,7 @@ def message_tokens(m: Message) -> int:
         if m.tool_calls
         else ""
     )
-    return (len(m.content) + len(calls)) // CHARS_PER_TOKEN + MESSAGE_OVERHEAD
+    return (len(m.content) + len(calls)) // CHARS_PER_TOKEN + MESSAGE_OVERHEAD + IMAGE_TOKENS * len(m.images)
 
 
 def estimate_tokens(
@@ -115,8 +116,9 @@ def prune(
         if m.role != "tool":
             continue
         stub = pruned_stub(tool_meta.get(m.tool_call_id or ""), m.name)
-        if len(stub) < len(m.content):  # an already pruned result, or one too short to be worth it, stays
-            new[i] = dataclasses.replace(m, content=stub)
+        # an already pruned result, or one too short to be worth it, stays; one with images always goes (they are the weight)
+        if m.images or len(stub) < len(m.content):
+            new[i] = dataclasses.replace(m, content=stub, images=())
             count += 1
     return new, count
 

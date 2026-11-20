@@ -164,6 +164,11 @@ class OllamaCatalog:
         body = await self._bounded(self._client.show(name, self._timeout))
         return _context_length(body.get("model_info"))
 
+    async def capabilities(self, name: str) -> tuple[str, ...]:
+        body = await self._bounded(self._client.show(name, self._timeout))
+        listed = body.get("capabilities")
+        return tuple(item for item in listed if isinstance(item, str)) if isinstance(listed, list) else ()
+
 
 def get_ollama_client() -> OllamaClient:
     return OllamaClient(get_settings().ollama_url)

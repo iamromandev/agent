@@ -6,16 +6,20 @@ count lines by substring instead of parsing them (NFR2).
 
 from __future__ import annotations
 
+import base64
+import binascii
 import json
 from dataclasses import dataclass
 from typing import Any, get_args
 
-from src.engine.provider.base import Message, Role, ToolCall
+from src.engine.provider.base import Image, ImageFormat, Message, Role, ToolCall
+from src.engine.provider.images import MAX_IMAGE_BYTES
 from src.engine.text import escape_display
 
 FORMAT_VERSION = 1
 TITLE_LIMIT = 50
 _MESSAGE_ROLES = frozenset(get_args(Role)) - {"system"}
+_IMAGE_FORMATS = frozenset(get_args(ImageFormat))
 
 
 class RecordError(ValueError):
@@ -75,6 +79,10 @@ def message_to_obj(m: Message, meta: ToolMeta | None, *, embedded: bool = False)
         name=m.name,
         meta={"label": meta.label, "summary": meta.summary} if meta else None,
     )
+    if m.images:  # absent without images, so a file without any is as it was
+        obj["images"] = [
+            {"format": i.format, "name": i.name, "data": base64.b64encode(i.data).decode("ascii")} for i in m.images
+        ]
     return obj
 
 
@@ -94,7 +102,7 @@ def message_from_obj(obj: Any, *, embedded: bool = False) -> tuple[Message, Tool
         raise RecordError("tool_call_id is not a string")
     if name is not None and not isinstance(name, str):
         raise RecordError("name is not a string")
-    message = Message(role, content, _tool_calls(obj.get("tool_calls")), tool_call_id, name)
+    message = Message(role, content, _tool_calls(obj.get("tool_calls")), tool_call_id, name, _images(obj.get("images")))
     return message, _meta(obj.get("meta"))
 
 
@@ -112,6 +120,30 @@ def _tool_calls(raw: Any) -> list[ToolCall]:
             raise RecordError("tool call needs a string id, a string name and object arguments")
         calls.append(ToolCall(call_id, call_name, arguments))
     return calls
+
+
+def _images(raw: Any) -> tuple[Image, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list):
+        raise RecordError("images is not a list")
+    images: list[Image] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise RecordError("image is not an object")
+        fmt, name, data = item.get("format"), item.get("name", ""), item.get("data")
+        if fmt not in _IMAGE_FORMATS or not isinstance(name, str) or not isinstance(data, str):
+            raise RecordError("image needs a known format, a string name and string data")
+        if len(data) > (MAX_IMAGE_BYTES + 2) // 3 * 4:  # before decoding: a huge value is not worth it
+            raise RecordError("image is over the size limit")
+        try:
+            raw_bytes = base64.b64decode(data, validate=True)
+        except (binascii.Error, ValueError):
+            raise RecordError("image data is not base64") from None
+        if len(raw_bytes) > MAX_IMAGE_BYTES:
+            raise RecordError("image is over the size limit")
+        images.append(Image(fmt, raw_bytes, name))
+    return tuple(images)
 
 
 def _meta(raw: Any) -> ToolMeta | None:

@@ -43,6 +43,11 @@ class ModelCatalog(Protocol):
         """The trained context length of `name`; None when Ollama reports none. Raises `CatalogError`."""
         ...
 
+    async def capabilities(self, name: str) -> tuple[str, ...]:
+        """The capabilities Ollama lists for `name` (`completion`, `vision`, ...); empty when it lists none.
+        Raises `CatalogError`."""
+        ...
+
 
 def resolve_window(length: int | None, cap: int) -> int:
     """min(the model's length, the cap); the cap when the length is unknown."""

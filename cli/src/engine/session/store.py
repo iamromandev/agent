@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from src.engine.provider.base import Message
+from src.engine.provider.images import describe
 from src.engine.session.paths import workspace_dir
 from src.engine.session.records import (
     FORMAT_VERSION,
@@ -28,6 +29,7 @@ from src.engine.session.records import (
     message_from_obj,
     model_notice,
 )
+from src.engine.text import escape_display
 from src.engine.todo import TodoItem, current_todos
 from src.engine.usage import UsageAccumulator, UsageTotals, usage_from_obj
 
@@ -195,8 +197,7 @@ class SessionStore:
                     any_message = True
                     history.append(message)
                     _remember(tool_meta, message, meta)
-                    if item := _item(message, meta):
-                        items.append(item)
+                    items.extend(_items(message, meta))
                     marks[len(history)] = len(items)
                 elif kind == "compaction":
                     base = current_todos(history, base)
@@ -272,6 +273,13 @@ def _last_title(complete: bytes) -> str:
 def _remember(tool_meta: dict[str, ToolMeta], message: Message, meta: ToolMeta | None) -> None:
     if meta and message.tool_call_id:
         tool_meta[message.tool_call_id] = meta
+
+
+def _items(message: Message, meta: ToolMeta | None) -> builtins.list[TranscriptItem]:
+    """The transcript entries for a message: its own, then one notice line per image it carries."""
+    own = _item(message, meta)
+    lines = [TranscriptItem("notice", f"image {escape_display(i.name)} ({describe(i)})") for i in message.images]
+    return [own, *lines] if own is not None else lines
 
 
 def _item(message: Message, meta: ToolMeta | None) -> TranscriptItem | None:

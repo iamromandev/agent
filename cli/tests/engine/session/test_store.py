@@ -476,3 +476,63 @@ def test_undo_and_compaction_keep_the_totals(store: SessionStore, root: Path, wo
 
 def new_header(workspace: Path) -> dict[str, Any]:
     return SessionHeader("01AAAAAAAAAAAAAAAAAAAAAAAA", str(workspace.resolve()), STAMP, tracks_usage=True).to_obj()
+
+
+# --- images -----------------------------------------------------------------------------------
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"data"
+
+
+def test_images_survive_a_save_and_a_resume(root: Path, workspace: Path) -> None:
+    from src.engine.provider.base import Image
+
+    image = Image("png", PNG_BYTES, "a.png")
+    loaded = record_and_load(root, workspace, [Message("user", "see @a.png", images=(image,)), Message("assistant", "ok")])
+    assert loaded.history[0].images == (image,)
+    assert loaded.history[1].images == ()
+    assert loaded.skipped_lines == 0
+
+
+def test_a_session_with_images_still_counts_its_messages(root: Path, workspace: Path) -> None:
+    from src.engine.provider.base import Image
+
+    path = started_session(root, workspace, [Message("user", "x", images=(Image("png", PNG_BYTES, "a"),))])
+    assert path.read_bytes().count(b'\n{"type":"message","role":"user"') == 1
+    [info] = SessionStore(root, workspace).list()
+    assert info.message_count == 1
+
+
+def test_a_record_with_bad_images_is_skipped_and_counted(root: Path, workspace: Path) -> None:
+    bad = {**user("bad"), "images": [{"format": "bmp", "name": "a", "data": "AAAA"}]}
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("a"), bad, assistant("b")])
+    loaded = SessionStore(root, workspace).load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.content for m in loaded.history] == ["a", "b"]
+    assert loaded.skipped_lines == 1
+
+
+def test_replay_shows_one_notice_line_per_image_after_its_message(root: Path, workspace: Path) -> None:
+    from src.engine.provider.base import Image
+
+    images = (Image("png", PNG_BYTES, "a\x1b[2J.png"), Image("jpeg", b"\xff\xd8\xffx", "clipboard"))
+    loaded = record_and_load(root, workspace, [Message("user", "look", images=images), Message("assistant", "ok")])
+    assert [(i.kind, i.text) for i in loaded.items] == [
+        ("user", "look"),
+        ("notice", "image a\\x1b[2J.png (PNG, 1 KB)"),
+        ("notice", "image clipboard (JPEG, 1 KB)"),
+        ("assistant", "ok"),
+    ]
+
+
+def test_replay_shows_a_tool_image_line_after_the_tool_item(root: Path, workspace: Path) -> None:
+    from src.engine.provider.base import Image
+
+    message = Message("tool", "image a.png (PNG, 1 KB)", tool_call_id="c", name="read", images=(Image("png", PNG_BYTES, "a.png"),))
+    loaded = record_and_load(root, workspace, [message])
+    assert [i.kind for i in loaded.items] == ["tool", "notice"]
+
+
+def test_an_old_file_without_images_loads_unchanged(root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("a"), assistant("b")])
+    loaded = SessionStore(root, workspace).load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+    assert [m.images for m in loaded.history] == [(), ()]
+    assert [i.kind for i in loaded.items] == ["user", "assistant"]
