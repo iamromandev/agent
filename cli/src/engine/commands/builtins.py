@@ -18,5 +18,6 @@ BUILTINS: dict[str, str] = {
     "init": "write AGENTS.md",
     "undo": "undo the last turn",
     "diff": "show what the last turn changed",
+    "usage": "show the session's token totals",
     "quit": "exit",
 }

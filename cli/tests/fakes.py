@@ -24,6 +24,7 @@ from src.engine.provider.base import Message, ProviderError, ProviderEvent, Tool
 from src.engine.provider.models import CatalogError, ModelInfo
 from src.engine.search_web import SearchHit
 from src.engine.session import SessionWriteError, ToolMeta
+from src.engine.usage import UsageRecord
 from src.engine.web import FetchResponse
 
 
@@ -190,12 +191,13 @@ class MemoryRecorder:
         self.compactions: list[RecordedCompaction] = []
         self.undos: list[RecordedUndo] = []
         self.models: list[tuple[str, int]] = []
+        self.usage_records: list[UsageRecord] = []  # kept apart from `records`: older tests compare that list
         self.records: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo | RecordedModel] = []  # all kinds, in write order
         self.fail = fail  # the next `fail` calls raise
         self.error = error  # what they raise (default: SessionWriteError)
         self.calls = 0
         self.closed = 0
-        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo | RecordedModel] = []
+        self._queued: list[tuple[Message, ToolMeta | None] | RecordedCompaction | RecordedUndo | RecordedModel | UsageRecord] = []
 
     def _write(self) -> None:
         """One write attempt for everything queued: all of it, or (when told to fail) none."""
@@ -210,9 +212,12 @@ class MemoryRecorder:
                 self.undos.append(record)
             elif isinstance(record, RecordedModel):
                 self.models.append((record.model, record.window))
+            elif isinstance(record, UsageRecord):
+                self.usage_records.append(record)
+                continue
             else:
                 self.messages.append(record)
-        self.records.extend(self._queued)
+        self.records.extend(r for r in self._queued if not isinstance(r, UsageRecord))
         self._queued.clear()
 
     def message(self, message: Message, meta: ToolMeta | None) -> None:
@@ -239,6 +244,10 @@ class MemoryRecorder:
 
     def model(self, model: str, window: int) -> None:
         self._queued.append(RecordedModel(model, window))
+        self._write()
+
+    def usage(self, record: UsageRecord) -> None:
+        self._queued.append(record)
         self._write()
 
     def close(self) -> None:

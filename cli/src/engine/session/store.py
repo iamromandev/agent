@@ -12,7 +12,7 @@ import json
 import os
 import re
 import stat
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
@@ -29,6 +29,7 @@ from src.engine.session.records import (
     model_notice,
 )
 from src.engine.todo import TodoItem, current_todos
+from src.engine.usage import UsageAccumulator, UsageTotals, usage_from_obj
 
 MIN_PREFIX = 6
 UNTITLED = "(untitled)"
@@ -62,6 +63,8 @@ class LoadedSession:
     items: list[TranscriptItem]
     skipped_lines: int  # complete-but-invalid lines skipped (a cut last line is not counted)
     todos: tuple[TodoItem, ...] = ()  # the todo list as the last successful `todo` call left it
+    usage: UsageTotals = field(default_factory=UsageTotals)  # the sum of the file's usage records (never cut by an undo or a compaction)
+    unrecorded: bool = False  # the file has messages but was not started by a version that records usage
 
 
 class SessionError(Exception):
@@ -129,7 +132,7 @@ class SessionStore:
         except OSError as error:
             raise SessionError(f"Could not read session {session_id}: {error.strerror or error}") from error
         info = self._info(path, header, data, mtime)
-        return self._replay(info, data)
+        return self._replay(info, data, header.tracks_usage)
 
     def _read(self, path: Path) -> tuple[SessionHeader, bytes, float]:
         """Read a file and check its header. Raises SessionError when it can't be used.
@@ -171,13 +174,15 @@ class SessionStore:
             message_count=sum(complete.count(mark) for mark in _COUNTED_MARKS),
         )
 
-    def _replay(self, info: SessionInfo, data: bytes) -> LoadedSession:
+    def _replay(self, info: SessionInfo, data: bytes, tracks_usage: bool) -> LoadedSession:
         complete = data[: data.rfind(b"\n")]  # drops a cut last line, if there is one
         history: list[Message] = []
         tool_meta: dict[str, ToolMeta] = {}
         items: list[TranscriptItem] = []
         marks: dict[int, int] = {0: 0}  # history length -> items length at that point (where an undo can cut)
         base: tuple[TodoItem, ...] = ()  # the list a compaction record carried over
+        usage = UsageAccumulator()
+        any_message = False
         skipped = 0
         for line in complete.split(b"\n")[1:]:  # the first line is the header
             if not line.strip():
@@ -187,6 +192,7 @@ class SessionStore:
                 kind = obj.get("type") if isinstance(obj, dict) else None
                 if kind == "message":
                     message, meta = message_from_obj(obj)
+                    any_message = True
                     history.append(message)
                     _remember(tool_meta, message, meta)
                     if item := _item(message, meta):
@@ -203,6 +209,8 @@ class SessionStore:
                         raise RecordError("bad model record")
                     items.append(TranscriptItem("notice", model_notice(name, window)))
                     marks[len(history)] = len(items)  # an undo back to here keeps the notice
+                elif kind == "usage":
+                    usage.add(usage_from_obj(obj))
                 elif kind == "undo":
                     keep = _size(obj.get("keep"))
                     if keep is None or keep not in marks:
@@ -218,7 +226,7 @@ class SessionStore:
                     raise RecordError("record without a type")
             except (ValueError, TypeError, AttributeError, RecursionError):  # bad JSON or UTF-8, RecordError
                 skipped += 1
-        return LoadedSession(info, history, tool_meta, items, skipped, current_todos(history, base))
+        return LoadedSession(info, history, tool_meta, items, skipped, current_todos(history, base), usage.totals(), any_message and not tracks_usage)
 
 
 def _read_regular_file(path: Path) -> tuple[bytes, float]:

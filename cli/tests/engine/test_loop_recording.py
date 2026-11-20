@@ -29,6 +29,7 @@ from src.engine.provider.base import (
 from src.engine.session import SessionWriteError, ToolMeta
 from src.engine.tools import default_tools
 from src.engine.tools.base import Prepared, Tool, ToolContext, ToolResult
+from src.engine.usage import UsageRecord
 
 from tests.engine.test_loop_interrupt import SlowWrite
 from tests.fakes import BlockingApprover, Gate, MemoryRecorder, RecordingApprover, ScriptedProvider
@@ -854,6 +855,7 @@ async def test_reset_tolerates_a_recorder_without_close_or_whose_close_fails(ctx
         ) -> None: ...
         def undo(self, keep: int) -> None: ...
         def model(self, model: str, window: int) -> None: ...
+        def usage(self, record: UsageRecord) -> None: ...
 
     class BadClose(NoClose):
         def close(self) -> None:

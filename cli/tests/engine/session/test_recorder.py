@@ -16,6 +16,7 @@ from src.engine.provider.base import Message, ToolCall
 from src.engine.session.paths import workspace_dir
 from src.engine.session.recorder import FileRecorder, NullRecorder, SessionWriteError, title_from
 from src.engine.session.records import ToolMeta, message_from_obj
+from src.engine.usage import UsageRecord
 
 NOW = datetime(2026, 11, 12, 15, 3, 18, tzinfo=UTC)
 AC3_TEXT = "  Add   a --verbose\nflag to health check and also update the docs please  "
@@ -91,6 +92,7 @@ def test_the_file_holds_the_header_then_the_title_then_the_message(
         "id": recorder.path.stem,
         "workspace": str(workspace.resolve()),
         "created_at": "2026-11-12T15:03:18Z",
+        "usage": 1,
     }
     assert title == {"type": "title", "title": title_from(AC3_TEXT), "at": "2026-11-12T15:03:18Z"}
     assert title["title"] == "Add a --verbose flag to health check and also upd…"
@@ -865,3 +867,38 @@ def test_the_session_id_is_empty_until_the_first_record_then_the_file_name(recor
     assert recorder.path is not None
     assert recorder.session_id == recorder.path.stem and recorder.session_id != ""
     assert FileRecorder.resume(recorder.path, workspace).session_id == recorder.path.stem
+
+
+def _usage(model: str = "m", i: int = 100) -> UsageRecord:
+    return UsageRecord(model, i, 20, 1500, False, "2026-11-18T10:00:00Z")
+
+
+def test_a_usage_record_is_written_as_given(recorder: FileRecorder) -> None:
+    recorder.message(Message("user", "q"), None)
+    recorder.usage(_usage())
+
+    assert recorder.path is not None
+    assert lines(recorder.path)[-1] == _usage().to_obj()
+
+
+def test_usage_before_any_message_writes_no_file(recorder: FileRecorder, directory: Path) -> None:
+    recorder.usage(_usage())
+
+    assert recorder.path is None
+    assert not directory.exists() or list(directory.iterdir()) == []
+
+
+def test_held_usage_is_written_after_the_header_in_order(recorder: FileRecorder) -> None:
+    recorder.model("a", 1)
+    recorder.usage(_usage("a", 1))
+    recorder.usage(_usage("a", 2))
+    recorder.message(Message("user", "hello"), None)
+
+    assert recorder.path is not None
+    records = lines(recorder.path)
+    assert [r["type"] for r in records] == ["session", "title", "model", "usage", "usage", "message"]
+    assert [r["input_tokens"] for r in records if r["type"] == "usage"] == [1, 2]
+
+
+def test_null_recorder_accepts_usage() -> None:
+    NullRecorder().usage(_usage())
