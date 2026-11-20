@@ -39,7 +39,7 @@ from src.engine import (
 from src.engine.approval import Approver
 from src.engine.commands.builtins import BUILTINS
 from src.engine.commands.loader import Commands
-from src.engine.compaction import CHARS_PER_TOKEN
+from src.engine.compaction import CHARS_PER_TOKEN, turn_starts
 from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.engine.guardrails.paths import (
     BUILTIN_HOME,
@@ -83,6 +83,7 @@ from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalError, TerminalManager
 from src.engine.text import escape, escape_display
 from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
+from src.engine.usage import summary
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.screens.approval import ApprovalScreen
@@ -91,6 +92,7 @@ from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.screens.models import ModelPicker
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
+from src.tui.screens.usage import UsageScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
@@ -99,7 +101,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, DiffScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, DiffScreen, UsageScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -125,7 +127,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /help this help · /quit exit"
 )
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
@@ -679,7 +681,12 @@ class AgentApp(App[None]):
             if self._turn_active:  # a turn started while the file was read
                 raise AgentBusy
             old = self.agent.reset(
-                recorder=recorder, history=loaded.history, tool_meta=loaded.tool_meta, todos=loaded.todos
+                recorder=recorder,
+                history=loaded.history,
+                tool_meta=loaded.tool_meta,
+                todos=loaded.todos,
+                usage=loaded.usage,
+                unrecorded=loaded.unrecorded,
             )
         except AgentBusy:
             await self._refuse_switch()
@@ -1028,6 +1035,8 @@ class AgentApp(App[None]):
                 await self._undo_command()
             case "/diff":
                 await self._diff_command(rest)
+            case "/usage":
+                await self._usage_command(rest)
             case "/model":
                 if not rest.strip():
                     if self._turn_active or self._switching:
@@ -1140,6 +1149,25 @@ class AgentApp(App[None]):
             for c in self.commands.sorted()
         ]
         return f"{HELP}\nCustom commands:\n" + "\n".join(lines)
+
+    async def _usage_command(self, rest: str) -> None:
+        """Open the totals now: they are in memory, so there is nothing to wait for and a running turn is no obstacle."""
+        if rest.strip():
+            await self.query_one(Transcript).add_notice("warn", "/usage takes no arguments")
+            return
+        status = self.query_one(StatusBar)
+        recorder_id = getattr(self.agent.recorder, "session_id", "")
+        data = summary(
+            self.agent.usage,
+            session_id=recorder_id if isinstance(recorder_id, str) else "",
+            model=self.provider.model,
+            context_used=status.used,
+            window=status.window,
+            turns=len(turn_starts(self.agent.history)),
+            unrecorded=self.agent.usage_unrecorded,
+            estimated=status.estimated,
+        )
+        await self.push_screen(UsageScreen(data))
 
     async def _diff_command(self, rest: str) -> None:
         transcript = self.query_one(Transcript)

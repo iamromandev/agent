@@ -29,6 +29,7 @@ from src.engine.session.store import (
     compaction_notice,
 )
 from src.engine.todo import TodoItem
+from src.engine.usage import UsageRecord, UsageTotals
 
 CLI_DIR = Path(__file__).resolve().parents[3]
 STAMP = "2026-11-12T15:03:18Z"
@@ -1203,3 +1204,82 @@ def test_a_model_notice_before_a_compaction_stays_and_an_undo_back_to_the_compac
     assert "q2" not in texts
     assert len(loaded.history) == 1
     assert loaded.skipped_lines == 0
+
+
+# --- usage records -----------------------------------------------------------------------------
+
+
+def usage_obj(model: str = "m", i: int = 100, o: int = 20, ms: int = 1000, compaction: bool = False) -> dict[str, Any]:
+    return UsageRecord(model, i, o, ms, compaction, STAMP).to_obj()
+
+
+def load_records(store: SessionStore, root: Path, workspace: Path, records: list[dict[str, Any]]) -> LoadedSession:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records)
+    return store.load("01AAAAAAAAAAAAAAAAAAAAAAAA")
+
+
+def test_usage_records_are_summed(store: SessionStore, root: Path, workspace: Path) -> None:
+    records = [user("q"), usage_obj(i=1, o=2), assistant("a"), usage_obj(i=10, o=20), usage_obj("n", i=5, o=5)]
+    loaded = load_records(store, root, workspace, records)
+    assert loaded.usage.total.input_tokens == 16 and loaded.usage.total.output_tokens == 27
+    assert [n for n, _ in loaded.usage.by_model] == ["m", "n"]
+    assert loaded.skipped_lines == 0
+
+
+def test_a_file_without_usage_loads_with_zero_totals(store: SessionStore, root: Path, workspace: Path) -> None:
+    loaded = load_records(store, root, workspace, three_turns())
+    assert loaded.usage == UsageTotals() and loaded.skipped_lines == 0
+    assert loaded.unrecorded is True
+
+
+def test_usage_records_change_neither_history_nor_items(store: SessionStore, root: Path, workspace: Path) -> None:
+    plain = load_records(store, root, workspace, three_turns())
+    mixed = load_records(store, root, workspace, [usage_obj(), *three_turns()[:3], usage_obj(), *three_turns()[3:]])
+    assert mixed.history == plain.history and mixed.items == plain.items and mixed.todos == plain.todos
+
+
+@pytest.mark.parametrize("patch", [{"input_tokens": -1}, {"output_tokens": "5"}, {"model": None}])
+def test_a_malformed_usage_record_is_skipped_and_counted(
+    store: SessionStore, root: Path, workspace: Path, patch: dict[str, Any]
+) -> None:
+    loaded = load_records(store, root, workspace, [user("q"), usage_obj(), {**usage_obj(), **patch}])
+    assert loaded.skipped_lines == 1 and loaded.usage.calls == 1
+
+
+def test_undo_and_compaction_keep_the_totals(store: SessionStore, root: Path, workspace: Path) -> None:
+    records = [*three_turns(), usage_obj(), undo_record(4), compaction([user("s")]), usage_obj(compaction=True)]
+    loaded = load_records(store, root, workspace, records)
+    assert loaded.usage.calls == 2 and loaded.usage.total.compactions == 1
+
+
+def new_header(workspace: Path) -> dict[str, Any]:
+    return SessionHeader("01AAAAAAAAAAAAAAAAAAAAAAAA", str(workspace.resolve()), STAMP, tracks_usage=True).to_obj()
+
+
+def test_a_cut_reply_without_usage_in_a_new_file_is_not_unrecorded(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    records = [user("q"), assistant("partial"), user("again"), usage_obj(), assistant("a")]
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", records, header=new_header(workspace))
+    assert store.load("01AAAAAAAAAAAAAAAAAAAAAAAA").unrecorded is False
+
+
+def test_an_old_format_file_with_messages_is_unrecorded(store: SessionStore, root: Path, workspace: Path) -> None:
+    assert load_records(store, root, workspace, [user("q"), usage_obj(), assistant("a")]).unrecorded is True
+    assert load_records(store, root, workspace, []).unrecorded is False
+
+
+def test_a_resumed_old_file_stays_unrecorded_after_new_records(
+    store: SessionStore, root: Path, workspace: Path
+) -> None:
+    records = [user("q"), assistant("a"), user("q2"), usage_obj(), assistant("a2")]
+    assert load_records(store, root, workspace, records).unrecorded is True
+
+
+def test_messages_and_no_usage_record_at_all_is_unrecorded(store: SessionStore, root: Path, workspace: Path) -> None:
+    assert load_records(store, root, workspace, [user("q")]).unrecorded is True
+
+
+def test_usage_records_do_not_change_message_counts(store: SessionStore, root: Path, workspace: Path) -> None:
+    write_session(root, workspace, "01AAAAAAAAAAAAAAAAAAAAAAAA", [user("q"), usage_obj(), assistant("a")])
+    assert store.list()[0].message_count == 2

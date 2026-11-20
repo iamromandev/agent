@@ -96,6 +96,14 @@ def test_header_round_trips() -> None:
     assert SessionHeader.from_obj(json.loads(dumps(header.to_obj()))) == header
 
 
+def test_usage_marker_round_trips_and_old_headers_read_as_untracked() -> None:
+    new = SessionHeader("01ABC", "/tmp/w", "2026-11-12T15:03:18Z", tracks_usage=True)
+    assert new.to_obj()["usage"] == 1
+    assert SessionHeader.from_obj(json.loads(dumps(new.to_obj()))) == new
+    old = SessionHeader("01ABC", "/tmp/w", "2026-11-12T15:03:18Z")
+    assert "usage" not in old.to_obj() and SessionHeader.from_obj(old.to_obj()).tracks_usage is False
+
+
 @pytest.mark.parametrize(
     "obj",
     [

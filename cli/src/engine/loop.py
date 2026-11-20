@@ -8,7 +8,7 @@ import dataclasses
 import platform
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
 
@@ -82,6 +82,7 @@ from src.engine.undo import (
     restore_turn,
     undo_notices,
 )
+from src.engine.usage import UsageRecord, UsageTotals
 
 # Marks a partial assistant message that a cancel cut short, so the model does not take it for a
 # complete answer on the next turn.
@@ -204,6 +205,8 @@ class Agent:
         self.today = today
         self.mode = Mode.BUILD
         self.history: list[Message] = []  # no system message; the prompt is rebuilt per request
+        self.usage = UsageTotals()  # this session's recorded model calls (never lowered by `/undo`)
+        self.usage_unrecorded = False  # the session has messages from before its first usage record
         self.todo_base: tuple[TodoItem, ...] = ()  # the list before the history's first todo call (kept by compaction)
         self.grants = Grants()
         self.tool_meta: dict[str, ToolMeta] = {}  # by tool_call_id: how each tool message is shown and pruned
@@ -238,6 +241,8 @@ class Agent:
         history: Sequence[Message] = (),
         tool_meta: Mapping[str, ToolMeta] | None = None,
         todos: Sequence[TodoItem] = (),
+        usage: UsageTotals | None = None,
+        unrecorded: bool = False,
     ) -> Recorder | None:
         """Start over with `history` (a new session, or a resumed one): BUILD mode, no grants.
 
@@ -251,6 +256,8 @@ class Agent:
         self._recorder = recorder
         self.history = list(history)
         self.todo_base = tuple(todos)
+        self.usage = usage if usage is not None else UsageTotals()
+        self.usage_unrecorded = unrecorded
         self.tool_meta = dict(tool_meta or {})
         self.mode = Mode.BUILD
         self.grants = Grants()
@@ -379,6 +386,21 @@ class Agent:
         else:
             self._save_failing = False
 
+    def _record_usage(self, prompt_tokens: int, completion_tokens: int, started: float, *, compaction: bool) -> None:
+        """One finished model call of the main agent: add it to the totals, then save it (a failed save is a notice)."""
+        if self.role != "main":
+            return
+        record = UsageRecord(
+            model=getattr(self.provider, "model", "") or "",
+            input_tokens=max(prompt_tokens, 0),
+            output_tokens=max(completion_tokens, 0),
+            duration_ms=max(int((time.monotonic() - started) * 1000), 0),
+            compaction=compaction,
+            at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        self.usage = self.usage.add(record)
+        self._save(lambda: self._recorder.usage(record))
+
     def _flush_save_error(self, emit: EventSink) -> None:
         if self._save_error is not None:
             emit(Notice("error", self._save_error))
@@ -481,16 +503,19 @@ class Agent:
     async def _summarize(self, older: Sequence[Message], window: int) -> str | None:
         """One model request, no tools, that summarizes `older`. None when it fails or says nothing.
 
-        It is not a step of the turn, and its Done is ignored.
+        It is not a step of the turn; its Done is only recorded as usage (main agent).
         """
         request, _ = summary_input(older, int(window * SUMMARY_BUDGET))
         parts: list[str] = []
+        started = time.monotonic()
         try:
             async with contextlib.aclosing(self.provider.stream(request, [])) as events:
                 async for event in events:
                     match event:
                         case TextDelta(text):
                             parts.append(text)
+                        case Done(prompt_tokens, completion_tokens):
+                            self._record_usage(prompt_tokens, completion_tokens, started, compaction=True)
                         case ProviderError():
                             return None
         except Exception:  # a provider breaking its contract: the pruned history is still fine to go on with
@@ -823,6 +848,7 @@ class Agent:
         # aclosing so that leaving the loop early (cancel, error) closes the provider stream now
         failure: str | None = None
         total: int | None = None
+        started = time.monotonic()
         try:
             async with contextlib.aclosing(self.provider.stream(messages, specs)) as events:
                 async for event in events:
@@ -836,6 +862,7 @@ class Agent:
                             calls.append(call)
                         case Done(prompt_tokens, completion_tokens):
                             total = prompt_tokens + completion_tokens
+                            self._record_usage(prompt_tokens, completion_tokens, started, compaction=False)
                             emit(UsageUpdate(total, self.provider.context_window, prompt_tokens=prompt_tokens, completion_tokens=completion_tokens))
                         case ProviderError(message):
                             failure = message

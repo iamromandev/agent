@@ -277,7 +277,10 @@ async def test_the_session_file_holds_only_the_tool_messages(
     recorder.close()
     assert recorder.path is not None
     records = [json.loads(line) for line in recorder.path.read_text().splitlines()]
-    assert [r["type"] for r in records] == ["session", "title", "message", "message", "message", "message"]
+    assert [r["type"] for r in records if r["type"] != "usage"] == [
+        "session", "title", "message", "message", "message", "message",
+    ]
+    assert [r["type"] for r in records].count("usage") == 2
     messages = [r for r in records if r["type"] == "message"]
     assert [m["role"] for m in messages] == ["user", "assistant", "tool", "assistant"]
     tool = messages[2]

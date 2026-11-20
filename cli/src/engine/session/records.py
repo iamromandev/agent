@@ -36,15 +36,19 @@ class SessionHeader:
     workspace: str
     created_at: str  # ISO-8601 UTC, "2026-11-12T15:03:18Z"
     version: int = FORMAT_VERSION
+    tracks_usage: bool = False  # written by versions that record usage: a file without it has unrecorded calls
 
     def to_obj(self) -> dict[str, Any]:
-        return {
+        obj: dict[str, Any] = {
             "type": "session",
             "version": self.version,
             "id": self.id,
             "workspace": self.workspace,
             "created_at": self.created_at,
         }
+        if self.tracks_usage:
+            obj["usage"] = 1
+        return obj
 
     @classmethod
     def from_obj(cls, obj: Any) -> SessionHeader:
@@ -57,7 +61,7 @@ class SessionHeader:
         fields = {key: obj.get(key) for key in ("id", "workspace", "created_at")}
         if not all(isinstance(value, str) for value in fields.values()):
             raise RecordError("header is missing id, workspace or created_at")
-        return cls(version=version, **fields)
+        return cls(version=version, tracks_usage=obj.get("usage") == 1, **fields)
 
 
 def message_to_obj(m: Message, meta: ToolMeta | None, *, embedded: bool = False) -> dict[str, Any]:

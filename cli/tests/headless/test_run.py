@@ -866,3 +866,18 @@ def test_headless_makes_no_checkpoint_folder(ws: Path, monkeypatch: pytest.Monke
 
     assert code == EXIT_OK
     assert not (data / "agent" / "checkpoints").exists()
+
+
+def test_a_headless_run_writes_usage_records_and_a_continued_run_adds_to_them(ws: Path) -> None:
+    go(ws, ScriptedProvider([say("one")]), prompt="first")
+    go(ws, ScriptedProvider([say("two")]), prompt="second", start=StartChoice("continue"))
+
+    store = SessionStore(_sessions(), ws.resolve())
+    [info] = store.list()
+    lines = [json.loads(line) for line in info.path.read_text().splitlines()]
+    usage = [r for r in lines if r["type"] == "usage"]
+    assert [(r["model"], r["input_tokens"], r["output_tokens"], r["compaction"]) for r in usage] == [
+        ("fake", 10, 5, False)
+    ] * 2
+    loaded = store.load(info.id)
+    assert loaded.usage.total.input_tokens == 20 and loaded.unrecorded is False

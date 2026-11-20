@@ -26,6 +26,7 @@ from src.engine.session.records import (
 )
 from src.engine.session.records import title_from as title_from
 from src.engine.session.ulid import new_ulid
+from src.engine.usage import UsageRecord
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -52,6 +53,8 @@ class Recorder(Protocol):
 
     def model(self, model: str, window: int) -> None: ...
 
+    def usage(self, record: UsageRecord) -> None: ...
+
     # All raise SessionWriteError on I/O failure.
 
 
@@ -76,6 +79,9 @@ class NullRecorder:
         return None
 
     def model(self, model: str, window: int) -> None:
+        return None
+
+    def usage(self, record: UsageRecord) -> None:
         return None
 
     def close(self) -> None:
@@ -140,7 +146,7 @@ class FileRecorder:
         self._creating = False  # a new session whose file does not exist yet
         self._fd: int | None = None
         self._pending: list[bytes] = []
-        self._held: list[bytes] = []  # model switches made before the file started
+        self._held: list[bytes] = []  # model switches and usage records made before the file started
 
     @classmethod
     def resume(cls, path: Path, workspace: Path) -> FileRecorder:
@@ -212,6 +218,15 @@ class FileRecorder:
         self._pending.append(line)
         self._flush()
 
+    def usage(self, record: UsageRecord) -> None:
+        """Record one finished model call. Held like a model switch until the session file starts."""
+        line = _encode(record.to_obj())
+        if not self._started:
+            self._held.append(line)
+            return
+        self._pending.append(line)
+        self._flush()
+
     def close(self) -> None:
         """Make one last attempt to write queued records, then release the file. Never raises."""
         try:
@@ -232,7 +247,7 @@ class FileRecorder:
         if self._started:
             return
         session_id = new_ulid()
-        lines = [_encode(SessionHeader(session_id, str(self._workspace), stamp).to_obj())]
+        lines = [_encode(SessionHeader(session_id, str(self._workspace), stamp, tracks_usage=True).to_obj())]
         if first is not None and first.role == "user" and (title := title_from(first.content)):
             lines.append(_encode({"type": "title", "title": title, "at": stamp}))
         self._path = self._directory / f"{session_id}.jsonl"

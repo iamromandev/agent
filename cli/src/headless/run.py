@@ -386,7 +386,14 @@ async def _open_session(
         recorder = FileRecorder.resume(loaded.info.path, rt.root)
     except (SessionError, SessionWriteError) as exc:
         raise UsageError(str(exc)) from exc
-    old = agent.reset(recorder=recorder, history=loaded.history, tool_meta=loaded.tool_meta, todos=loaded.todos)
+    old = agent.reset(
+        recorder=recorder,
+        history=loaded.history,
+        tool_meta=loaded.tool_meta,
+        todos=loaded.todos,
+        usage=loaded.usage,
+        unrecorded=loaded.unrecorded,
+    )
     if old is not None:
         await asyncio.to_thread(close_recorder, old)
     return "resume"
