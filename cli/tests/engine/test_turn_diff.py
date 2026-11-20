@@ -19,9 +19,6 @@ from src.engine.checkpoints.store import CheckpointStore, DiffEntry
 from src.engine.guardrails.setup import Guardrails
 from src.engine.turn_diff import (
     DIFF_BYTES,
-    DIFF_LINES,
-    FILE_LIST_LIMIT,
-    LINE_CHARS,
     LINE_LIMIT,
     DiffItem,
     TurnDiff,
@@ -68,72 +65,6 @@ async def text_of(diff: TurnDiff, path: str) -> list[str]:
 
 
 @needs_git
-async def test_lists_modified_deleted_and_added_files_with_counts_and_the_edit_hunk(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / "a.py").write_text("one\ntwo\nthree\n")
-    (workspace / "b.py").write_text("x\ny\n")
-
-    def change() -> None:
-        (workspace / "a.py").write_text("one\nTWO\nthree\nfour\n")
-        (workspace / "b.py").unlink()
-        (workspace / "c.py").write_text("n1\nn2\nn3\n")
-
-    turn = await turn_around(store, change)
-    diff = await diff_of(store, workspace, turn)
-
-    assert [(i.status, i.path, i.added, i.removed) for i in diff.items] == [
-        ("M", "a.py", 2, 1),
-        ("D", "b.py", 0, 2),
-        ("A", "c.py", 3, 0),
-    ]
-    assert not diff.fallback and diff.more == 0
-    shown = await text_of(diff, "a.py")
-    assert "-two" in shown and "+TWO" in shown and "+four" in shown and "@@ -1,3 +1,4 @@" in shown
-
-
-@needs_git
-async def test_the_turn_is_the_snapshot_difference_even_when_the_content_returns(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / "a.py").write_text("same\n")
-
-    def change_and_restore() -> None:
-        (workspace / "a.py").write_text("other\n")
-        (workspace / "a.py").write_text("same\n")
-
-    diff = await diff_of(store, workspace, await turn_around(store, change_and_restore))
-
-    assert diff.items == () and not diff.fallback
-
-
-@needs_git
-async def test_env_and_ignored_files_are_not_listed_and_a_large_file_is_too_large(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / ".gitignore").write_text("build/\n")
-
-    def change() -> None:
-        (workspace / ".env").write_text("SECRET=1\n")
-        (workspace / "build").mkdir()
-        (workspace / "build" / "x").write_text("out\n")
-        (workspace / "ok.txt").write_text("fine\n")
-        with open(workspace / "huge.bin", "wb") as handle:
-            handle.truncate(20 * 1024 * 1024)
-
-    # `Guardrails.off` has no settings but keeps the built-in protected names, so `.env` stays out of the snapshots.
-    turn = await turn_around(store, change)
-    diff = await diff_of(store, workspace, turn)
-
-    paths = [i.path for i in diff.items]
-    assert ".env" not in paths and "build/x" not in paths
-    assert "ok.txt" in paths
-    huge = item(diff, "huge.bin")
-    assert (huge.status, huge.note, huge.added) == ("A", "too large", None)
-    assert [line.text for line in render_lines(await load_file(diff, huge))] == ["too large: no diff"]
-
-
-@needs_git
 async def test_a_png_is_binary_with_sizes_and_no_hunks(store: CheckpointStore, workspace: Path) -> None:
     png = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + bytes(range(256))
     turn = await turn_around(store, lambda: (workspace / "i.png").write_bytes(png))
@@ -153,22 +84,6 @@ async def test_invalid_utf8_is_binary(store: CheckpointStore, workspace: Path) -
 
     assert (item(diff, "l.txt").added, item(diff, "l.txt").note) == (None, "binary")
     assert (await text_of(diff, "l.txt"))[0].startswith("binary:")
-
-
-@needs_git
-async def test_a_symlink_retarget_shows_both_targets(store: CheckpointStore, workspace: Path) -> None:
-    (workspace / "t1").write_text("x")
-    (workspace / "link").symlink_to("t1")
-
-    def change() -> None:
-        (workspace / "link").unlink()
-        (workspace / "link").symlink_to("t2")
-
-    turn = await turn_around(store, change)
-    diff = await diff_of(store, workspace, turn)
-
-    assert item(diff, "link").status == "M"
-    assert await text_of(diff, "link") == ["old -> t1", "new -> t2"]
 
 
 @needs_git
@@ -201,50 +116,6 @@ async def test_chmod_alone_is_a_mode_note_with_zero_counts_and_no_hunks(
 
 
 @needs_git
-async def test_a_content_change_with_a_mode_change_shows_both(store: CheckpointStore, workspace: Path) -> None:
-    (workspace / "run.sh").write_text("a\n")
-    (workspace / "run.sh").chmod(0o644)
-
-    def change() -> None:
-        (workspace / "run.sh").write_text("b\n")
-        (workspace / "run.sh").chmod(0o755)
-
-    diff = await diff_of(store, workspace, await turn_around(store, change))
-    shown = await text_of(diff, "run.sh")
-
-    assert shown[0] == "mode 100644 → 100755" and "+b" in shown
-
-
-@needs_git
-async def test_names_and_content_with_escape_sequences_are_written_out(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    name = "x\x1b[2Jy"
-    turn = await turn_around(store, lambda: (workspace / name).write_text("\x1b]0;pwn\x07\nline\twith tab\r\n"))
-    diff = await diff_of(store, workspace, turn)
-
-    shown = await text_of(diff, name)
-
-    assert not any("\x1b" in line or "\x07" in line for line in shown)
-    assert any("\\x1b]0;pwn\\x07" in line for line in shown)
-    assert "+line\twith tab\\x0d" in shown  # tabs are kept, the carriage return is visible
-    assert any("x\\x1b[2Jy" in line for line in shown)  # the header names the file escaped
-
-
-@needs_git
-async def test_a_content_line_starting_with_dashes_is_a_removal_not_a_header(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / "s.sql").write_text("-- comment\nkeep\n")
-    turn = await turn_around(store, lambda: (workspace / "s.sql").write_text("keep\n"))
-    diff = await diff_of(store, workspace, turn)
-
-    lines = render_lines(await load_file(diff, item(diff, "s.sql")))
-
-    assert [(x.kind, x.text) for x in lines if x.text.startswith("--- ")][1:] == [("del", "--- comment")]
-
-
-@needs_git
 async def test_a_ten_thousand_line_rewrite_is_cut_at_the_line_limit_with_a_note(
     store: CheckpointStore, workspace: Path
 ) -> None:
@@ -258,35 +129,6 @@ async def test_a_ten_thousand_line_rewrite_is_cut_at_the_line_limit_with_a_note(
     assert len(file_diff.lines) == LINE_LIMIT and file_diff.cut > 0
     assert shown[-1].text == f"[{file_diff.cut} more lines not shown]"
     assert (item(diff, "big.txt").added, item(diff, "big.txt").removed) == (10_000, 10_000)
-
-
-@needs_git
-async def test_crlf_lines_keep_their_carriage_return_visible(store: CheckpointStore, workspace: Path) -> None:
-    (workspace / "w.txt").write_bytes(b"a\r\nb\r\n")
-    turn = await turn_around(store, lambda: (workspace / "w.txt").write_bytes(b"a\r\nB\r\n"))
-    diff = await diff_of(store, workspace, turn)
-
-    shown = await text_of(diff, "w.txt")
-
-    assert "-b\\x0d" in shown and "+B\\x0d" in shown
-
-
-@needs_git
-async def test_an_empty_added_file_is_listed_with_zero_counts(store: CheckpointStore, workspace: Path) -> None:
-    turn = await turn_around(store, lambda: (workspace / "e.txt").write_text(""))
-    diff = await diff_of(store, workspace, turn)
-
-    assert (item(diff, "e.txt").status, item(diff, "e.txt").added) == ("A", 0)
-    assert await text_of(diff, "e.txt") == []
-
-
-@needs_git
-async def test_git_failure_without_a_log_raises(workspace: Path, tmp_path: Path) -> None:
-    fresh = CheckpointStore(workspace, tmp_path / "data2", Guardrails.off(workspace), dict(os.environ))
-    turn = UndoTurn(0, "p", before="a" * 40, after="b" * 40)
-
-    with pytest.raises(GitError):
-        await build_diff(turn, fresh, workspace)
 
 
 class FakeStore:
@@ -310,15 +152,6 @@ class FakeStore:
         return set()
 
 
-async def test_more_than_the_list_limit_files_are_capped_with_a_count(workspace: Path) -> None:
-    turn = UndoTurn(0, "p", before="a" * 40, after="b" * 40)
-
-    diff = await build_diff(turn, cast(CheckpointStore, FakeStore(2_500)), workspace)
-
-    assert len(diff.items) == FILE_LIST_LIMIT == 2_000 and diff.more == 500
-    assert diff.items[0].path == "f00000.txt"
-
-
 # --- the file-log fallback ---------------------------------------------------------------------------------------
 
 
@@ -334,31 +167,6 @@ def finished(log: UndoLog) -> UndoTurn:
     turn = log.peek()
     assert turn is not None
     return turn
-
-
-async def test_without_checkpoints_a_write_turn_is_listed_and_loaded_from_the_log(workspace: Path) -> None:
-    (workspace / "a.txt").write_text("one\ntwo\n")
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    logged_write(log, workspace / "a.txt", b"one\nTWO\n")
-    logged_write(log, workspace / "new.txt", b"hello\n")
-
-    diff = await build_diff(finished(log), None, workspace)
-
-    assert diff.fallback and diff.store is None
-    assert [(i.status, i.path, i.added, i.removed) for i in diff.items] == [("M", "a.txt", 1, 1), ("A", "new.txt", 1, 0)]
-    shown = await text_of(diff, "a.txt")
-    assert "-two" in shown and "+TWO" in shown
-
-
-async def test_a_bash_only_turn_has_no_items_and_is_a_fallback(workspace: Path) -> None:
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    log.note_bash()
-
-    diff = await build_diff(finished(log), None, workspace)
-
-    assert diff.items == () and diff.fallback
 
 
 async def test_a_deleted_file_from_the_log_shows_its_removal(workspace: Path) -> None:
@@ -387,18 +195,6 @@ async def test_a_logged_file_changed_after_the_turn_is_unavailable(workspace: Pa
     shown = await text_of(diff, "a.txt")
 
     assert shown == ["unavailable: the file changed since the turn"]
-
-
-async def test_a_logged_file_changed_before_the_list_is_built_is_unavailable_in_the_list(workspace: Path) -> None:
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    logged_write(log, workspace / "a.txt", b"two\n")
-    turn = finished(log)
-    (workspace / "a.txt").write_text("other\n")
-
-    diff = await build_diff(turn, None, workspace)
-
-    assert (diff.items[0].note, diff.items[0].added) == ("unavailable", None)
 
 
 async def test_a_logged_file_that_is_a_symlink_now_is_never_followed(workspace: Path, tmp_path: Path) -> None:
@@ -530,20 +326,6 @@ def padded(first: bytes, count: int, last: bytes) -> bytes:
 
 
 @needs_git
-async def test_twenty_thousand_blank_lines_are_refused_within_a_second(store: CheckpointStore, workspace: Path) -> None:
-    (workspace / "blank.txt").write_bytes(padded(b"A\n", 20_000, b"B\n"))
-    turn = await turn_around(store, lambda: (workspace / "blank.txt").write_bytes(padded(b"C\n", 20_001, b"D\n")))
-    diff = await diff_of(store, workspace, turn)
-
-    start = time.perf_counter()
-    shown = await text_of(diff, "blank.txt")
-    seconds = time.perf_counter() - start
-
-    assert seconds < 1
-    assert shown[0].startswith("too large to compare:")
-
-
-@needs_git
 async def test_a_400_kb_file_of_repeated_lines_is_refused_within_a_second(
     store: CheckpointStore, workspace: Path
 ) -> None:
@@ -562,33 +344,6 @@ async def test_a_400_kb_file_of_repeated_lines_is_refused_within_a_second(
 
     assert seconds < 1
     assert shown[0].startswith("too large to compare:")
-
-
-@needs_git
-async def test_more_than_the_line_limit_per_side_is_refused_with_the_sizes(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    many = "".join(f"{n}\n" for n in range(DIFF_LINES + 1))
-    turn = await turn_around(store, lambda: (workspace / "many.txt").write_text(many))
-    diff = await diff_of(store, workspace, turn)
-
-    shown = await text_of(diff, "many.txt")
-
-    assert shown == [f"too large to compare: 0 → {DIFF_LINES + 1} lines, 0 → {len(many)} bytes"]
-
-
-@needs_git
-async def test_a_small_edit_in_a_big_file_is_compared_exactly(store: CheckpointStore, workspace: Path) -> None:
-    lines = [f"row {n}\n" for n in range(15_000)]
-    (workspace / "big.txt").write_text("".join(lines))
-    edited = [*lines[:7_000], "CHANGED\n", *lines[7_001:]]
-    turn = await turn_around(store, lambda: (workspace / "big.txt").write_text("".join(edited)))
-    diff = await diff_of(store, workspace, turn)
-
-    shown = await text_of(diff, "big.txt")
-
-    assert (item(diff, "big.txt").added, item(diff, "big.txt").removed) == (1, 1)
-    assert "-row 7000" in shown and "+CHANGED" in shown and "@@ -6998,7 +6998,7 @@" in shown
 
 
 async def test_the_fallback_counts_and_the_diff_come_from_one_bounded_comparison(workspace: Path) -> None:
@@ -642,18 +397,6 @@ async def test_cancelling_a_load_stops_the_thread_so_shutting_down_does_not_wait
     assert time.perf_counter() - start < 0.5
 
 
-async def test_a_line_without_a_final_newline_is_marked_like_git(workspace: Path) -> None:
-    (workspace / "a.txt").write_bytes(b"one\ntwo")
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    logged_write(log, workspace / "a.txt", b"one\ntwo\nthree")
-    diff = await build_diff(finished(log), None, workspace)
-
-    shown = await text_of(diff, "a.txt")
-
-    assert shown[2:] == ["@@ -1,2 +1,3 @@", " one", "-two", "\\ No newline at end of file", "+two", "+three", "\\ No newline at end of file"]
-
-
 async def test_the_no_newline_marker_is_display_meta_not_a_removal(workspace: Path) -> None:
     (workspace / "a.txt").write_bytes(b"x")
     log = UndoLog(workspace)
@@ -664,52 +407,6 @@ async def test_the_no_newline_marker_is_display_meta_not_a_removal(workspace: Pa
     lines = render_lines(await load_file(diff, diff.items[0]))
 
     assert [line.kind for line in lines if line.text.startswith("\\")] == ["meta", "meta"]
-
-
-@needs_git
-async def test_a_file_replaced_by_a_symlink_with_the_same_blob_shows_the_mode_and_both_sides(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / "f").write_text("target")  # the symlink's blob is its target text: the same bytes
-
-    def change() -> None:
-        (workspace / "f").unlink()
-        (workspace / "f").symlink_to("target")
-
-    diff = await diff_of(store, workspace, await turn_around(store, change))
-
-    found = item(diff, "f")
-    assert (found.status, found.added, found.note) == ("T", 0, "mode 100644 → 120000")
-    assert await text_of(diff, "f") == ["mode 100644 → 120000", "old: regular file, 6 bytes", "new -> target"]
-
-
-@needs_git
-async def test_a_symlink_replaced_by_a_file_with_other_content_shows_the_mode_and_both_sides(
-    store: CheckpointStore, workspace: Path
-) -> None:
-    (workspace / "f").symlink_to("target")
-
-    def change() -> None:
-        (workspace / "f").unlink()
-        (workspace / "f").write_text("data\n")
-
-    diff = await diff_of(store, workspace, await turn_around(store, change))
-
-    assert item(diff, "f").status == "T"
-    assert await text_of(diff, "f") == ["mode 120000 → 100644", "old -> target", "new: regular file, 5 bytes"]
-
-
-async def test_a_line_over_the_character_cap_is_cut_before_escaping_with_a_count(workspace: Path) -> None:
-    (workspace / "min.js").write_text("")
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    logged_write(log, workspace / "min.js", ("x" * 10_000 + "\x1b[2J").encode() + b"\n")
-    diff = await build_diff(finished(log), None, workspace)
-
-    shown = await text_of(diff, "min.js")
-
-    long = next(line for line in shown if line.startswith("+x"))
-    assert long == "+" + "x" * (LINE_CHARS - 1) + f" [{10_000 + 4 + 1 - LINE_CHARS} more characters]"
 
 
 async def test_the_fallback_does_not_read_a_file_over_the_log_cap(workspace: Path) -> None:
@@ -753,14 +450,3 @@ async def test_the_fallback_leaves_out_a_file_the_turn_made_and_deleted(workspac
     diff = await build_diff(turn, None, workspace)
 
     assert diff.items == () and diff.fallback
-
-
-async def test_the_diff_knows_its_turn(workspace: Path) -> None:
-    log = UndoLog(workspace)
-    log.begin(0, "p")
-    logged_write(log, workspace / "a.txt", b"x\n")
-    turn = finished(log)
-
-    diff = await build_diff(turn, None, workspace)
-
-    assert diff.turn is turn

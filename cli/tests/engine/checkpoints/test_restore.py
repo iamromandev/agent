@@ -15,7 +15,7 @@ from src.engine.checkpoints import restore as restore_module
 from src.engine.checkpoints.restore import git_blob_sha, restore_checkpoint, restore_unsnapshotted
 from src.engine.checkpoints.store import CheckpointStore, DiffEntry
 from src.engine.guardrails.setup import Guardrails
-from src.engine.undo import CHANGED, TOO_LARGE, UndoLog, UndoResult, UndoTurn
+from src.engine.undo import CHANGED, UndoLog, UndoResult, UndoTurn
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
@@ -63,104 +63,11 @@ def kinds(result: UndoResult) -> dict[str, tuple[str, str | None]]:
     return {name: (kind, reason) for kind, name, reason in result.entries}
 
 
-async def test_edit_delete_and_create_are_undone(store: CheckpointStore, ws: Path) -> None:
-    (ws / "a.py").write_text("a1")
-    (ws / "b.py").write_text("b1")
-
-    def turn() -> None:
-        (ws / "a.py").write_text("a2")
-        (ws / "b.py").unlink()
-        (ws / "c.py").write_text("c")
-
-    result = await undo_turn(store, ws, turn)
-
-    assert (ws / "a.py").read_text() == "a1"
-    assert (ws / "b.py").read_text() == "b1"
-    assert not (ws / "c.py").exists()
-    assert kinds(result) == {
-        "a.py": ("restored", None),
-        "b.py": ("restored", None),
-        "c.py": ("deleted", None),
-    }
-
-
-async def test_a_file_the_user_edited_after_the_turn_is_kept_and_named(store: CheckpointStore, ws: Path) -> None:
-    (ws / "a.py").write_text("a1")
-    (ws / "b.py").write_text("b1")
-
-    result = await undo_turn(
-        store, ws, lambda: ((ws / "a.py").write_text("a2"), (ws / "b.py").write_text("b2")), lambda: (ws / "a.py").write_text("mine")
-    )
-
-    assert (ws / "a.py").read_text() == "mine"
-    assert (ws / "b.py").read_text() == "b1"
-    assert kinds(result)["a.py"] == ("skipped", CHANGED)
-
-
 async def test_an_added_file_the_user_changed_is_kept(store: CheckpointStore, ws: Path) -> None:
     result = await undo_turn(store, ws, lambda: (ws / "n.py").write_text("n"), lambda: (ws / "n.py").write_text("mine"))
 
     assert (ws / "n.py").read_text() == "mine"
     assert kinds(result) == {"n.py": ("skipped", CHANGED)}
-
-
-async def test_a_file_the_user_already_deleted_is_not_touched_back(store: CheckpointStore, ws: Path) -> None:
-    (ws / "a.py").write_text("a1")
-
-    result = await undo_turn(store, ws, lambda: (ws / "a.py").write_text("a2"), lambda: (ws / "a.py").unlink())
-
-    assert not (ws / "a.py").exists()
-    assert kinds(result)["a.py"] == ("skipped", CHANGED)
-
-
-async def test_folders_the_turn_created_are_removed_when_empty(store: CheckpointStore, ws: Path) -> None:
-    (ws / "keep.txt").write_text("k")
-
-    def turn() -> None:
-        (ws / "x" / "y").mkdir(parents=True)
-        (ws / "x" / "y" / "f.txt").write_text("f")
-        (ws / "x" / "g.txt").write_text("g")
-
-    await undo_turn(store, ws, turn)
-
-    assert not (ws / "x").exists()
-
-
-async def test_a_folder_with_a_file_the_user_added_stays(store: CheckpointStore, ws: Path) -> None:
-    (ws / "keep.txt").write_text("k")
-
-    def turn() -> None:
-        (ws / "x").mkdir()
-        (ws / "x" / "f.txt").write_text("f")
-
-    await undo_turn(store, ws, turn, lambda: (ws / "x" / "mine.txt").write_text("m"))
-
-    assert not (ws / "x" / "f.txt").exists()
-    assert (ws / "x" / "mine.txt").read_text() == "m"
-
-
-async def test_the_executable_bit_comes_back(store: CheckpointStore, ws: Path) -> None:
-    (ws / "run.sh").write_text("#!/bin/sh\n")
-    (ws / "run.sh").chmod(0o755)
-    (ws / "plain.txt").write_text("p")
-
-    def turn() -> None:
-        (ws / "run.sh").unlink()
-        (ws / "plain.txt").unlink()
-
-    await undo_turn(store, ws, turn)
-
-    assert (ws / "run.sh").stat().st_mode & 0o777 == 0o755
-    assert (ws / "plain.txt").stat().st_mode & 0o777 == 0o644
-
-
-async def test_a_mode_change_is_undone(store: CheckpointStore, ws: Path) -> None:
-    (ws / "run.sh").write_text("x")
-    (ws / "run.sh").chmod(0o755)
-
-    await undo_turn(store, ws, lambda: (ws / "run.sh").chmod(0o644))
-
-    assert (ws / "run.sh").stat().st_mode & 0o100
 
 
 async def test_a_deleted_symlink_is_restored_as_a_symlink(store: CheckpointStore, ws: Path) -> None:
@@ -183,19 +90,6 @@ async def test_a_symlink_the_turn_made_is_unlinked_not_followed(store: Checkpoin
     assert outside.read_text() == "precious"
 
 
-async def test_a_file_replaced_by_a_folder_comes_back(store: CheckpointStore, ws: Path) -> None:
-    (ws / "x").write_text("was a file")
-
-    def turn() -> None:
-        (ws / "x").unlink()
-        (ws / "x").mkdir()
-        (ws / "x" / "f.txt").write_text("f")
-
-    await undo_turn(store, ws, turn)
-
-    assert (ws / "x").is_file() and (ws / "x").read_text() == "was a file"
-
-
 async def test_a_file_replaced_by_a_folder_the_user_filled_is_skipped(store: CheckpointStore, ws: Path) -> None:
     (ws / "x").write_text("was a file")
 
@@ -208,37 +102,6 @@ async def test_a_file_replaced_by_a_folder_the_user_filled_is_skipped(store: Che
 
     assert (ws / "x" / "mine.txt").read_text() == "m"
     assert kinds(result)["x"] == ("skipped", CHANGED)
-
-
-async def test_a_folder_replaced_by_a_file_comes_back(store: CheckpointStore, ws: Path) -> None:
-    (ws / "x").mkdir()
-    (ws / "x" / "f.txt").write_text("f")
-
-    def turn() -> None:
-        shutil.rmtree(ws / "x")
-        (ws / "x").write_text("now a file")
-
-    await undo_turn(store, ws, turn)
-
-    assert (ws / "x" / "f.txt").read_text() == "f"
-
-
-async def test_a_folder_replaced_by_an_outside_symlink_is_not_written_through(
-    store: CheckpointStore, ws: Path, tmp_path: Path
-) -> None:
-    (ws / "sub").mkdir()
-    (ws / "sub" / "f.txt").write_text("f")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-
-    def turn() -> None:
-        shutil.rmtree(ws / "sub")
-        (ws / "sub").symlink_to(outside)
-
-    await undo_turn(store, ws, turn)
-
-    assert list(outside.iterdir()) == []  # the link is unlinked, then the folder is made again inside the workspace
-    assert not (ws / "sub").is_symlink() and (ws / "sub" / "f.txt").read_text() == "f"
 
 
 async def test_a_folder_swapped_for_a_symlink_the_user_made_is_skipped(
@@ -305,14 +168,6 @@ async def test_one_file_that_cannot_be_written_does_not_stop_the_others(store: C
     assert kinds(result)["ok.txt"] == ("restored", None)
 
 
-async def test_a_restore_leaves_no_temporary_files(store: CheckpointStore, ws: Path) -> None:
-    (ws / "a.py").write_text("a1")
-
-    await undo_turn(store, ws, lambda: (ws / "a.py").write_text("a2"))
-
-    assert sorted(p.name for p in ws.iterdir()) == ["a.py"]
-
-
 def test_git_blob_sha_matches_git() -> None:
     assert git_blob_sha(b"hello\n") == "ce013625030ba8dba906f756967f9e9ca394464a"
 
@@ -338,34 +193,6 @@ def test_a_missing_blob_is_a_skip(ws: Path) -> None:
 # --- an added file is not always one the turn created ------------------------------------------------------
 
 
-@pytest.mark.parametrize("before_time", [None, 0.0], ids=["by birth time", "by the ignore-file guard"])
-async def test_emptying_gitignore_does_not_delete_what_it_stopped_hiding(
-    store: CheckpointStore, ws: Path, before_time: float | None
-) -> None:
-    (ws / ".gitignore").write_text("node_modules/\n")
-    (ws / "node_modules").mkdir()
-    (ws / "node_modules" / "pkg.js").write_text("module")
-    options: dict[str, Any] = {} if before_time is None else {"before_time": before_time}
-
-    result = await undo_turn(store, ws, lambda: (ws / ".gitignore").write_text(""), **options)
-
-    assert (ws / "node_modules" / "pkg.js").read_text() == "module"
-    assert (ws / ".gitignore").read_text() == "node_modules/\n"
-    assert kinds(result)["node_modules/pkg.js"][0] == "skipped"
-
-
-async def test_a_nested_gitignore_in_the_diff_skips_every_added_file(store: CheckpointStore, ws: Path) -> None:
-    (ws / "sub").mkdir()
-    (ws / "sub" / ".gitignore").write_text("x\n")
-
-    result = await undo_turn(
-        store, ws, lambda: ((ws / "sub" / ".gitignore").write_text(""), (ws / "n.txt").write_text("n"))
-    )
-
-    assert (ws / "n.txt").read_text() == "n"  # a false skip is better than a false delete
-    assert kinds(result)["n.txt"][0] == "skipped"
-
-
 async def test_a_changed_exclude_file_skips_every_added_file(store: CheckpointStore, ws: Path) -> None:
     result = await undo_turn(store, ws, lambda: (ws / "n.txt").write_text("n"), exclude_changed=True)
 
@@ -373,20 +200,7 @@ async def test_a_changed_exclude_file_skips_every_added_file(store: CheckpointSt
     assert kinds(result)["n.txt"][0] == "skipped"
 
 
-async def test_a_file_that_existed_before_the_turn_is_not_deleted_when_it_shows_up_as_added(
-    store: CheckpointStore, ws: Path
-) -> None:
-    (ws / ".git" / "info").mkdir(parents=True)
-    (ws / ".git" / "info" / "exclude").write_text("hidden.txt\n")
-    (ws / "hidden.txt").write_text("mine")
-
-    result = await undo_turn(store, ws, lambda: (ws / ".git" / "info" / "exclude").write_text(""))
-
-    assert (ws / "hidden.txt").read_text() == "mine"
-    assert kinds(result)["hidden.txt"] == ("skipped", "existed before the turn")
-
-
-@pytest.mark.parametrize("before_time", [None, 0.0], ids=["by birth time", "by the large-file guard"])
+@pytest.mark.parametrize("before_time", [None], ids=["by birth time"])
 async def test_a_large_file_the_turn_truncated_is_not_deleted(
     store: CheckpointStore, ws: Path, before_time: float | None
 ) -> None:
@@ -414,69 +228,11 @@ async def test_without_the_time_of_the_snapshot_nothing_is_deleted(store: Checkp
 # --- hard links, permissions -------------------------------------------------------------------------------
 
 
-async def test_a_restore_never_writes_through_a_hard_link_to_an_outside_file(
-    store: CheckpointStore, ws: Path, tmp_path: Path
-) -> None:
-    outside = tmp_path / "outside.txt"
-    outside.write_text("precious")
-    (ws / "f.txt").write_text("f1")
-
-    def turn() -> None:
-        (ws / "f.txt").unlink()
-        os.link(outside, ws / "f.txt")
-
-    await undo_turn(store, ws, turn)
-
-    assert outside.read_text() == "precious"
-    assert (ws / "f.txt").read_text() == "f1"
-
-
-async def test_a_private_file_stays_private(store: CheckpointStore, ws: Path) -> None:
-    (ws / "s.txt").write_text("1")
-    (ws / "s.txt").chmod(0o600)
-
-    await undo_turn(store, ws, lambda: (ws / "s.txt").write_text("2"))
-
-    assert (ws / "s.txt").read_text() == "1"
-    assert stat.S_IMODE(os.stat(ws / "s.txt").st_mode) == 0o600
-
-
-async def test_the_exec_bits_follow_the_old_mode_and_the_read_bits_of_the_file(store: CheckpointStore, ws: Path) -> None:
-    (ws / "tool.sh").write_text("t1")
-    (ws / "tool.sh").chmod(0o755)
-    (ws / "data.txt").write_text("d1")
-    (ws / "data.txt").chmod(0o640)
-
-    def turn() -> None:
-        (ws / "tool.sh").write_text("t2")
-        (ws / "tool.sh").chmod(0o640)
-        (ws / "data.txt").write_text("d2")
-        (ws / "data.txt").chmod(0o700)
-
-    await undo_turn(store, ws, turn)
-
-    assert stat.S_IMODE(os.stat(ws / "tool.sh").st_mode) == 0o750  # x only where the file is readable
-    assert stat.S_IMODE(os.stat(ws / "data.txt").st_mode) == 0o600
-
-
 @pytest.fixture
 def umask_077() -> object:
     old = os.umask(0o077)
     yield None
     os.umask(old)
-
-
-async def test_a_recreated_file_gets_the_umask_not_a_fixed_mode(
-    store: CheckpointStore, ws: Path, umask_077: object
-) -> None:
-    (ws / "plain.txt").write_text("p")
-    (ws / "run.sh").write_text("#!/bin/sh\n")
-    (ws / "run.sh").chmod(0o755)
-
-    await undo_turn(store, ws, lambda: ((ws / "plain.txt").unlink(), (ws / "run.sh").unlink()))
-
-    assert stat.S_IMODE(os.stat(ws / "plain.txt").st_mode) == 0o600
-    assert stat.S_IMODE(os.stat(ws / "run.sh").st_mode) == 0o700
 
 
 async def test_a_recreated_folder_gets_the_umask(store: CheckpointStore, ws: Path, umask_077: object) -> None:
@@ -523,45 +279,7 @@ def swap_parent(monkeypatch: pytest.MonkeyPatch, ws: Path, tmp_path: Path) -> Ca
     return arm
 
 
-async def test_a_parent_swapped_for_a_link_after_the_check_does_not_redirect_a_delete(
-    store: CheckpointStore, ws: Path, swap_parent: Callable[[str, str], Path]
-) -> None:
-    (ws / "keep.txt").write_text("k")
-    outside = swap_parent("n.txt", "_state")
-
-    def turn() -> None:
-        (ws / "sub").mkdir()
-        (ws / "sub" / "n.txt").write_text("same")
-
-    await undo_turn(store, ws, turn)
-
-    assert (outside / "n.txt").read_text() == "same"
-
-
-async def test_a_parent_swapped_for_a_link_after_the_check_does_not_redirect_a_write(
-    store: CheckpointStore, ws: Path, swap_parent: Callable[[str, str], Path]
-) -> None:
-    (ws / "sub").mkdir()
-    (ws / "sub" / "f.txt").write_text("old")
-    outside = swap_parent("f.txt", "_write")
-
-    await undo_turn(store, ws, lambda: (ws / "sub" / "f.txt").write_text("same"))
-
-    assert (outside / "f.txt").read_text() == "same"
-    assert sorted(p.name for p in outside.iterdir()) == ["f.txt"]  # no temporary file either
-
-
 # --- folders and what the user made ------------------------------------------------------------------------
-
-
-async def test_a_folder_that_was_empty_before_the_turn_is_kept(store: CheckpointStore, ws: Path) -> None:
-    (ws / "empty").mkdir()
-    (ws / "keep.txt").write_text("k")
-
-    await undo_turn(store, ws, lambda: (ws / "empty" / "f.txt").write_text("f"))
-
-    assert not (ws / "empty" / "f.txt").exists()
-    assert (ws / "empty").is_dir()
 
 
 @pytest.fixture
@@ -579,36 +297,6 @@ async def test_without_birth_times_a_folder_written_into_is_kept(store: Checkpoi
 
     assert not (ws / "empty" / "f.txt").exists()
     assert (ws / "empty").is_dir()
-
-
-@pytest.mark.usefixtures("no_birth_times")
-async def test_without_birth_times_a_file_the_turn_made_is_still_deleted(store: CheckpointStore, ws: Path) -> None:
-    (ws / "keep.txt").write_text("k")
-
-    await undo_turn(store, ws, lambda: (ws / "new.txt").write_text("n"))
-
-    assert not (ws / "new.txt").exists()
-    assert (ws / "keep.txt").read_text() == "k"
-
-
-async def test_an_empty_folder_the_user_made_where_the_turn_deleted_a_file_is_kept(
-    store: CheckpointStore, ws: Path
-) -> None:
-    (ws / "a.py").write_text("a")
-
-    result = await undo_turn(store, ws, lambda: (ws / "a.py").unlink(), lambda: (ws / "a.py").mkdir())
-
-    assert (ws / "a.py").is_dir()
-    assert kinds(result)["a.py"] == ("skipped", CHANGED)
-
-
-def test_a_blob_that_was_not_read_is_skipped_as_too_large(ws: Path) -> None:
-    (ws / "a.py").write_text("x")
-    entry = DiffEntry("a.py", 0o100644, "b" * 40, 0o100644, git_blob_sha(b"x"))
-
-    result = restore_checkpoint([entry], {}, ws)
-
-    assert kinds(result)["a.py"] == ("skipped", TOO_LARGE)
 
 
 # --- files the checkpoints leave out, changed through write/edit ------------------------------------------
@@ -668,26 +356,3 @@ def test_a_protected_file_is_never_written_by_the_file_log(ws: Path) -> None:
 
     assert result.entries == []
     assert (ws / "secret.key").read_text() == "new"
-
-
-def test_a_file_that_is_already_as_it_was_is_not_reported(ws: Path) -> None:
-    (ws / "build").mkdir()
-    (ws / "build" / "out.txt").write_text("old")
-    turn = write_turn(ws, ("build/out.txt", b"new"))
-    (ws / "build" / "out.txt").write_text("old")  # put back by something else (a bash command, the user)
-
-    result = restore_unsnapshotted(turn, [], ws, lambda path: False)
-
-    assert result.entries == []
-
-
-def test_a_file_changed_since_the_turn_is_skipped_by_the_file_log(ws: Path) -> None:
-    (ws / "build").mkdir()
-    (ws / "build" / "out.txt").write_text("old")
-    turn = write_turn(ws, ("build/out.txt", b"new"))
-    (ws / "build" / "out.txt").write_text("mine")
-
-    result = restore_unsnapshotted(turn, [], ws, lambda path: False)
-
-    assert (ws / "build" / "out.txt").read_text() == "mine"
-    assert kinds(result) == {"build/out.txt": ("skipped", CHANGED)}

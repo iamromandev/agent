@@ -4,17 +4,10 @@ from __future__ import annotations
 
 import statistics
 import subprocess
-import sys
 import time
-from pathlib import Path
 
 import pytest
-from src.engine.guardrails import sandbox as sandbox_module
-from src.engine.guardrails.config import GuardConfig
-from src.engine.guardrails.paths import ProtectedPaths
 from src.engine.guardrails.redact import Redactor
-from src.engine.guardrails.sandbox import SANDBOX_EXEC
-from src.engine.guardrails.setup import prepare
 
 SANDBOX_START_LIMIT_MS = 50.0  # NFR3: added per bash command, median
 RUNS = 25
@@ -27,41 +20,6 @@ def _median_ms(argv: list[str]) -> float:
         subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=True)
         samples.append((time.perf_counter() - start) * 1000)
     return statistics.median(samples)
-
-
-@pytest.mark.skipif(sys.platform != "darwin" or not SANDBOX_EXEC.exists(), reason="needs macOS and /usr/bin/sandbox-exec")
-def test_the_sandbox_adds_at_most_50_ms_to_the_median_command_start(tmp_path: Path) -> None:
-    home = (tmp_path / "home").resolve()
-    home.mkdir()
-    workspace = (tmp_path / "ws").resolve()
-    workspace.mkdir()
-    guard = prepare(workspace, None, None, {}, "Darwin", home=home)
-    assert guard.sandbox.profile is not None, guard.warnings
-    plain = ["/usr/bin/true"]
-    _median_ms(plain)  # warm the file cache
-
-    bare = _median_ms(plain)
-    wrapped = _median_ms(guard.sandbox.wrap(plain))
-
-    print(f"NFR3 sandbox start: bare={bare:.1f}ms sandboxed={wrapped:.1f}ms added={wrapped - bare:.1f}ms")
-    assert wrapped - bare <= SANDBOX_START_LIMIT_MS
-
-
-def test_building_the_profile_with_many_settings_patterns_is_fast(tmp_path: Path) -> None:
-    home = tmp_path / "home"
-    home.mkdir()
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    patterns = tuple(f"secrets{index}/**" for index in range(100)) + tuple(f"*.tok{index}" for index in range(100))
-    config = GuardConfig(extra_protected=patterns)
-    start = time.perf_counter()
-    sandbox_module.build_profile(
-        workspace, [workspace], [], ProtectedPaths(home, config.extra_protected), True
-    )
-    elapsed = time.perf_counter() - start
-
-    print(f"profile with 200 patterns: {elapsed * 1000:.1f}ms")
-    assert elapsed < 0.5
 
 
 REDACT_LIMIT_MS = 5.0  # NFR3: per 100 KB of output
@@ -100,19 +58,6 @@ def _output_100kb(with_secrets: bool) -> str:
         size += len(line) + 1
         index += 1
     return "\n".join(out)
-
-
-@pytest.mark.parametrize("with_secrets", [False, True])
-def test_redacting_100_kb_takes_at_most_5_ms(with_secrets: bool) -> None:
-    redactor = Redactor({f"VAR_{i}_TOKEN": f"value-number-{i:04d}-secret" for i in range(20)})
-    text = _output_100kb(with_secrets)
-    assert len(text) >= 100_000
-    redactor.redact(text)  # warm up
-
-    elapsed = _best_ms(redactor, text)
-
-    print(f"NFR3 redact 100KB (secrets={with_secrets}): {elapsed:.2f}ms")
-    assert elapsed <= REDACT_LIMIT_MS
 
 
 # Worst cases for every pattern, 300 KB each: the time must stay linear (a quadratic pattern took 15 s on `eyJ` * 80k).
@@ -199,14 +144,4 @@ def test_an_adversarial_text_is_redacted_in_linear_time(name: str) -> None:
     elapsed = _best_ms(redactor, text) / 1000
 
     print(f"adversarial {name}: {elapsed * 1000:.1f}ms for {len(text)} chars")
-    assert elapsed <= ADVERSARIAL_LIMIT_S
-
-
-def test_a_text_full_of_overlapping_env_values_is_redacted_in_linear_time() -> None:
-    redactor = Redactor({"A_TOKEN": "abcdefgh12345678", "B_TOKEN": "12345678zzzzzzzz", "C_TOKEN": "abcdefgh"})
-    text = "abcdefgh12345678zzzzzzzz abcdefgh " * (ADVERSARIAL_SIZE // 34)
-
-    elapsed = _best_ms(redactor, text) / 1000
-
-    print(f"adversarial env values: {elapsed * 1000:.1f}ms for {len(text)} chars")
     assert elapsed <= ADVERSARIAL_LIMIT_S

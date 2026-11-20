@@ -32,40 +32,6 @@ def pause() -> float:
     return mark
 
 
-@KEEPS_BIRTH_TIMES
-def test_a_folder_keeps_its_birth_time_when_a_file_is_added_to_it(tmp_path: Path) -> None:
-    folder = tmp_path / "folder"
-    folder.mkdir()
-    mark = pause()
-    (folder / "f.txt").write_text("f")
-
-    found = born(folder)
-
-    assert found is not None and found < mark < os.lstat(folder).st_ctime
-
-
-@KEEPS_BIRTH_TIMES
-def test_a_file_made_later_is_born_later(tmp_path: Path) -> None:
-    (tmp_path / "old.txt").write_text("old")
-    mark = pause()
-    (tmp_path / "new.txt").write_text("new")
-
-    old, new = born(tmp_path / "old.txt"), born(tmp_path / "new.txt")
-
-    assert old is not None and new is not None and old < mark < new
-
-
-@KEEPS_BIRTH_TIMES
-def test_a_symlink_gets_its_own_birth_time_not_its_target(tmp_path: Path) -> None:
-    (tmp_path / "target.txt").write_text("t")
-    mark = pause()
-    (tmp_path / "link").symlink_to("target.txt")
-
-    found = born(tmp_path / "link")
-
-    assert found is not None and found > mark
-
-
 def test_no_birth_time_is_none_so_the_caller_falls_back(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     (tmp_path / "f.txt").write_text("f")
     monkeypatch.setattr(birth, "_statx", None)

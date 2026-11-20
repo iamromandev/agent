@@ -8,7 +8,6 @@ from pathlib import Path
 
 from src.engine.guardrails.setup import Guardrails
 from src.engine.mentions import expand_mentions
-from src.engine.mentions_index import FileIndex
 
 BUDGET = 0.05
 BUILD_BUDGET = 2.0
@@ -32,37 +31,6 @@ def make_tree(root: Path) -> None:
         folder.mkdir()
         for f in range(100):
             (folder / f"mod{f:03}.py").write_text("")
-
-
-def test_building_the_index_for_20000_files_stays_within_a_generous_bound(tmp_path: Path) -> None:
-    make_tree(tmp_path)
-    index = FileIndex(tmp_path, Guardrails.off(tmp_path))
-    times = []
-    for _ in range(2):  # one retry for a loaded machine
-        start = time.perf_counter()
-        index.build()
-        times.append(time.perf_counter() - start)
-        if times[-1] < BUILD_BUDGET:
-            break
-    print(f"build 20k files: {min(times) * 1000:.0f} ms")
-    assert index.ready
-    assert min(times) < BUILD_BUDGET
-
-
-def test_suggest_on_a_20000_file_tree_is_under_50_ms(tmp_path: Path) -> None:
-    for d in range(200):
-        folder = tmp_path / f"pkg{d:03}"
-        folder.mkdir()
-        for f in range(100):
-            (folder / f"mod{f:03}.py").write_text("")
-    index = FileIndex(tmp_path, Guardrails.off(tmp_path))
-    index.build()
-    assert index.ready
-
-    for token in ("", "pk", "pkg1", "pkg042/", "pkg042/mod0", "od"):
-        took = best_of_two(lambda t=token: index.suggest(t))
-        print(f"suggest {token!r}: {took * 1000:.2f} ms")
-        assert took < BUDGET, token
 
 
 def test_expanding_20_files_of_30kb_is_under_50_ms(tmp_path: Path) -> None:

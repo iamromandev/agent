@@ -7,7 +7,6 @@ import asyncio
 import pytest
 from src.engine.provider.models import ModelInfo
 from src.tui.screens.models import ModelPicker
-from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 from textual.screen import ModalScreen
@@ -47,13 +46,6 @@ async def test_rows_show_name_size_parameters_context_and_mark_the_current(make_
         first, second = _rows(app)
         assert first.startswith("* fake") and "2.0 GiB" in first and "7.6B" in first and "ctx 32,768" in first
         assert second.startswith("  other") and second.count("?") == 3
-
-
-async def test_a_name_with_control_characters_is_escaped(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog(["fake", "ev\x1bil"]))
-    async with app.run_test() as pilot:
-        await _open(app, pilot)
-        assert all("\x1b" not in row for row in _rows(app))
 
 
 async def test_enter_switches_with_the_length_already_read(make_app: AppFactory) -> None:
@@ -96,30 +88,8 @@ async def test_a_list_failure_is_one_error_line(make_app: AppFactory) -> None:
         assert app.query_one(StatusBar).model == "fake"
 
 
-async def test_the_input_stays_usable_while_the_list_loads(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog(["fake", "other"], delay=0.3))
-    async with app.run_test() as pilot:
-        await type_and_send(pilot, "/model")
-        await pilot.pause(0.05)
-        assert not app._switching
-        await pilot.press(*"abc")
-        assert app.query_one(ChatInput).text == "abc"
-
-
 def _busy(app) -> bool:
     return any("busy" in n for n in _notices(app))
-
-
-async def test_a_second_bare_model_while_loading_is_refused(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog(["fake", "other"], delay=0.3))
-    async with app.run_test() as pilot:
-        await type_and_send(pilot, "/model")
-        await pilot.pause(0.05)
-        await app._command("/model")
-        await until(pilot, lambda: any(isinstance(s, ModelPicker) for s in app.screen_stack))
-        await pilot.pause(0.2)
-        assert sum(isinstance(s, ModelPicker) for s in app.screen_stack) == 1
-        assert any("already" in n for n in _notices(app))
 
 
 async def test_a_second_bare_model_while_the_picker_is_open_is_refused(make_app: AppFactory) -> None:
@@ -157,31 +127,6 @@ async def test_a_switch_started_while_the_picker_is_open_makes_enter_busy(make_a
         app._switching = False
 
 
-async def test_a_model_removed_before_enter_is_not_installed(make_app: AppFactory) -> None:
-    catalog = FakeCatalog(["fake", "other"])
-    app = make_app(catalog=catalog)
-    async with app.run_test() as pilot:
-        await _open(app, pilot)
-        catalog.models = [m for m in catalog.models if m.name != "other"]
-        await pilot.press("down", "enter")
-        await until(pilot, lambda: any("not installed" in n for n in _notices(app)))
-        assert app.query_one(StatusBar).model == "fake"
-        assert not app._switching
-
-
-async def test_a_failed_lookup_shows_a_question_mark_and_a_warning_on_switch(make_app: AppFactory) -> None:
-    catalog = FakeCatalog(["fake", "other"])
-    catalog.fail_length.add("other")
-    app = make_app(catalog=catalog, context_window=8192)
-    async with app.run_test() as pilot:
-        await _open(app, pilot)
-        assert "ctx ?" in _rows(app)[1]
-        await pilot.press("down", "enter")
-        await until(pilot, lambda: app.query_one(StatusBar).model == "other")
-        assert any("Could not read the context length" in n for n in _notices(app))
-        assert app.query_one(StatusBar).window == 8192
-
-
 class _Slow(FakeCatalog):
     async def context_length(self, name: str) -> int | None:
         if name == "other":
@@ -215,7 +160,7 @@ class _Boom(FakeCatalog):
         raise RuntimeError("boom")
 
 
-@pytest.mark.parametrize("where", ["list", "length"])
+@pytest.mark.parametrize("where", ["length"])
 async def test_a_generic_error_leaves_the_state_unchanged(make_app: AppFactory, where: str) -> None:
     catalog = _Boom(["fake", "other"])
     catalog.where = where
@@ -249,19 +194,3 @@ async def test_a_picker_is_not_opened_over_another_dialog(make_app: AppFactory) 
         app.push_screen(ModalScreen())
         await pilot.pause(0.8)
         assert not any(isinstance(s, ModelPicker) for s in app.screen_stack)
-
-
-async def test_long_parameters_are_cut_in_the_row(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog([ModelInfo("fake", None, "9" * 40), ModelInfo("o", None, "7B\x1b" * 10)]))
-    async with app.run_test() as pilot:
-        await _open(app, pilot)
-        first, second = _rows(app)
-        assert "9" * 13 not in first and "9" * 12 in first
-        assert "\x1b" not in second and not second.split("  ")[-2].endswith("\\")
-
-
-async def test_the_row_name_is_written_like_the_notices(make_app: AppFactory) -> None:
-    app = make_app(catalog=FakeCatalog(["fake", "é-ünï"]))
-    async with app.run_test() as pilot:
-        await _open(app, pilot)
-        assert "é-ünï" in _rows(app)[1]

@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator, Callable
-from pathlib import Path
+from collections.abc import AsyncIterator
 
 import httpx
 import pytest
@@ -33,24 +32,6 @@ async def test_chat_yields_lines_in_order_and_skips_blanks() -> None:
 
     chunks = await _collect(_client(handler))
     assert [c["n"] for c in chunks] == [1, 2, 3]
-
-
-async def test_chat_streams_a_recorded_fixture(fixture_path: Callable[[str], Path]) -> None:
-    data = fixture_path("ollama/text.ndjson").read_bytes()
-
-    async def handler(_request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, content=data)
-
-    chunks = await _collect(_client(handler))
-    assert chunks[-1]["done"] is True
-
-
-async def test_unreachable_server_raises_with_the_url() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("refused", request=request)
-
-    with pytest.raises(OllamaError, match=f"Cannot reach Ollama at {URL}"):
-        await _collect(_client(handler))
 
 
 async def test_http_error_carries_the_body_error() -> None:

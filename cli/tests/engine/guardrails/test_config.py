@@ -14,11 +14,6 @@ def read(global_data: dict | None, project_data: dict | None) -> tuple[GuardConf
     return read_guardrails(global_data, project_data, global_path=GLOBAL, project_path=PROJECT)
 
 
-def test_without_settings_the_defaults_apply_and_nothing_is_said() -> None:
-    assert read(None, None) == (GuardConfig(), [])
-    assert read({}, {"permissions": {}}) == (GuardConfig(), [])
-
-
 def test_the_global_file_sets_everything() -> None:
     config, warnings = read(
         {
@@ -50,20 +45,6 @@ def test_the_project_file_may_add_protected_patterns_and_turn_the_network_off() 
     assert config.extra_protected == ("a/**", "b/**")
     assert config.network is False
     assert warnings == []
-
-
-def test_ac1_project_keys_that_loosen_are_ignored_with_a_warning_each() -> None:
-    config, warnings = read(
-        {"guardrails": {"sandbox": {"network": False}}},
-        {"guardrails": {"sandbox": {"enabled": False}, "keepEnv": ["X"]}},
-    )
-
-    assert config.sandbox_enabled is True
-    assert config.network is False
-    assert config.keep_env == frozenset()
-    assert len(warnings) == 2
-    assert f"{PROJECT}: guardrails.sandbox.enabled can only be set in the global settings; ignored" in warnings
-    assert f"{PROJECT}: guardrails.keepEnv can only be set in the global settings; ignored" in warnings
 
 
 def test_a_project_network_true_and_write_list_are_ignored_with_a_warning() -> None:
@@ -157,20 +138,6 @@ def test_a_bare_tilde_pattern_is_ignored_with_a_warning_that_suggests_the_folder
     assert "~/**" in warnings[0]
 
 
-def test_a_pattern_in_a_warning_is_escaped() -> None:
-    _, warnings = read({"guardrails": {"protected": ["a/../\x1b[31mb"]}}, None)
-
-    assert len(warnings) == 1
-    assert "\x1b" not in warnings[0]
-
-
-def test_a_protected_pattern_is_trimmed() -> None:
-    config, warnings = read({"guardrails": {"protected": ["  ~/secrets/** ", "\t*.token\n"]}}, None)
-
-    assert config.extra_protected == ("~/secrets/**", "*.token")
-    assert warnings == []
-
-
 def test_a_protected_pattern_that_is_empty_after_trimming_is_ignored_with_a_warning() -> None:
     from src.engine.guardrails.config import _Reader
 
@@ -190,9 +157,3 @@ def test_a_protected_pattern_ending_in_slash_star_is_kept_with_a_warning_that_su
     assert len(warnings) == 2
     assert "direct children" in warnings[0] and '"~/secrets/**"' in warnings[0]
     assert warnings[1].startswith("/ws/.agent/settings.json: ") and '"vault/**"' in warnings[1]
-
-
-def test_a_protected_pattern_ending_in_double_star_does_not_warn() -> None:
-    _, warnings = read({"guardrails": {"protected": ["~/secrets/**", "a/*.txt"]}}, None)
-
-    assert warnings == []

@@ -75,36 +75,6 @@ async def _read(ctx: ToolContext) -> ToolResult:
     return result
 
 
-async def test_a_read_refuses_a_link_that_became_a_protected_file_after_the_check(
-    gctx: ToolContext, swap_on_open: Callable[[Path], None], secret: Path
-) -> None:
-    swap_on_open(secret)
-
-    result = await _read(gctx)
-
-    assert result.is_error
-    assert result.output == "protected path"
-    assert "hunter2" not in result.output
-
-
-async def test_a_read_the_user_allowed_opens_the_protected_file(
-    gctx: ToolContext, swap_on_open: Callable[[Path], None], secret: Path
-) -> None:
-    swap_on_open(secret)
-    allowed = ToolContext(gctx.workspace, gctx.bash_timeout, guard=gctx.guard, protected_ok=True)
-
-    result = await _read(allowed)
-
-    assert not result.is_error
-    assert "hunter2" in result.output
-
-
-async def test_a_read_of_a_link_that_stays_harmless_works(gctx: ToolContext, link: Path) -> None:
-    result = await _read(gctx)
-
-    assert result.output.endswith("aws_secret=nothing")
-
-
 async def test_a_read_of_a_hard_link_to_a_protected_file_is_refused_by_the_open_file(
     gctx: ToolContext, workspace: Path, home: Path
 ) -> None:

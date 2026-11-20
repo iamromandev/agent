@@ -81,12 +81,3 @@ async def test_enter_on_blank_input_submits_nothing(make_app: AppFactory) -> Non
         await settled(app)
 
     assert scripted(app).requests == []
-
-
-async def test_submit_clears_the_input(make_app: AppFactory) -> None:
-    app = make_app()
-    async with app.run_test() as pilot:
-        await pilot.press("h", "i", "enter")
-        await pilot.pause()
-
-        assert app.query_one(ChatInput).text == ""

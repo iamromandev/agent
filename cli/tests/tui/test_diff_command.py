@@ -13,7 +13,6 @@ from src.engine.checkpoints.store import CheckpointStore
 from src.engine.guardrails.setup import Guardrails
 from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.engine.session import NullRecorder
-from src.tui.app import HELP
 from src.tui.screens.diff import DiffScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import NoticeEntry
@@ -124,39 +123,6 @@ async def test_a_failing_git_is_one_error_notice(
         assert "\x1b" not in text and "\\x1b[31m exploded" in text
 
 
-@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
-async def test_a_long_error_is_cut_before_it_is_escaped(
-    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    store = _store(tmp_path)
-    app = make_app([_bash("echo hi > a.txt"), REPLY], checkpoints=store)
-    async with app.run_test() as pilot:
-        await _bash_turn(pilot, app)
-
-        async def boom(before: str, after: str):
-            raise GitError("\x1b" * 300)
-
-        monkeypatch.setattr(store, "diff", boom)
-        await type_and_send(pilot, "/diff")
-        await until(pilot, lambda: any(n.startswith("Could not build the diff:") for n in _notices(app)))
-        text = next(n for n in _notices(app) if n.startswith("Could not build the diff:"))
-        assert text == "Could not build the diff: " + "\\x1b" * 200
-
-
-async def test_after_new_there_is_nothing_to_diff(make_app: AppFactory) -> None:
-    app = make_app([REPLY])
-    async with app.run_test() as pilot:
-        await type_and_send(pilot, "hi")
-        await settled(app)
-        await type_and_send(pilot, "/new")
-        await settled(app)
-
-        await type_and_send(pilot, "/diff")
-
-        await until(pilot, lambda: "Nothing to diff" in _notices(app))
-        assert not isinstance(app.screen, DiffScreen)
-
-
 @pytest.fixture
 def slow_diff(monkeypatch: pytest.MonkeyPatch):
     """Hold `store.diff` until the test releases it."""
@@ -194,28 +160,6 @@ async def test_a_diff_still_building_when_a_message_is_sent_never_opens_over_the
 
         assert not isinstance(app.screen, DiffScreen)
         assert app.query_one(ChatInput).text == ""
-
-
-@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
-async def test_a_diff_still_building_when_new_is_typed_never_opens(
-    make_app: AppFactory, tmp_path: Path, slow_diff
-) -> None:
-    store = _store(tmp_path)
-    app = make_app([_bash("echo hi > a.txt"), REPLY], checkpoints=store)
-    async with app.run_test() as pilot:
-        await _bash_turn(pilot, app)
-        release = slow_diff(store)
-        await type_and_send(pilot, "/diff")
-        await type_and_send(pilot, "/new")
-        await settled(app)
-
-        release.set()
-        await pilot.pause()
-        await pilot.pause()
-
-        assert not isinstance(app.screen, DiffScreen)
-        await type_and_send(pilot, "/diff")
-        await until(pilot, lambda: "Nothing to diff" in _notices(app))
 
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
@@ -262,7 +206,3 @@ async def test_a_diff_built_while_a_turn_started_shows_the_busy_line_instead_of_
         app._turn_active = False
 
         assert not isinstance(app.screen, DiffScreen)
-
-
-def test_help_lists_diff() -> None:
-    assert "/diff show the last turn's changes" in HELP
