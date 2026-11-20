@@ -45,6 +45,7 @@ def build_system_prompt(
     instructions: Instructions | None = None,
     todo: bool = False,
     skills: str | None = None,
+    agents: str | None = None,
     paths: ProtectedPaths | None = None,
 ) -> str:
     parts = [
@@ -58,6 +59,8 @@ def build_system_prompt(
         parts.append(_PLAN)
     if skills:
         parts.append(skills)
+    if agents:
+        parts.append(agents)
     if instructions is None:
         instructions = load_instructions(workspace, None, paths)
     if instructions.text:
@@ -72,9 +75,10 @@ def build_task_prompt(
     instructions: Instructions | None,
     skills: str | None = None,
     paths: ProtectedPaths | None = None,
+    role: str | None = None,
 ) -> str:
-    """The system prompt of a `task` child: a research role, the workspace facts and the AGENTS.md text."""
-    parts = [_TASK_ROLE, f"Workspace: {workspace}\nOS: {os_name}\nDate: {today.isoformat()}"]
+    """The system prompt of a `task` child: a research role (or `role`), the workspace facts and the AGENTS.md text."""
+    parts = [_TASK_ROLE if role is None else role, f"Workspace: {workspace}\nOS: {os_name}\nDate: {today.isoformat()}"]
     if skills:
         parts.append(skills)
     if instructions is None:

@@ -36,6 +36,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             launch_notices=rt.model_notices,
             commands=rt.commands,
             skills=rt.skills,
+            agents=rt.agents,
             guard=rt.guard,
             hooks=rt.hooks,
         )

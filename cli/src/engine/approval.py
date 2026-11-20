@@ -30,6 +30,7 @@ class ApprovalRequest:
     save_rule: str | None = None  # "Always here" would save this rule to the project settings file; None: not offered
     protected: bool = False  # a read of a protected path (guardrails): only Allow once / Deny, never Always
     protected_path: str = ""  # the resolved path, shown by the dialog (unescaped: the UI escapes it)
+    subagent: str = ""  # the custom agent that made the call, "" for the main agent (unescaped: the UI escapes it)
 
     @property
     def allow_save(self) -> bool:

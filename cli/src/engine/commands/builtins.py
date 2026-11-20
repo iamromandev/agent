@@ -13,6 +13,7 @@ BUILTINS: dict[str, str] = {
     "guardrails": "sandbox, protected paths and redaction",
     "hooks": "configured hooks",
     "skills": "loaded skills",
+    "agents": "loaded subagents",
     "compact": "shrink the context",
     "model": "switch model (/model <name>)",
     "init": "write AGENTS.md",

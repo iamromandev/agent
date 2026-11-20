@@ -22,3 +22,9 @@ def test_revoking_a_tool_removes_its_tool_grant_and_its_keyed_grants() -> None:
     assert grants.covers("mcp__a__t", {}, Mode.BUILD) is False
     assert grants.covers("web_fetch", {"url": "https://x"}, Mode.BUILD, "url") is False
     assert grants.covers("other", {}, Mode.BUILD) is True
+
+
+def test_an_approval_request_names_no_subagent_by_default() -> None:
+    from src.engine.approval import ApprovalRequest
+
+    assert ApprovalRequest("bash", "bash ls", None, True).subagent == ""

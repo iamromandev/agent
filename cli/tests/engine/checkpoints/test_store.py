@@ -180,6 +180,8 @@ async def test_agent_config_names_match_whatever_the_case(workspace: Path, data:
     (agent / "Commands").mkdir(parents=True)
     (agent / "SETTINGS.JSON").write_text("x")
     (agent / "Commands" / "c.md").write_text("x")
+    (agent / "Agents").mkdir()
+    (agent / "Agents" / "a.md").write_text("x")
     (agent / "notes.txt").write_text("x")
     store = make_store(workspace, data)
 

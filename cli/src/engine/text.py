@@ -30,3 +30,18 @@ def escape_display(text: str) -> str:
         _written(char) if unicodedata.category(char).startswith("C") or char in "\u2028\u2029" else char
         for char in text
     )
+
+
+def one_line(text: str, limit: int) -> str:
+    """`text` on one line, made safe, at most `limit` shown characters (an escape stays whole)."""
+    pieces = [escape_display(char) for char in " ".join(text.split())]
+    if sum(map(len, pieces)) <= limit:
+        return "".join(pieces)
+    kept: list[str] = []
+    total = 1  # room for the "…"
+    for piece in pieces:
+        if total + len(piece) > limit:
+            break
+        kept.append(piece)
+        total += len(piece)
+    return "".join(kept) + "…"

@@ -390,3 +390,60 @@ def test_a_sigterm_during_the_runtime_build_exits_143_and_restores_the_handler(
 
     assert code == 143
     assert signal.getsignal(signal.SIGTERM) is before
+
+
+def test_an_agent_file_warning_is_shown_at_launch_and_valid_agents_are_offered(
+    ws: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = ws / ".agent" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "bad.md").write_text("no front matter")
+    (folder / "reviewer.md").write_text("---\ndescription: Reviews code\n---\nYou review.\n")
+    provider = ScriptedProvider([call("task", description="d", prompt="p", agent="reviewer"), say("report"), say("done")])
+
+    code = go(ws, provider)
+
+    assert code == EXIT_OK
+    assert "bad.md" in capsys.readouterr().err
+    assert "- reviewer: Reviews code" in provider.requests[0][0][0].content
+    child_system = provider.requests[1][0][0].content
+    assert child_system.startswith("You review.")
+    assert "Available agents" not in child_system
+
+
+def _writer_agent(ws: Path, tools: str = "edit, bash") -> None:
+    folder = ws / ".agent" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "w.md").write_text(f"---\ndescription: Edits files\ntools: {tools}\n---\nYou edit.\n")
+    (ws / "a.txt").write_text("alpha\n")
+
+
+def test_ac22_an_allow_flag_lets_a_custom_childs_edit_run_and_its_bash_is_refused(ws: Path) -> None:
+    _writer_agent(ws)
+    provider = ScriptedProvider(
+        [
+            call("task", "t1", description="d", prompt="p", agent="w"),
+            call("edit", "e1", path="a.txt", old_string="alpha", new_string="beta"),
+            call("bash", "b1", command="echo hi"),
+            say("report"),
+            say("done"),
+        ]
+    )
+
+    code = go(ws, provider, allow=("edit",))
+
+    assert code == EXIT_OK
+    assert (ws / "a.txt").read_text() == "beta\n"
+    child_results = tool_results(provider, 3)
+    assert HEADLESS_DENY in child_results[-1]  # the child's bash, refused like the parent's would be
+    assert "report" in tool_results(provider)[-1]
+
+
+def test_a_builtin_command_prompt_such_as_agents_is_exit_2(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    provider = ScriptedProvider([say("x")])
+
+    code = go(ws, provider, prompt="/agents")
+
+    assert code == EXIT_USAGE
+    assert "/agents" in capsys.readouterr().err
+    assert provider.requests == []

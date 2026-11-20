@@ -258,3 +258,20 @@ async def test_switch_changes_the_model_and_the_window_of_the_next_request() -> 
     assert [(r["model"], r["options"]["num_ctx"]) for r in seen] == [("a", 8192), ("b", 4096)]
     assert (provider.model, provider.context_window) == ("b", 4096)
     assert seen[0]["messages"] == seen[1]["messages"]
+
+
+async def test_pinned_provider_asks_for_its_model_and_leaves_the_original_alone() -> None:
+    captured: list[dict[str, Any]] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        captured.append(json.loads(request.content))
+        return httpx.Response(200, content=_ndjson(DONE_LINE))
+
+    original = _provider(handler, model="foo", num_ctx=4096)
+    other = original.pinned("bar")
+    await _events(other)
+    await _events(original)
+
+    assert [c["model"] for c in captured] == ["bar", "foo"]
+    assert captured[0]["options"] == {"num_ctx": 4096}
+    assert (original.model, other.model) == ("foo", "bar")

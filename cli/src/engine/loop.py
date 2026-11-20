@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import dataclasses
+import os
 import platform
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -12,6 +13,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
 
+from src.engine.agents.loader import Agents
 from src.engine.approval import ApprovalRequest, Approver, Choice, Grants
 from src.engine.checkpoints.birth import settle
 from src.engine.checkpoints.restore import restore_checkpoint, restore_unsnapshotted
@@ -91,11 +93,16 @@ from src.engine.usage import UsageRecord, UsageTotals
 # little after it is still seen whole; one that has no end in sight is replaced to the end of what is read. The rest of
 # the output is dropped before redaction, because redaction must not cost more than the model could ever see.
 REDACT_MARGIN = 4_000
+AGENT_FILE_SCAN_LIMIT = 1_000  # entries of `.agent/agents` compared by identity for a hard-linked target
 ACCEPTED_EDIT_TOOLS: frozenset[str] = frozenset({"write", "edit"})  # approved without a dialog in accept-edits mode
 # Workspace-relative names, case-folded: the config files no rule, grant or mode may approve, and the folders loaded
 # at launch without a trust prompt, which accept-edits mode leaves to the dialog too.
 AGENT_CONFIG_PARTS: frozenset[tuple[str, ...]] = frozenset({(".agent", "settings.json"), (".agent", "mcp.json")})
-AGENT_ASKING_PARTS: frozenset[tuple[str, ...]] = AGENT_CONFIG_PARTS | {(".agent", "commands"), (".agent", "skills")}
+AGENT_ASKING_PARTS: frozenset[tuple[str, ...]] = AGENT_CONFIG_PARTS | {
+    (".agent", "agents"),
+    (".agent", "commands"),
+    (".agent", "skills"),
+}
 DISPLAY_FACTOR = 4  # the display copy also holds colour codes, which do not count towards its limit
 PARTIAL_MARK = "\n[interrupted by user]"
 NOTHING_TO_COMPACT = "Nothing to compact"
@@ -186,8 +193,15 @@ class Agent:
         rules: Rules | None = None,
         hooks: Hooks | None = None,
         checkpoints: CheckpointStore | None = None,
+        agents: Agents | None = None,
+        subagent: str = "",
+        role_prompt: str | None = None,
+        undo: UndoLog | None = None,
+        mode_source: Callable[[], Mode] | None = None,
     ) -> None:
         self.provider = provider
+        self.subagent = subagent  # the custom agent this child runs, "" otherwise
+        self.role_prompt = role_prompt  # a custom child's own system prompt, in place of the research role
         self._checkpoints = checkpoints  # the `task` child never gets one
         self._checkpoint_warning: str | None = None  # taken from the store, not yet shown
         self._large_before: dict[str, tuple[int, int] | None] = {}  # files over the size cap when the turn began
@@ -198,11 +212,12 @@ class Agent:
         self.role = role
         self.tools = list(tools)
         if task_tools is not None and role == "main":
-            self.tools.append(TaskTool(self, list(task_tools), task_max_steps))
+            self.tools.append(TaskTool(self, list(task_tools), task_max_steps, agents))
         self._extra_tools = extra_tools  # asked at every use: tools that come and go while the agent runs (MCP)
         self._granted_extra: dict[str, Tool] = {}  # "Always" given to an extra tool, to revoke it when that tool is gone
         self.approver = approver
-        self._undo = UndoLog(ctx.workspace, undo_file_limit, undo_total_limit)
+        self._shared_undo = undo is not None  # a custom child writes into its parent's turn: it opens none
+        self._undo = undo if undo is not None else UndoLog(ctx.workspace, undo_file_limit, undo_total_limit)
         self.ctx = dataclasses.replace(ctx, journal=self._undo)
         self.max_steps = max_steps
         if not 0 < compact_at <= 1:
@@ -217,7 +232,8 @@ class Agent:
         self.compact_at = compact_at
         self.compact_keep_turns = compact_keep_turns
         self.today = today
-        self.mode = Mode.BUILD
+        self._mode_source = mode_source  # a custom child reads its parent's mode, at every step
+        self._mode = Mode.BUILD
         self.history: list[Message] = []  # no system message; the prompt is rebuilt per request
         self.usage = UsageTotals()  # this session's recorded model calls (never lowered by `/undo`)
         self.usage_unrecorded = False  # the session has messages from before its first usage record
@@ -234,6 +250,14 @@ class Agent:
         self._summary_failed = False  # a summary failed in this turn: automatic compaction does not retry it
         self._warned_full = False  # "still full" was shown in this turn
         self._hook_notes: list[str] = []  # redacted context from hooks, for the next request only
+
+    @property
+    def mode(self) -> Mode:
+        return self._mode if self._mode_source is None else self._mode_source()
+
+    @mode.setter
+    def mode(self, mode: Mode) -> None:
+        self._mode = mode
 
     def set_mode(self, mode: Mode) -> None:
         """Takes effect from the next model request; a step already running keeps its snapshot."""
@@ -283,6 +307,11 @@ class Agent:
         self._hook_notes.clear()  # context for the old session: the new one's SessionStart hook adds its own
         self._undo.clear()
         return old
+
+    @property
+    def undo_log(self) -> UndoLog:
+        """The log this agent's file tools write into; a custom subagent is given its parent's."""
+        return self._undo
 
     @property
     def todos(self) -> tuple[TodoItem, ...]:
@@ -356,10 +385,17 @@ class Agent:
         skills = skill_tool.skills.section() if skill_tool is not None else None
         if self.role == "task":
             prompt = build_task_prompt(
-                self.ctx.workspace, self.today(), platform.system(), loaded, skills=skills, paths=guard_of(self.ctx).paths
+                self.ctx.workspace,
+                self.today(),
+                platform.system(),
+                loaded,
+                skills=skills,
+                paths=guard_of(self.ctx).paths,
+                role=self.role_prompt,
             )
             return Message("system", prompt)
         todo = any(t.name == "todo" for t in self.tools)
+        task_tool = next((t for t in self.tools if isinstance(t, TaskTool)), None)
         prompt = build_system_prompt(
             self.ctx.workspace,
             mode,
@@ -368,6 +404,7 @@ class Agent:
             instructions=loaded,
             todo=todo,
             skills=skills,
+            agents=task_tool.agents.section() if task_tool is not None else None,
             paths=guard_of(self.ctx).paths,
         )
         return Message("system", prompt)
@@ -420,6 +457,11 @@ class Agent:
             emit(Notice("error", self._save_error))
             self._save_error = None  # only once shown: a sink that raised gets it again at the next flush point
 
+    def _clear_undo(self) -> None:
+        """Compaction drops the undo history of this agent; a shared log belongs to the parent's turns."""
+        if not self._shared_undo:
+            self._undo.clear()
+
     async def compact(self, emit: EventSink) -> None:
         """Compact now, whatever the estimate (R16): prune, then summarize what is older than the kept turns.
 
@@ -428,7 +470,7 @@ class Agent:
         if self._busy:
             raise AgentBusy("a turn is already running")
         if not self.history:
-            self._undo.clear()
+            self._clear_undo()
             emit(Notice("info", NOTHING_TO_COMPACT))
             return
         self._busy = True
@@ -495,7 +537,7 @@ class Agent:
                 notices.append(Notice("warn", NOT_SUMMARIZED))
         after = self.estimate()
         if force or pruned or summarized:
-            self._undo.clear()  # the turns before it are folded or pruned: undoing them would not match the history
+            self._clear_undo()  # the turns before it are folded or pruned: undoing them would not match the history
         if pruned or summarized:
             self._record_compaction(pruned, summarized, before, after)
             self._flush_save_error(emit)
@@ -555,7 +597,12 @@ class Agent:
                 self.grants.revoke(name)
 
     def tools_for(self, mode: Mode) -> list[Tool]:
-        return [t for t in self.all_tools() if not (mode is Mode.PLAN and t.mutating)]
+        return [t for t in self.all_tools() if not (mode is Mode.PLAN and self._plan_blocked(t))]
+
+    def _plan_blocked(self, tool: Tool) -> bool:
+        """Hidden and refused in plan mode: mutating tools, and `bash` for a custom subagent (R13: it is offered no
+        write tools there; the main agent's own `bash` stays, asking every time)."""
+        return tool.mutating or (bool(self.subagent) and tool.name == "bash")
 
     async def run_turn(
         self, text: str, emit: EventSink, *, draft: str | None = None, context: Sequence[str] = ()
@@ -567,7 +614,8 @@ class Agent:
             return
         self._busy = True
         self._summary_failed = self._warned_full = False  # per turn: one retry of a summary, one warning
-        self._undo.begin(len(self.history), draft if draft is not None else text)
+        if not self._shared_undo:
+            self._undo.begin(len(self.history), draft if draft is not None else text)
         kept = len(self._hook_notes)  # what stands before this turn's own context (SessionStart's)
         try:
             self._record(Message("user", text))
@@ -604,7 +652,8 @@ class Agent:
             try:
                 await self._checkpoint(emit, end=True)
             finally:
-                self._undo.finish()
+                if not self._shared_undo:
+                    self._undo.finish()
                 self._busy = False
                 self._inflight = None
 
@@ -822,7 +871,7 @@ class Agent:
                     reason = await self._stop_hooks(continuations, emit)
                 else:
                     reason = None
-                    if self.hooks.has("Stop"):
+                    if not self.subagent and self.hooks.has("Stop"):
                         emit(Notice("info", "Stop hooks skipped: no step left"))
                 if reason is None:
                     emit(TurnEnded("done"))
@@ -916,7 +965,7 @@ class Agent:
                 # Before everything else, in every mode, for every tool: a deny rule only ever refuses.
                 text = f"denied by rule {escape(verdict.rule.text)} ({verdict.source})"  # the text came from a file
                 result = ToolResult(text, True, "denied by rule")
-            elif mode is Mode.PLAN and tool.mutating:
+            elif mode is Mode.PLAN and self._plan_blocked(tool):
                 result = ToolResult(f"refused: {call.name} is unavailable in plan mode", True, "refused: plan mode")
             elif (error := check_args(tool.parameters, call.arguments)) is not None:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
@@ -971,7 +1020,8 @@ class Agent:
     def _hook_payload(self, **fields: object) -> dict[str, object]:
         """What every hook gets besides the event's own fields: the session and the workspace."""
         session_id = getattr(self._recorder, "session_id", "")
-        return {**fields, "session_id": session_id if isinstance(session_id, str) else "", "cwd": str(self.ctx.workspace)}
+        payload = {**fields, "session_id": session_id if isinstance(session_id, str) else "", "cwd": str(self.ctx.workspace)}
+        return {**payload, "agent": self.subagent} if self.subagent else payload  # a custom child's tool events
 
     def _redact_hook_text(self, text: str) -> str:
         """Secrets out of text a hook produced, before it is shown. Fails closed: nothing of it when redaction fails.
@@ -999,7 +1049,7 @@ class Agent:
     async def prompt_hooks(self, text: str, emit: EventSink) -> HookDecision:
         """Run the `UserPromptSubmit` hooks for a prompt before it is recorded; the app sends `decision.context` to
         `run_turn` and, on a block, drops the prompt. Never raises (but for a cancel); the notices go to `emit`."""
-        if not self.hooks.has("UserPromptSubmit"):
+        if self.subagent or not self.hooks.has("UserPromptSubmit"):
             return HookDecision(False, "", [], [])
         decision = HookDecision(False, "", [], [])
         try:
@@ -1014,7 +1064,7 @@ class Agent:
     async def session_started(self, source: Literal["startup", "resume", "new", "switch"], emit: EventSink) -> None:
         """Run the `SessionStart` hooks once the session is ready; their context goes to the next request. Never raises
         (but for a cancel). `reset` drops context kept for the session that ended, so call this after it."""
-        if not self.hooks.has("SessionStart"):
+        if self.subagent or not self.hooks.has("SessionStart"):
             return
         try:
             decision = await self.hooks.run("SessionStart", self._hook_payload(source=source))
@@ -1028,7 +1078,7 @@ class Agent:
     async def _stop_hooks(self, continuations: int, emit: EventSink) -> str | None:
         """Run the `Stop` hooks when a turn would end: the reason (redacted) to continue with, or None to end it.
         At most `STOP_CONTINUATIONS` per user turn, then a warning and no more hook runs."""
-        if not self.hooks.has("Stop"):
+        if self.subagent or not self.hooks.has("Stop"):
             return None
         if continuations >= STOP_CONTINUATIONS:
             emit(Notice("warn", "Stop hook limit reached"))
@@ -1122,11 +1172,36 @@ class Agent:
                 target = resolve_path(self.ctx, raw)
             except InvalidPath:
                 return False
-        if _relative_parts(target, self.ctx.workspace.resolve()) in AGENT_CONFIG_PARTS:
+        relative = _relative_parts(target, self.ctx.workspace.resolve())
+        if relative in AGENT_CONFIG_PARTS or (relative is not None and relative[:2] == (".agent", "agents")):
+            return True
+        if self._links_to_agent_file(target):
             return True
         for protected in agent_config_files(self.ctx.workspace):
             if target == protected or (target.exists() and protected.exists() and target.samefile(protected)):
                 return True
+        return False
+
+    def _links_to_agent_file(self, target: Path) -> bool:
+        """Is `target` an existing file with other hard links that is the same file as one directly under
+        `.agent/agents`? Then a write to it is a write to the agent file. Bounded: that folder's own entries only,
+        links not followed."""
+        try:
+            if target.stat().st_nlink <= 1:
+                return False
+            folder = self.ctx.workspace.resolve() / ".agent" / "agents"
+            if folder.is_symlink():
+                return False
+            with os.scandir(folder) as entries:
+                for count, entry in enumerate(entries):
+                    if count >= AGENT_FILE_SCAN_LIMIT:
+                        return True  # too many to check: ask
+                    if entry.is_file(follow_symlinks=False) and target.samefile(entry.path):
+                        return True
+        except FileNotFoundError:
+            return False
+        except OSError:
+            return True  # cannot tell: ask
         return False
 
     def _accepts_edit(self, tool: Tool, prepared: Prepared, mode: Mode) -> bool:
@@ -1143,7 +1218,12 @@ class Agent:
         relative = _relative_parts(target, workspace)
         if relative is None or ".git" in relative or relative[:2] in AGENT_ASKING_PARTS:
             return False
-        folders = (workspace / ".agent" / "commands", workspace / ".agent" / "skills", *guard_of(self.ctx).own_folders)
+        folders = (
+            workspace / ".agent" / "agents",
+            workspace / ".agent" / "commands",
+            workspace / ".agent" / "skills",
+            *guard_of(self.ctx).own_folders,
+        )
         for folder in folders:
             try:
                 resolved = folder.resolve()  # a symlinked `.agent` or data folder: where it really is
@@ -1189,7 +1269,14 @@ class Agent:
         if target is None:
             return False
         request = ApprovalRequest(
-            call.name, tool.label(call.arguments), None, False, None, protected=True, protected_path=str(target)
+            call.name,
+            tool.label(call.arguments),
+            None,
+            False,
+            None,
+            protected=True,
+            protected_path=str(target),
+            subagent=self.subagent,
         )
         decision = await self.approver.ask(request)
         if decision.choice in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # an Always is not offered: it counts as once
@@ -1216,7 +1303,12 @@ class Agent:
             allow_always = mode is not Mode.PLAN and not guarded
             save_rule = self._offered_rule(tool, call) if allow_always else None
             request = ApprovalRequest(
-                call.name, tool.label(call.arguments), guard_of(self.ctx).redact_preview(prepared.preview), allow_always, save_rule
+                call.name,
+                tool.label(call.arguments),
+                guard_of(self.ctx).redact_preview(prepared.preview),
+                allow_always,
+                save_rule,
+                subagent=self.subagent,
             )
             decision = await self.approver.ask(request)
             if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no

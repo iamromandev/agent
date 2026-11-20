@@ -10,7 +10,7 @@ from pathlib import Path
 from src.engine.commands.loader import NAME, Source, front_matter
 from src.engine.fileio import read_regular
 from src.engine.permissions.setup import MAX_WARNINGS
-from src.engine.text import escape, escape_display
+from src.engine.text import escape, one_line
 
 MAX_BYTES = 64 * 1024
 DESCRIPTION_CHARS = 200
@@ -47,7 +47,7 @@ class Skills:
         skills = self.sorted()
         if not skills:
             return None
-        lines = [f"- {s.name}: {_one_line(s.description)}" for s in skills]
+        lines = [f"- {s.name}: {one_line(s.description, DESCRIPTION_CHARS)}" for s in skills]
         if len(_HEADER) + sum(1 + len(line) for line in lines) <= SECTION_CHARS:
             return "\n".join([_HEADER, *lines])
         budget = SECTION_CHARS - len(f"\nand {len(lines)} more skills (see /skills)")  # the longest tail
@@ -59,21 +59,6 @@ class Skills:
             kept.append(line)
             total += 1 + len(line)
         return "\n".join([_HEADER, *kept, f"and {len(lines) - len(kept)} more skills (see /skills)"])
-
-
-def _one_line(description: str) -> str:
-    """The description on one line, made safe, at most `DESCRIPTION_CHARS` shown characters (an escape stays whole)."""
-    pieces = [escape_display(char) for char in " ".join(description.split())]
-    if sum(map(len, pieces)) <= DESCRIPTION_CHARS:
-        return "".join(pieces)
-    kept: list[str] = []
-    total = 1  # room for the "…"
-    for piece in pieces:
-        if total + len(piece) > DESCRIPTION_CHARS:
-            break
-        kept.append(piece)
-        total += len(piece)
-    return "".join(kept) + "…"
 
 
 def global_skills_dir(env: Mapping[str, str] = os.environ) -> Path:

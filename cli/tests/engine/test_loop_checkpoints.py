@@ -320,3 +320,40 @@ async def test_esc_during_the_checkpoint_read_stops_git_and_still_undoes_the_fil
     assert not agent.busy
     assert agent.history == []  # the turn is cut, as for any undo
     assert not (workspace / "n.txt").exists()  # and its files are put back from the file log
+
+
+# --- a custom subagent's bash is part of the parent turn -----------------------------------------------------
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
+async def test_ac19_undo_removes_a_file_a_custom_agents_bash_created(workspace: Path, tmp_path: Path) -> None:
+    from src.engine.agents.loader import AgentDef, Agents
+    from src.engine.tools import read_only_tools
+
+    store = CheckpointStore(workspace, tmp_path / "data" / "checkpoints", Guardrails.off(workspace), dict(os.environ))
+    defn = AgentDef("w", "w agent", "You are w.", ("bash",), None, None, "project", Path("/x/w.md"))
+    script: list[list[ProviderEvent | Gate]] = [
+        [ToolCallEvent(ToolCall("t1", "task", {"description": "d", "prompt": "p", "agent": "w"})), Done(1, 1)],
+        [ToolCallEvent(ToolCall("b1", "bash", {"command": "echo hi > out.txt"})), Done(1, 1)],
+        [TextDelta("made it"), Done(1, 1)],
+        [TextDelta("done"), Done(1, 1)],
+    ]
+    agent = Agent(
+        ScriptedProvider(script, context_window=100_000),
+        default_tools(),
+        RecordingApprover([Decision(Choice.ONCE)]),
+        ToolContext(workspace=workspace, bash_timeout=10.0),
+        25,
+        today=lambda: date(2026, 11, 12),
+        recorder=MemoryRecorder(),
+        checkpoints=store,
+        task_tools=read_only_tools(None),
+        agents=Agents({"w": defn}, ()),
+    )
+    await agent.run_turn("go", Events())
+    assert (workspace / "out.txt").read_text() == "hi\n"
+
+    await agent.undo(Events())
+
+    assert not (workspace / "out.txt").exists()
+    store.close()

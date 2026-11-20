@@ -333,7 +333,7 @@ def make_sandbox(
         )
         deny_write = list(agent_folders(env, home, sessions))
         agent = workspace / ".agent"
-        deny_write += [agent / "settings.json", agent / "mcp.json", agent / "commands", agent / "skills"]
+        deny_write += [agent / "settings.json", agent / "mcp.json", agent / "commands", agent / "skills", agent / "agents"]
         paths = protected if protected is not None else ProtectedPaths(home, cfg.extra_protected)
         warnings.extend(_workspace_warnings(workspace, paths))
         profile = build_profile(workspace, writable, deny_write, paths, cfg.network)

@@ -66,6 +66,8 @@ class ApprovalScreen(ModalScreen[Decision | None]):
             if request.protected:
                 # The path was resolved from the call's argument: escaped, never read as markup.
                 yield Static(Text(f"Protected path: {escape(request.protected_path)}", "bold"), id="protected")
+            if request.subagent:
+                yield Static(Text(f"Subagent: {escape(request.subagent)}", "bold"), id="subagent")
             if preview is not None:
                 theme = diff_theme(self.app.current_theme.dark)
                 body = (

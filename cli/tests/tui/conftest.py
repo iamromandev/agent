@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from src.engine import Agent
+from src.engine.agents.loader import Agents
 from src.engine.approval import Approver
 from src.engine.checkpoints.store import CheckpointStore
 from src.engine.commands.loader import Commands
@@ -105,6 +106,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         task_fetcher: Fetcher | None = None,
         commands: Commands | None = None,
         skills: Skills | None = None,
+        agents: Agents | None = None,
         guard: Guardrails | None = None,
         hooks: Hooks | None = None,
         catalog: FakeCatalog | None = None,
@@ -139,6 +141,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 compact_keep_turns=compact_keep_turns,
                 extra_tools=mcp.tools if mcp is not None else None,
                 task_tools=read_only_tools(task_fetcher) if task else None,
+                agents=agents,
                 rules=permissions,
                 hooks=hooks,
                 checkpoints=checkpoints,
@@ -159,6 +162,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             permission_warnings=permission_warnings,
             commands=commands,
             skills=skills,
+            agents=agents,
             guard=guard,
             hooks=hooks,
             catalog=catalog if catalog is not None else FakeCatalog([model]),
