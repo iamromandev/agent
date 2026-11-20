@@ -52,7 +52,7 @@ from src.engine.guardrails.paths import (
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.setup import Hooks, hook_failed
 from src.engine.instructions import fingerprint, levels
-from src.engine.loop import close_recorder
+from src.engine.loop import NOT_SUMMARIZED, close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
 from src.engine.mcp.names import tool_name
 from src.engine.mentions import MentionNote, expand_mentions, note_text
@@ -87,6 +87,7 @@ from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
 from src.engine.usage import summary
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
+from src.tui.queue import MessageQueue, Queued, merge
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.diff import DiffScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
@@ -97,6 +98,7 @@ from src.tui.screens.usage import UsageScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
+from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar, display_path
 from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
@@ -123,7 +125,7 @@ async def _uninterrupted(work: Awaitable[None]) -> None:
 
 
 HELP = (
-    "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Esc interrupt · "
+    "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Enter during a turn queues the message (sent when it ends; Esc puts it back) · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
@@ -205,6 +207,9 @@ class AgentApp(App[None]):
         self._turn_active = False
         self._turn_entered = False  # the turn worker has run its first line
         self._draft: str | None = None  # the submitted message until the turn really starts sending it
+        self._queue = MessageQueue()  # messages typed while a turn runs, sent together when it ends `done`
+        self._interrupted = False  # Esc or ctrl+c landed while the turn or compaction was active: the queue is not sent
+        self._job_status: str | None = None  # how the running turn or compaction ended, once known
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
         self._undoing = False  # /undo is running: keys that act on a turn leave it alone
         self._switching = False  # a session is being loaded and drawn: no turn may start meanwhile
@@ -224,6 +229,7 @@ class AgentApp(App[None]):
         if self.terminals is not None:
             yield TerminalPane(self.terminals)
         yield TodoPanel(id="todos")
+        yield QueuePanel(id="queue")
         yield CommandSuggestions(id="suggestions")  # above the input
         yield PathSuggestions(id="path-suggestions")
         yield ChatInput(id="input")
@@ -912,6 +918,8 @@ class AgentApp(App[None]):
         self.workers.cancel_group(self, "turn")
         self.workers.cancel_group(self, "session-start")
         self.workers.cancel_group(self, "model-pick")  # only while the list loads: an open picker takes Esc itself
+        if self._turn_active:
+            self._interrupted = True  # also after `done`, while the worker still finishes (`/init`'s file check)
         if self._turn_active and not self._turn_entered:
             # Cancelled before its first line ran: the `finally` in `_turn` never will.
             self._end_turn()
@@ -923,15 +931,35 @@ class AgentApp(App[None]):
             chat.load_text(f"{text}\n{chat.text}" if chat.text else text)
             chat.move_cursor(chat.document.end)
 
+    def _queueing(self) -> bool:
+        """A message sent now waits for the running turn, `/init` or `/compact` (not for an undo or a session load)."""
+        return self._turn_active and not self._undoing and not self._switching
+
+    def _show_queue(self) -> None:
+        with contextlib.suppress(NoMatches):  # gone when the app is shutting down
+            self.query_one(QueuePanel).show(self._queue.entries)
+
     def _end_turn(self) -> None:
+        """Every turn and compaction ends here: a `done` end sends the queue as one turn, any other puts it back."""
         self._turn_active = False
-        if self._draft is not None:  # the turn ended before it sent the message
-            draft, self._draft = self._draft, None
-            self._restore_draft(draft)
+        done = self._job_status == "done" and not self._interrupted
+        self._job_status = None
+        self._interrupted = False
+        queued = self._queue.take()
+        draft, self._draft = self._draft, None  # set when the turn ended before it sent the message
         with contextlib.suppress(NoMatches):  # the status bar is gone when the app is shutting down
-            status = self.query_one(StatusBar)
-            status.busy = False
-            status.compacting = False
+            self.query_one(StatusBar).compacting = False
+        if queued and done and draft is None and not self._shutting_down:
+            self._show_queue()
+            merged = merge(queued)
+            self._begin_turn(merged.prompt, merged.draft, label=merged.label)  # busy stays on
+            return
+        back = [text for text in (draft, merge(queued).draft if queued and not self._shutting_down else None) if text]
+        if back:
+            self._restore_draft("\n".join(back))
+        self._show_queue()
+        with contextlib.suppress(NoMatches):
+            self.query_one(StatusBar).busy = False
 
     # turns
 
@@ -939,6 +967,11 @@ class AgentApp(App[None]):
         text = event.text
         if text.strip().startswith("/"):
             await self._command(text)
+            return
+        if self._queueing():
+            if text.strip():
+                self._queue.add(Queued(text, text, None))
+                self._show_queue()
             return
         if await self._refuse_if_busy(text):
             return
@@ -956,6 +989,8 @@ class AgentApp(App[None]):
     def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> None:
         """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
         self._turn_active = True
+        self._job_status = None
+        self._interrupted = False
         self._cancel_diff()
         self._draft = draft
         self.query_one(StatusBar).busy = True
@@ -1045,6 +1080,8 @@ class AgentApp(App[None]):
                     await transcript.add_notice("warn", self._busy_text("/compact"))
                     return
                 self._turn_active = True
+                self._job_status = None
+                self._interrupted = False
                 self._cancel_diff()
                 self._turn_entered = False
                 self.query_one(StatusBar).busy = True
@@ -1075,11 +1112,16 @@ class AgentApp(App[None]):
                 if custom is None:
                     await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
                     return
-                if await self._refuse_if_busy(original):
+                queueing = self._queueing()
+                if not queueing and await self._refuse_if_busy(original):
                     return
                 prompt = custom.expand(rest)
                 if not prompt.strip():
                     await transcript.add_notice("warn", f"{name} is empty")
+                    return
+                if queueing:
+                    self._queue.add(Queued(original, prompt, f"{name} ({custom.source})"))
+                    self._show_queue()
                     return
                 self._begin_turn(prompt, draft=original, label=f"{name} ({custom.source})")
 
@@ -1347,23 +1389,38 @@ class AgentApp(App[None]):
     async def _compact(self) -> None:
         self._turn_entered = True
         try:
-            await self._run_with_events(self.agent.compact)
+            failed = False
+
+            async def work(emit: EventSink) -> None:
+                def watch(event: AgentEvent) -> None:
+                    nonlocal failed
+                    failed = failed or event == Notice("warn", NOT_SUMMARIZED)
+                    emit(event)
+
+                await self.agent.compact(watch)
+
+            if await self._run_with_events(work) and not failed:  # a failed summary is not a finished compaction
+                self._job_status = "done"
         finally:
             self._end_turn()
 
-    async def _run_with_events(self, work: Callable[[EventSink], Awaitable[None]]) -> None:
-        """Run an agent job (a turn, a compaction) with its events applied to the widgets in order."""
+    async def _run_with_events(self, work: Callable[[EventSink], Awaitable[None]]) -> bool:
+        """Run an agent job (a turn, a compaction) with its events applied to the widgets in order.
+        False when the agent was busy and the job did not run."""
         # The loop's sink is synchronous; a consumer task applies the events to the widgets in order.
         events: asyncio.Queue[AgentEvent | None] = asyncio.Queue()
         consumer = asyncio.create_task(self._consume(events))
+        ran = True
         try:
             await work(events.put_nowait)
         except AgentBusy:
+            ran = False
             events.put_nowait(Notice("warn", "busy — a turn is already running"))
         finally:
             # Whatever ended the job, the queued events still reach the transcript, and a
             # repeated Esc must not cut that short.
             await _uninterrupted(self._finish_turn(events, consumer))
+        return ran
 
     async def _finish_turn(self, events: asyncio.Queue[AgentEvent | None], consumer: asyncio.Task[None]) -> None:
         events.put_nowait(None)
@@ -1419,6 +1476,7 @@ class AgentApp(App[None]):
                 status.window = window
                 status.estimated = estimated
             case TurnEnded(turn_status):
+                self._job_status = turn_status
                 self._reindex()
                 status.pending_mode = False
                 await transcript.end_assistant()

@@ -7,6 +7,7 @@ from src.engine.commands.loader import Command, Commands
 from src.engine.mode import Mode
 from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.widgets.chat_input import ChatInput
+from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
@@ -78,20 +79,23 @@ def _commands(*commands: Command, warnings: tuple[str, ...] = ()) -> Commands:
     return Commands({c.name: c for c in commands}, warnings)
 
 
-async def test_a_custom_command_is_refused_while_a_turn_runs_and_keeps_the_draft(make_app: AppFactory) -> None:
+async def test_a_custom_command_is_queued_while_a_turn_runs_and_runs_after_it(make_app: AppFactory) -> None:
     gate = Gate()
-    app = make_app([[gate]], commands=_commands(Command("x", "Do X", None, "global")))
+    app = make_app([[gate], REPLY], commands=_commands(Command("x", "Do X: $ARGUMENTS", None, "global")))
     async with app.run_test() as pilot:
         await type_and_send(pilot, "first")
         await reached(gate)
         await type_and_send(pilot, "/x now")
         await pilot.pause()
 
-        assert any("busy" in n for n in _notices(app))
-        assert app.query_one(ChatInput).text == "/x now"
+        assert not any("busy" in n for n in _notices(app))
+        assert app.query_one(QueuePanel).plain == "queued: /x now"
+        assert app.query_one(ChatInput).text == ""
         gate.release.set()
         await settled(app)
-        assert len(scripted(app).requests) == 1
+        await pilot.pause()
+        assert len(scripted(app).requests) == 2
+        assert scripted(app).requests[1][0][-1].content == "Do X: now"
 
 
 async def test_an_empty_custom_command_warns_and_starts_no_turn(make_app: AppFactory) -> None:
