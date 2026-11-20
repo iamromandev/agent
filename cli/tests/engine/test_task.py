@@ -188,12 +188,12 @@ async def test_ac6_an_agent_without_tools_gets_todays_child_tools(ctx: ToolConte
 
 
 async def test_ac5_the_listed_tools_are_taken_in_order_and_unavailable_ones_dropped(ctx: ToolContext) -> None:
-    tools = ("grep", "web_fetch", "read", "write")  # no fetcher; write is a Phase 2 tool
+    tools = ("grep", "web_fetch", "read", "write")  # no fetcher: web_fetch is dropped, write is the parent's own
     agent, provider, _ = _make(
         ctx, [_agent_task("a"), _say("r"), _say("done")], agents=_agents(_def("a", tools=tools))
     )
     await _run(agent)
-    assert provider.requests[1][1] == ["grep", "read"]
+    assert provider.requests[1][1] == ["grep", "read", "write"]
 
 
 async def test_a_custom_agent_with_no_valid_tools_gets_none(ctx: ToolContext) -> None:

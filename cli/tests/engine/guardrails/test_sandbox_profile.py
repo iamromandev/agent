@@ -144,3 +144,10 @@ def test_a_workspace_that_is_the_home_folder_or_holds_a_protected_folder_is_a_wa
         _, warning = make(GuardConfig(), workspace, home)
 
         assert warning is not None and "workspace" in warning and ".ssh" in warning, workspace
+
+
+def test_the_profile_denies_writes_to_the_agent_files_folder(workspace: Path, home: Path, fake_exec: Path) -> None:
+    sandbox, _ = make(GuardConfig(), workspace, home)
+
+    assert sandbox.profile is not None
+    assert f'(subpath "{workspace / ".agent" / "agents"}")' in sandbox.profile

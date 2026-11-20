@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -221,3 +222,16 @@ async def test_a_protected_read_dialog_names_the_path_and_offers_only_allow_once
         assert _option_ids(screen) == ["once", "deny"]
         line = str(screen.query_one("#protected", Static).visual)
         assert line == f"Protected path: {(home / '.ssh' / 'config').resolve()}"
+
+
+async def test_a_subagent_request_names_the_escaped_subagent(make_app: AppFactory, tmp_path: Path) -> None:
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+        assert not screen.query("#subagent")  # the main agent's own request has no line
+
+        shown = ApprovalScreen(replace(screen.request, subagent="tests\x1b[31m"))
+        await app.push_screen(shown)
+        await pilot.pause()
+        assert str(shown.query_one("#subagent", Static).visual) == "Subagent: tests\\x1b[31m"

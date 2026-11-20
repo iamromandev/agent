@@ -64,3 +64,38 @@ async def test_it_is_refused_while_a_turn_runs(workspace: Path, tmp_path: Path) 
 
     with pytest.raises(AgentBusy):
         await agent.last_turn_diff()
+
+
+async def test_a_custom_agents_write_and_edit_are_listed_with_checkpoints_off(workspace: Path, tmp_path: Path) -> None:
+    from pathlib import Path as _P
+
+    from src.engine.agents.loader import AgentDef, Agents
+    from src.engine.tools import read_only_tools
+
+    (workspace / "a.py").write_text("print('hi')\n")
+    defn = AgentDef("w", "w agent", "You are w.", ("write", "edit"), None, None, "project", _P("/x/w.md"))
+
+    def call(call_id: str, name: str, **args: object) -> list[ProviderEvent | Gate]:
+        return [ToolCallEvent(ToolCall(call_id, name, dict(args))), Done(1, 1)]
+
+    script: list[list[ProviderEvent | Gate]] = [
+        call("t1", "task", description="d", prompt="p", agent="w"),
+        call("w1", "write", path="n.txt", content="made\n"),
+        call("e1", "edit", path="a.py", old_string="hi", new_string="bye"),
+        [TextDelta("report"), Done(1, 1)],
+        done(),
+    ]
+    agent = Agent(
+        ScriptedProvider(script, context_window=100_000),
+        default_tools(),
+        RecordingApprover([Decision(Choice.ONCE)] * 2),
+        ToolContext(workspace=workspace, bash_timeout=5.0),
+        25,
+        today=lambda: date(2026, 11, 12),
+        recorder=MemoryRecorder(),
+        task_tools=read_only_tools(None),
+        agents=Agents({"w": defn}, ()),
+    )
+    await agent.run_turn("go", lambda event: None)
+
+    assert sorted(await paths(agent)) == ["a.py", "n.txt"]

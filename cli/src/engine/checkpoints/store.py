@@ -28,7 +28,7 @@ BLOB_LIMIT = 128 * 1024 * 1024  # content `read_blobs` holds at once (git's outp
 ATTRIBUTES = "* -filter -text -eol -ident -working-tree-encoding diff -merge\n"
 READ_CHUNK = 64 * 1024
 AGENT_FILES = frozenset({".agent/settings.json", ".agent/mcp.json"})
-AGENT_FOLDERS = (".agent/commands/", ".agent/skills/")
+AGENT_FOLDERS = (".agent/agents/", ".agent/commands/", ".agent/skills/")
 OFF_SUFFIX = "/undo restores write/edit changes only"
 MAX_NESTING = 8  # nested repositories inside nested repositories
 

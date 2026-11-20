@@ -5,7 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import TYPE_CHECKING, Any, ClassVar
 
-from src.engine.agents.loader import AgentDef, Agents
+from src.engine.agents.loader import AGENT_TOOLS, AgentDef, Agents
 from src.engine.events import AgentEvent, AssistantText, Notice, TurnEnded, UsageUpdate
 from src.engine.hooks.setup import Hooks
 from src.engine.text import escape, escape_display
@@ -80,10 +80,14 @@ class TaskTool(Tool):
 
         return Prepared(None, execute)
 
-    def _agent_tools(self, defn: AgentDef | None) -> list[Tool]:
+    def agent_pool(self, defn: AgentDef | None) -> list[Tool]:
+        """The tools a child runs with. A custom agent's names are looked up first among the parent's own tool
+        instances that agents may use (so `write`, `edit` and `bash` are the very ones the parent's gates and sandbox
+        wrap), then among the read-only set; a name neither has is dropped silently."""
         if defn is None or defn.tools is None:
             return self._tools
         pool = {t.name: t for t in self._tools}
+        pool.update({t.name: t for t in self._parent.tools if t.name in AGENT_TOOLS})
         return [pool[name] for name in defn.tools if name in pool]
 
     async def _run(self, prompt: str, progress: Any, defn: AgentDef | None = None) -> ToolResult:
@@ -93,7 +97,7 @@ class TaskTool(Tool):
         header = REPORT_HEADER if defn is None else AGENT_REPORT_HEADER.format(name=defn.name)
         child = Agent(
             parent.provider,
-            self._agent_tools(defn),
+            self.agent_pool(defn),
             parent.approver,
             dataclasses.replace(parent.ctx, journal=None, progress=None),
             self._max_steps,
@@ -104,11 +108,16 @@ class TaskTool(Tool):
             instructions_share=parent.instructions_share,
             role="task",
             rules=parent.rules,  # one set of rules for both: a deny on `read` stops the subagent too
-            hooks=Hooks.empty(),  # the child's own calls are not hooked; the parent's `task` call is
+            # A custom child's tool calls run the parent's PreToolUse/PostToolUse hooks (its run_turn never runs the
+            # others); the built-in child stays unhooked. The parent's `task` call is hooked either way.
+            hooks=Hooks.empty() if defn is None else parent.hooks,
             subagent="" if defn is None else defn.name,
             role_prompt=None if defn is None else defn.prompt,
+            mode_source=None if defn is None else lambda: parent.mode,
+            undo=None if defn is None else parent.undo_log,  # its write/edit changes belong to the parent's turn
         )
-        child.mode = parent.mode
+        if defn is None:
+            child.mode = parent.mode
         child.grants = parent.grants  # one set of "Always" answers for both
         status = "done"
         tokens = 0

@@ -129,6 +129,18 @@ def _make_git_link(workspace: Path) -> str:
     return "link/config"
 
 
+@pytest.mark.parametrize("path", [".agent/agents/x.md", ".AGENT/Agents/x.md"])
+async def test_the_agent_files_folder_asks_without_always_in_edits_mode(
+    ctx: ToolContext, workspace: Path, path: str
+) -> None:
+    agent, _, approver = _agent(ctx, [_call("c1", "write", path=path, content="x\n"), _done()], [DENY])
+
+    await _run(agent)
+
+    _asks_without_always(approver)
+    assert not (workspace / path).exists()
+
+
 @pytest.mark.parametrize("path", [".agent/settings.json"])
 async def test_the_agent_config_files_ask_without_always(ctx: ToolContext, workspace: Path, path: str) -> None:
     agent, _, approver = _agent(ctx, [_call("c1", "write", path=path, content="{}\n"), _done()], [DENY])
