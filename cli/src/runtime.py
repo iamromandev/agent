@@ -5,6 +5,7 @@ UI-free (no Textual): `src.tui.run` builds the app from a `Runtime`, `src.headle
 from __future__ import annotations
 
 import asyncio
+import builtins
 import os
 import platform
 import sys
@@ -15,7 +16,6 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.client import OllamaClient, SearxClient, WebClient
-    from src.client.ollama import OllamaCatalog
     from src.config.settings import Settings
     from src.engine import Agent
     from src.engine.agents.loader import Agents
@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from src.engine.mcp.setup import McpSetup
     from src.engine.permissions.setup import PermissionSetup
     from src.engine.provider.base import SwitchableProvider
+    from src.engine.provider.models import ModelCatalog, ModelInfo
     from src.engine.session import Recorder, SessionStore
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
@@ -72,7 +73,7 @@ class Runtime:
     commands: Commands
     skills: Skills
     agents: Agents
-    catalog: OllamaCatalog
+    catalog: ModelCatalog
     model_notices: list[str]
     warnings: tuple[str, ...]
     close: Callable[[], Awaitable[None]]
@@ -89,6 +90,30 @@ class Runtime:
     def abort(self) -> None:
         """Close the web and search clients of a launch that failed before it could be closed (no loop is running)."""
         _abort(self.web, self.search)
+
+
+class _ListOnce:
+    """A catalog whose `list()` asks once per launch (the launch model and the agents' models share the answer;
+    a `CatalogError` is kept too). A call that is cancelled or times out is not kept."""
+
+    def __init__(self, inner: ModelCatalog) -> None:
+        self._inner = inner
+        self._models: builtins.list[ModelInfo] | None = None
+        self._error: Exception | None = None
+
+    async def list(self) -> builtins.list[ModelInfo]:
+        if self._error is not None:
+            raise self._error
+        if self._models is None:
+            try:
+                self._models = await self._inner.list()
+            except Exception as error:
+                self._error = error
+                raise
+        return builtins.list(self._models)
+
+    async def context_length(self, name: str) -> int | None:
+        return await self._inner.context_length(name)
 
 
 def _abort(web: WebClient, search: SearxClient | None) -> None:
@@ -109,6 +134,7 @@ def build_runtime(
     connector: McpConnector | None = None,
     trust_project_mcp: bool = False,
     checkpoints: bool = False,
+    catalog: ModelCatalog | None = None,
 ) -> Runtime:
     """Read the settings files once and wire the run for `workspace` (a folder).
 
@@ -119,7 +145,7 @@ def build_runtime(
     trusted for this run (nothing is remembered). `checkpoints=True` (the app) snapshots the workspace around each turn for `/undo`."""
     from src.client import OllamaClient, SearxClient, WebClient
     from src.client.mcp import SdkConnector
-    from src.client.ollama import OllamaCatalog
+    from src.client.ollama import OllamaCatalog, OllamaUnreachable
     from src.config.settings import get_settings
     from src.engine import Agent
     from src.engine.agents.loader import load_agents
@@ -134,7 +160,7 @@ def build_runtime(
     from src.engine.mcp.trust import TrustStore, trust_store_path
     from src.engine.permissions import setup as permission_setup
     from src.engine.permissions.config import global_settings_path, project_settings_path
-    from src.engine.provider.models import SLOW_AFTER, launch_model, shown_name
+    from src.engine.provider.models import SHOW_TIMEOUT, SLOW_AFTER, CatalogError, launch_model, shown_name
     from src.engine.provider.ollama import OllamaProvider
     from src.engine.session import FileRecorder, SessionStore, sessions_root, workspace_dir
     from src.engine.skills.loader import load_skills
@@ -170,25 +196,35 @@ def build_runtime(
         def say_slow(name: str) -> None:  # before anything is drawn: the user is waiting on Ollama
             print(f"Asking Ollama about {shown_name(name)}…", file=sys.stderr, flush=True)
 
-        async def pick_model() -> tuple[str, int, list[str]]:
+        async def pick_model() -> tuple[str, int, list[str], Agents]:
             probe = OllamaClient(settings.ollama_url)
             try:
-                return await launch_model(
+                found = _ListOnce(catalog if catalog is not None else OllamaCatalog(probe))
+                chosen_model, chosen_window, notes = await launch_model(
                     settings,
                     model,
                     permissions.project_data,
-                    OllamaCatalog(probe),
+                    found,
                     notices=model_notices,
                     on_slow=say_slow,
                     slow_after=SLOW_AFTER,
                 )
+                installed: list[str] | None = None
+                if agents.needs_models():  # one listing, only when an agent file names a model
+                    try:
+                        installed = [m.name for m in await asyncio.wait_for(found.list(), SHOW_TIMEOUT)]
+                    except (CatalogError, TimeoutError, OllamaUnreachable):
+                        installed = None  # unknown: the names are taken as written
+                return chosen_model, chosen_window, notes, agents.with_models(installed)
             finally:
                 await probe.aclose()
 
         model_warnings: list[str] = []
         if provider is None:
-            chosen, window, model_warnings = asyncio.run(pick_model())
+            chosen, window, model_warnings, agents = asyncio.run(pick_model())
             provider = OllamaProvider(client, chosen, window)
+        else:
+            agents = agents.with_models(None)  # an injected provider: no catalog call
         run_provider = provider
         # Guardrails come from the same two settings files, already parsed: protected paths, the child environment, the sandbox.
         guard = prepare_guardrails(
@@ -285,7 +321,7 @@ def build_runtime(
             commands=commands,
             skills=skills,
             agents=agents,
-            catalog=OllamaCatalog(client),
+            catalog=catalog if catalog is not None else OllamaCatalog(client),
             model_notices=model_notices,
             warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,

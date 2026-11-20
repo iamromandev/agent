@@ -80,3 +80,15 @@ def test_a_custom_command_named_agents_is_skipped_as_a_built_in(tmp_path: Path) 
     commands = load_commands(tmp_path, BUILTINS, {"XDG_CONFIG_HOME": str(tmp_path / "none")})
     assert commands.get("agents") is None
     assert any("/agents is a built-in" in w for w in commands.warnings)
+
+
+async def test_agents_marks_a_model_that_is_not_installed(make_app: AppFactory) -> None:
+    import dataclasses
+
+    gone = dataclasses.replace(_agent("g", "d", model="m:9"), missing=True)
+    app = make_app(agents=_agents(gone))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/agents")
+        await pilot.pause()
+        (text,) = [n for n in _notices(app) if "(global)" in n]
+    assert "g (global) model m:9 (not installed): d" in text

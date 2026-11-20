@@ -482,6 +482,8 @@ class AgentApp(App[None]):
         for a in self.agents.sorted():
             shown = a.resolved_model or a.model
             model = f" model {escape_display(shown)}" if shown else ""
+            if a.missing:
+                model += " (not installed)"
             lines.append(f"{escape(a.name)} ({a.source}){model}: {escape_display(' '.join(a.description.split()))}")
             tools = READ_ONLY_TOOLS if a.tools is None else a.tools
             lines.append(f"  tools: {', '.join(tools) or 'none'}")

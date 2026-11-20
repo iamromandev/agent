@@ -196,3 +196,23 @@ def test_nfr3_fifty_files_load_fast(dirs, tmp_path: Path) -> None:
     agents = load_agents(tmp_path / "ws", env)
     assert time.perf_counter() - start < 0.2  # generous: the target is 20 ms on a quiet machine
     assert len(agents.by_name) == 50
+
+
+def test_with_models_caps_loader_and_model_warnings_once(dirs, tmp_path: Path) -> None:
+    glob, _, env = dirs
+    for i in range(25):
+        (glob / f"b{i}.md").write_text("nope")
+    (glob / "gone.md").write_text("---\ndescription: d\nmodel: missing\n---\nb")
+    resolved = load_agents(tmp_path / "ws", env).with_models(["other"])
+    assert len(resolved.warnings) == 21
+    assert resolved.warnings[-1] == "and 6 more warnings"
+    assert sum(w.startswith("and ") for w in resolved.warnings) == 1
+    assert resolved.with_models(["other"]).warnings == resolved.warnings
+
+
+def test_an_agents_built_directly_keeps_its_warnings_through_with_models() -> None:
+    from src.engine.agents.loader import Agents
+
+    agents = Agents({}, ("a.md: odd",))
+    assert agents.with_models(["x"]).warnings == ("a.md: odd",)
+    assert agents.with_models(None).warnings == ("a.md: odd",)

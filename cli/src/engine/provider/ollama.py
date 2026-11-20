@@ -72,6 +72,10 @@ class OllamaProvider:
         self.model = model
         self.context_window = num_ctx
 
+    def pinned(self, model: str) -> OllamaProvider:
+        """A provider for `model` on the same client and the current window; this one is unchanged."""
+        return OllamaProvider(self._client, model, self.context_window)
+
     def switch(self, model: str, context_window: int) -> None:
         """Use `model` with `context_window` from the next request on."""
         self.model = model

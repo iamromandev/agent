@@ -95,8 +95,12 @@ class TaskTool(Tool):
 
         parent = self._parent
         header = REPORT_HEADER if defn is None else AGENT_REPORT_HEADER.format(name=defn.name)
+        provider = parent.provider
+        pin = getattr(provider, "pinned", None)
+        if defn is not None and defn.resolved_model and defn.resolved_model != provider.model and pin is not None:
+            provider = pin(defn.resolved_model)  # the parent's provider is never switched
         child = Agent(
-            parent.provider,
+            provider,
             self.agent_pool(defn),
             parent.approver,
             dataclasses.replace(parent.ctx, journal=None, progress=None),

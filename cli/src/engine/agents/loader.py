@@ -36,12 +36,18 @@ class AgentDef:
     resolved_model: str | None  # set by `Agents.with_models`; None follows the parent's model
     source: Source
     path: Path
+    missing: bool = False  # `model:` was checked against the installed list and is not there
 
 
 @dataclass(frozen=True)
 class Agents:
     by_name: Mapping[str, AgentDef]
     warnings: tuple[str, ...]  # already escaped and capped
+    loader_warnings: tuple[str, ...] = ()  # the loader's own, escaped and not capped: `with_models` caps once
+
+    def __post_init__(self) -> None:
+        if not self.loader_warnings and self.warnings:  # built directly: what was given is all there is
+            object.__setattr__(self, "loader_warnings", self.warnings)
 
     @staticmethod
     def empty() -> Agents:
@@ -80,7 +86,6 @@ class Agents:
     def with_models(self, installed: list[str] | None) -> Agents:
         """A copy with each `model:` checked against the installed names (`None`: unknown, taken as written)."""
         found: dict[str, AgentDef] = {}
-        warnings = list(self.warnings)
         extra: list[str] = []
         for name, agent in self.by_name.items():
             if not agent.model:
@@ -90,17 +95,16 @@ class Agents:
             elif (match := installed_name(agent.model, installed)) is not None:
                 found[name] = dataclasses.replace(agent, resolved_model=match)
             else:
-                found[name] = agent
+                found[name] = dataclasses.replace(agent, missing=True)
                 extra.append(
                     escape(f"{agent.path}: model '{escape_display(agent.model)}' is not installed; using the session's model")
                 )
-        return Agents(found, _cap([*warnings, *extra], escaped=True))
+        return Agents(found, _cap([*self.loader_warnings, *extra], escaped=True), self.loader_warnings)
 
 
 def _cap(warnings: list[str], escaped: bool = False) -> tuple[str, ...]:
     shown = warnings if escaped else [escape(w) for w in warnings]
     if len(shown) > MAX_WARNINGS:
-        # An earlier "and N more warnings" line, if any, is already counted as one of the shown ones.
         shown = [*shown[:MAX_WARNINGS], f"and {len(shown) - MAX_WARNINGS} more warnings"]
     return tuple(shown)
 
@@ -195,4 +199,4 @@ def load_agents(workspace: Path, env: Mapping[str, str] = os.environ) -> Agents:
         warnings.append(f"{project}: a symlink is not followed in the project folder")
     else:
         _load_dir(project, "project", found, warnings)
-    return Agents(found, _cap(warnings))
+    return Agents(found, _cap(warnings), tuple(escape(w) for w in warnings))

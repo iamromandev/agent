@@ -162,3 +162,23 @@ def test_a_keyboard_interrupt_in_the_final_write_still_gives_one_result(
 
     obj = _one_result(capsys.readouterr().out)
     assert code == EXIT_OK and obj["exit_code"] == 0 and obj["stop_reason"] == "done"
+
+
+def test_a_custom_subagent_call_is_one_task_entry_with_its_agent_argument(
+    ws: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    folder = ws / ".agent" / "agents"
+    folder.mkdir(parents=True)
+    (folder / "w.md").write_text("---\ndescription: Reads\ntools: read\n---\nYou read.\n")
+    (ws / "a.txt").write_text("alpha")
+    provider = ScriptedProvider(
+        [call("task", "t1", description="d", prompt="p", agent="w"), call("read", "r1", path="a.txt"), say("report"), say("done")],
+        context_window=100_000,
+    )
+
+    code = go(ws, provider)
+
+    (obj,) = lines(capsys.readouterr().out)
+    assert code == 0 and obj["result"] == "done"
+    (entry,) = obj["tool_calls"]  # the child's `read` is not listed
+    assert entry["name"] == "task" and entry["args"]["agent"] == "w"

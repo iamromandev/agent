@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import os
 from datetime import date
 from pathlib import Path
@@ -436,3 +437,75 @@ async def test_an_always_in_the_parent_covers_the_childs_next_identical_call(ctx
     agent, _, approver = _make(ctx, script, [ALWAYS])
     await _run(agent)
     assert len(approver.requests) == 1 and approver.requests[0].subagent == ""
+
+
+# Step 12: a pinned model for the child (AC16, AC17)
+
+class _PinningProvider(ScriptedProvider):
+    """A scripted provider that can hand out a provider for another model, recording each one it made."""
+
+    def __init__(self, script: Script, child_script: Script) -> None:
+        super().__init__(script, model="main", context_window=100_000)
+        self.child_script = child_script
+        self.made: list[ScriptedProvider] = []
+
+    def pinned(self, model: str) -> ScriptedProvider:
+        child = ScriptedProvider(self.child_script, model=model, context_window=self.context_window)
+        self.made.append(child)
+        return child
+
+
+def _pinned_agent(ctx: ToolContext, resolved: str | None, provider: ScriptedProvider) -> Agent:
+    defn = dataclasses.replace(_def("w", ("read",)), model=resolved, resolved_model=resolved)
+    return Agent(
+        provider,
+        default_tools(),
+        RecordingApprover(),
+        ctx,
+        25,
+        today=lambda: date(2026, 11, 14),
+        recorder=MemoryRecorder(),
+        task_tools=read_only_tools(None),
+        agents=Agents({"w": defn}, ()),
+    )
+
+
+async def test_ac16_a_child_with_a_resolved_model_runs_on_a_pinned_provider(ctx: ToolContext) -> None:
+    provider = _PinningProvider([_delegate(), _say("done")], [_say("report")])
+    agent = _pinned_agent(ctx, "other:1b", provider)
+    await _run(agent)
+    assert [p.model for p in provider.made] == ["other:1b"]
+    assert provider.made[0].used == [("other:1b", 100_000)]
+    assert [m for m, _ in provider.used] == ["main", "main"]  # the parent never switched
+    assert "report" in _tool_message(agent, "t1")
+
+
+async def test_ac16_a_resolved_model_equal_to_the_parents_keeps_the_parents_provider(ctx: ToolContext) -> None:
+    provider = _PinningProvider([_delegate(), _say("report"), _say("done")], [])
+    agent = _pinned_agent(ctx, "main", provider)
+    await _run(agent)
+    assert provider.made == []
+    assert len(provider.used) == 3
+
+
+async def test_ac17_without_a_resolved_model_or_a_pinned_method_the_parents_provider_is_used(ctx: ToolContext) -> None:
+    provider = _PinningProvider([_delegate(), _say("report"), _say("done")], [])
+    await _run(_pinned_agent(ctx, None, provider))
+    assert provider.made == [] and len(provider.used) == 3
+
+    plain = ScriptedProvider([_delegate(), _say("report"), _say("done")], context_window=100_000)
+    agent = _pinned_agent(ctx, "other:1b", plain)
+    await _run(agent)
+    assert len(plain.used) == 3 and "report" in _tool_message(agent, "t1")
+
+
+async def test_ac17_a_model_switch_between_two_child_runs_is_seen_by_the_second(ctx: ToolContext) -> None:
+    plain = ScriptedProvider(
+        [_delegate(), _say("r1"), _say("d1"), _call("t2", "task", description="w", prompt="p", agent="w"), _say("r2"), _say("d2")],
+        context_window=100_000,
+    )
+    agent = _pinned_agent(ctx, None, plain)
+    await _run(agent, "one")
+    plain.switch("new:2b", 100_000)
+    await _run(agent, "two")
+    assert plain.used[1][0] == "fake" and plain.used[-2][0] == "new:2b"
