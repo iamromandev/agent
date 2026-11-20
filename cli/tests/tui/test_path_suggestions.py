@@ -235,7 +235,7 @@ async def test_tab_with_the_list_closed_still_toggles_the_mode(make_app: AppFact
     async with app.run_test() as pilot:
         await indexed(app, pilot)
         await pilot.press(*"hello")
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         assert app.agent.mode is Mode.PLAN
 
 

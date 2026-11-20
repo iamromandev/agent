@@ -90,7 +90,7 @@ async def test_plan_mode_bash_offers_only_allow_once_and_deny(make_app: AppFacto
     call = ToolCall("b1", "bash", {"command": "ls"})
     app = make_app([[ToolCallEvent(call), Done(1, 1)], [TextDelta("done"), Done(1, 1)]])
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         screen = await _open_dialog(app, pilot)
 
         assert _option_ids(screen) == ["once", "deny"]
@@ -182,7 +182,7 @@ async def test_plan_mode_bash_dialog_also_starts_on_deny(make_app: AppFactory) -
     call = ToolCall("b1", "bash", {"command": "ls"})
     app = make_app([[ToolCallEvent(call), Done(1, 1)]])
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         screen = await _open_dialog(app, pilot)
 
         assert _option_ids(screen) == ["once", "deny"]
@@ -233,7 +233,7 @@ async def test_plan_mode_bash_up_then_enter_allows_once(make_app: AppFactory) ->
     call = ToolCall("b1", "bash", {"command": "echo hello-from-bash"})
     app = make_app([[ToolCallEvent(call), Done(1, 1)], [TextDelta("done"), Done(1, 1)]])
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         await _open_dialog(app, pilot)
         await pilot.press("up", "enter")
         await settled(app)
@@ -409,7 +409,7 @@ async def test_always_here_is_not_offered_in_plan_mode(make_app: AppFactory, tmp
     call = ToolCall("b1", "bash", {"command": "ls"})
     app = make_app([[ToolCallEvent(call), Done(1, 1)]], permissions=_rules(tmp_path))
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         screen = await _open_dialog(app, pilot)
 
         assert _option_ids(screen) == ["once", "deny"]

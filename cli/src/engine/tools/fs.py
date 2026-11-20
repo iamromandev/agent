@@ -152,7 +152,7 @@ class WriteTool(Tool):
             lines = len(content.splitlines())
             return ToolResult(f"wrote {lines} lines to {raw}", summary=f"{lines} lines")
 
-        return Prepared(preview, execute)
+        return Prepared(preview, execute, target=path)
 
 
 def _refuse_placeholder(argument: str) -> ToolResult:
@@ -265,7 +265,7 @@ class EditTool(Tool):
                 )
             return ToolResult(f"replaced {replaced} occurrence(s) in {raw}", summary=f"{replaced} replaced")
 
-        return Prepared(preview, execute)
+        return Prepared(preview, execute, target=path)
 
 
 def _read_strict(path: Path) -> str:

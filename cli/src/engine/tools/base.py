@@ -54,6 +54,9 @@ class Preview:
 class Prepared:
     preview: Preview | None
     execute: Callable[[], Awaitable[ToolResult]]
+    # write/edit: the file `prepare` resolved and checked (workspace, protected paths) and `execute` writes; the
+    # approval step decides from it instead of resolving the argument again. None for every other tool.
+    target: Path | None = None
 
 
 class Tool(ABC):

@@ -9,12 +9,13 @@ from src.engine.mode import Mode
 from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.engine.session import SessionStore, sessions_root
 from src.tui import app as app_module
+from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, UserEntry
 
 from tests.fakes import Gate, MemoryRecorder
-from tests.tui.conftest import AppFactory, reached, scripted, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, reached, scripted, settled, type_and_send, until
 
 
 def _notices(app) -> list[str]:
@@ -110,7 +111,7 @@ async def test_clear_and_new_empty_transcript_history_and_usage_and_start_a_new_
 ) -> None:
     app = make_app([[TextDelta("hello"), Done(40, 10)]])
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         await type_and_send(pilot, "hi")
         await settled(app)
         await pilot.pause()
@@ -222,7 +223,7 @@ async def test_a_mode_toggle_mid_turn_shows_next_request_until_it_applies(
         status = app.query_one(StatusBar)
         await type_and_send(pilot, "go")
         await reached(gate)
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         assert status.line.startswith("PLAN (next request)")
         assert app.agent.mode is Mode.PLAN
 
@@ -234,6 +235,40 @@ async def test_a_mode_toggle_mid_turn_shows_next_request_until_it_applies(
         first_tools, second_tools = (tools for _, tools in scripted(app).requests)
         assert "edit" in first_tools
         assert "edit" not in second_tools
+
+
+async def test_tab_during_a_step_shows_edits_pending_and_applies_from_the_next_request(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    gate = Gate()
+    write = ToolCallEvent(ToolCall("w1", "write", {"path": "n.txt", "content": "x\n"}))
+    app = make_app([[gate, write, Done(1, 1)], [TextDelta("second"), Done(1, 1)]])
+    async with app.run_test() as pilot:
+        status = app.query_one(StatusBar)
+        await type_and_send(pilot, "go")
+        await reached(gate)
+        await pilot.press("tab")
+        assert status.line.startswith("EDITS (next request)")
+        gate.release.set()
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))  # this step still asks as in build mode
+        await choose(pilot, "once")
+        await settled(app)
+        await pilot.pause()
+
+        assert status.line.startswith("EDITS ·")
+
+
+@pytest.mark.parametrize("command", ["/new", "/clear"])
+async def test_new_and_clear_after_the_edits_mode_return_to_build(make_app: AppFactory, command: str) -> None:
+    app = make_app([])
+    async with app.run_test() as pilot:
+        await pilot.press("tab")
+        assert app.query_one(StatusBar).line.startswith("EDITS")
+        await type_and_send(pilot, command)
+        await pilot.pause()
+
+        assert app.agent.mode is Mode.BUILD
+        assert app.query_one(StatusBar).line.startswith("BUILD")
 
 
 async def test_a_message_refused_while_busy_stays_in_the_input(make_app: AppFactory) -> None:

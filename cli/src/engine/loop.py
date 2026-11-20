@@ -42,6 +42,7 @@ from src.engine.events import (
     TurnEnded,
     UsageUpdate,
 )
+from src.engine.guardrails.paths import strip_firmlink
 from src.engine.guardrails.redact import drop_partial_tail
 from src.engine.guardrails.setup import REDACTION_FAILED, guard_of
 from src.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed, notice_text
@@ -90,6 +91,11 @@ from src.engine.usage import UsageRecord, UsageTotals
 # little after it is still seen whole; one that has no end in sight is replaced to the end of what is read. The rest of
 # the output is dropped before redaction, because redaction must not cost more than the model could ever see.
 REDACT_MARGIN = 4_000
+ACCEPTED_EDIT_TOOLS: frozenset[str] = frozenset({"write", "edit"})  # approved without a dialog in accept-edits mode
+# Workspace-relative names, case-folded: the config files no rule, grant or mode may approve, and the folders loaded
+# at launch without a trust prompt, which accept-edits mode leaves to the dialog too.
+AGENT_CONFIG_PARTS: frozenset[tuple[str, ...]] = frozenset({(".agent", "settings.json"), (".agent", "mcp.json")})
+AGENT_ASKING_PARTS: frozenset[tuple[str, ...]] = AGENT_CONFIG_PARTS | {(".agent", "commands"), (".agent", "skills")}
 DISPLAY_FACTOR = 4  # the display copy also holds colour codes, which do not count towards its limit
 PARTIAL_MARK = "\n[interrupted by user]"
 NOTHING_TO_COMPACT = "Nothing to compact"
@@ -148,6 +154,14 @@ def _truncate(output: str, hidden: int) -> str:
     output, dropped = drop_partial_tail(output)
     cut = max(len(output) - TOOL_OUTPUT_LIMIT, 0)
     return f"{output[:TOOL_OUTPUT_LIMIT]}\n[{hidden + dropped + cut} characters truncated]"
+
+
+def _relative_parts(path: Path, folder: Path) -> tuple[str, ...] | None:
+    """`path`'s parts below `folder`, case-folded, comparing case-insensitively (APFS); None when it is not inside.
+    A leading macOS `/System/Volumes/Data` is dropped from both first: it is another spelling of the same place."""
+    parts = [p.casefold() for p in PurePath(strip_firmlink(str(path))).parts]
+    base = [p.casefold() for p in PurePath(strip_firmlink(str(folder))).parts]
+    return tuple(parts[len(base) :]) if parts[: len(base)] == base else None
 
 
 class Agent:
@@ -1093,20 +1107,57 @@ class Agent:
         except (OSError, ValueError) as exc:  # RuleError is a ValueError
             emit(Notice("warn", escape(f"could not save rule to .agent/settings.json: {exc}; allowed for this run only")))
 
-    def _edits_agent_config(self, tool: Tool, call: ToolCall) -> bool:
+    def _edits_agent_config(self, tool: Tool, call: ToolCall, target: Path | None = None) -> bool:
         """Does a write or edit target `.agent/settings.json` or `.agent/mcp.json` of the workspace? Those files
-        grant the agent its own permissions and processes: no rule, grant or "Always" may approve a change to them."""
-        raw = call.arguments.get("path")
-        if tool.name not in ("write", "edit") or not isinstance(raw, str):
+        grant the agent its own permissions and processes: no rule, grant or "Always" may approve a change to them.
+        `target` is the path the tool resolved and checked; without one the argument is resolved here. Names are
+        compared case-insensitively (APFS: `.AGENT/MCP.json` is the same file), and by identity when both exist."""
+        if tool.name not in ("write", "edit"):
             return False
-        try:
-            target = resolve_path(self.ctx, raw)
-        except InvalidPath:
-            return False
+        if target is None:
+            raw = call.arguments.get("path")
+            if not isinstance(raw, str):
+                return False
+            try:
+                target = resolve_path(self.ctx, raw)
+            except InvalidPath:
+                return False
+        if _relative_parts(target, self.ctx.workspace.resolve()) in AGENT_CONFIG_PARTS:
+            return True
         for protected in agent_config_files(self.ctx.workspace):
             if target == protected or (target.exists() and protected.exists() and target.samefile(protected)):
                 return True
         return False
+
+    def _accepts_edit(self, tool: Tool, prepared: Prepared, mode: Mode) -> bool:
+        """Accept-edits mode approves a write or edit without the dialog when the path the tool resolved and checked
+        (`Prepared.target`; none: ask) is in the workspace and is not under a `.git` segment, the agent config files,
+        `.agent/commands`, `.agent/skills` or the agent's own config, data and sessions folders (a workspace that holds
+        the home folder). Names are compared case-insensitively (APFS) and without a macOS `/System/Volumes/Data`
+        prefix; an existing file with more than one hard link (or one that cannot be checked) always asks. Never asked
+        for a guarded call."""
+        target = prepared.target
+        if mode is not Mode.EDITS or tool.name not in ACCEPTED_EDIT_TOOLS or target is None:
+            return False
+        workspace = self.ctx.workspace.resolve()
+        relative = _relative_parts(target, workspace)
+        if relative is None or ".git" in relative or relative[:2] in AGENT_ASKING_PARTS:
+            return False
+        folders = (workspace / ".agent" / "commands", workspace / ".agent" / "skills", *guard_of(self.ctx).own_folders)
+        for folder in folders:
+            try:
+                resolved = folder.resolve()  # a symlinked `.agent` or data folder: where it really is
+            except (OSError, RuntimeError):
+                return False
+            if _relative_parts(target, folder) is not None or _relative_parts(target, resolved) is not None:
+                return False
+        try:
+            links = target.stat().st_nlink  # the target is resolved: this is the file the tool will change
+        except FileNotFoundError:
+            return True  # a new file
+        except (OSError, ValueError):
+            return False
+        return links <= 1  # a hard-linked file may also be named inside one of the folders above: always ask
 
     def _protected_target(self, tool: Tool, call: ToolCall) -> Path | None:
         """The protected file a read, a glob with a wildcard-free pattern or a grep of one file names, as the file
@@ -1150,14 +1201,16 @@ class Agent:
         self, tool: Tool, call: ToolCall, prepared: Prepared, mode: Mode, emit: EventSink
     ) -> tuple[ToolResult, bool, bool]:
         """The result, whether it changed something, and whether the tool ran (False: the user said no)."""
-        # Order: deny rules (in `_run_tool_call`), allow rules, this launch's "Always", then the dialog. Neither
-        # rules nor grants approve anything in plan mode, nor a change to the agent's own settings files.
-        guarded = tool.needs_approval and self._edits_agent_config(tool, call)
+        # Order: deny rules (in `_run_tool_call`), allow rules, this launch's "Always", accept-edits mode for
+        # `write`/`edit`, then the dialog. Neither rules, grants nor accept-edits mode approve anything in plan
+        # mode (the last never applies there), nor a change to the agent's own settings files.
+        guarded = tool.needs_approval and self._edits_agent_config(tool, call, prepared.target)
         if tool.needs_approval and (
             guarded
             or not (
                 (mode is not Mode.PLAN and self.rules.allow(call.name, call.arguments, tool.grant_arg))
                 or self.grants.covers(call.name, call.arguments, mode, tool.grant_arg)
+                or self._accepts_edit(tool, prepared, mode)
             )
         ):
             allow_always = mode is not Mode.PLAN and not guarded

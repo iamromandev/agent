@@ -116,6 +116,7 @@ async def test_toggling_the_mode_while_the_scan_is_held_refuses_the_plan_turn(
         sending = asyncio.create_task(type_and_send(pilot, "/init"))
         await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
         app.action_toggle_mode()  # the UI still handles keys while the scan runs in its thread
+        app.action_toggle_mode()  # build -> edits -> plan
         assert app.agent.mode is Mode.PLAN
         release.set()
         await sending

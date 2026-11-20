@@ -120,6 +120,22 @@ async def test_tab_in_the_picker_does_not_change_the_mode(make_app: AppFactory, 
         assert app.agent.mode is Mode.BUILD
 
 
+async def test_switching_from_the_edits_mode_returns_to_build(make_app: AppFactory, three_sessions: list[Path]) -> None:
+    app = make_app()
+    async with app.run_test() as pilot:
+        await pilot.press("tab")
+        assert app.agent.mode is Mode.EDITS
+        await _open_picker(app, pilot)
+        await pilot.press("down")
+        await pilot.press("enter")
+        await settled(app)
+        await pilot.pause()
+
+        assert [e.text for e in app.query(UserEntry)] == ["second question"]
+        assert app.agent.mode is Mode.BUILD
+        assert app.query_one(StatusBar).line.startswith("BUILD")
+
+
 async def test_sessions_with_none_saved_shows_a_notice(make_app: AppFactory) -> None:
     app = make_app()
     async with app.run_test() as pilot:

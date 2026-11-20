@@ -779,7 +779,7 @@ class AgentApp(App[None]):
             await self.query_one(Transcript).add_notice("info", f"terminal {message.name} started · ctrl+t to show")
 
     def action_toggle_mode(self) -> None:
-        self.agent.set_mode(Mode.PLAN if self.agent.mode is Mode.BUILD else Mode.BUILD)
+        self.agent.set_mode(self.agent.mode.next())
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
         if self._turn_active and not self._undoing:  # a step already running keeps the mode it started with

@@ -183,11 +183,23 @@ async def test_init_is_refused_while_a_session_loads(make_app: AppFactory) -> No
             app._switching = False
 
 
-async def test_init_is_refused_in_plan_mode(make_app: AppFactory) -> None:
+async def test_init_runs_in_the_edits_mode(make_app: AppFactory) -> None:
     app = make_app([REPLY])
     async with app.run_test() as pilot:
         await settled(app)
         await pilot.press("tab")
+        assert app.agent.mode is Mode.EDITS
+        await type_and_send(pilot, "/init")
+        await settled(app)
+
+        assert len(scripted(app).requests) == 1
+
+
+async def test_init_is_refused_in_plan_mode(make_app: AppFactory) -> None:
+    app = make_app([REPLY])
+    async with app.run_test() as pilot:
+        await settled(app)
+        await pilot.press("tab", "tab")
         assert app.agent.mode is Mode.PLAN
         await type_and_send(pilot, "/init")
         await pilot.pause()
@@ -275,6 +287,7 @@ async def test_tab_while_init_builds_its_prompt_refuses_the_plan_turn(
         sending = asyncio.create_task(type_and_send(pilot, "/init"))
         await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
         app.action_toggle_mode()  # what Tab runs; a real key press is queued behind the handler in the test pilot
+        app.action_toggle_mode()  # build -> edits -> plan
         assert app.agent.mode is Mode.PLAN
         release.set()
         await sending
@@ -346,7 +359,7 @@ async def test_tab_during_an_init_turn_is_pending_and_the_turn_completes(
         await settled(app)
         await type_and_send(pilot, "/init")
         await reached(gate)
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         assert app.query_one(StatusBar).pending_mode and app.agent.mode is Mode.PLAN
         gate.release.set()
         await settled(app)

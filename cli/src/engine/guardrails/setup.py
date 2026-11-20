@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import functools
+import os
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +14,7 @@ from src.engine.guardrails.config import GuardConfig, read_guardrails
 from src.engine.guardrails.env import EnvFilter
 from src.engine.guardrails.paths import ProtectedPaths, login_home
 from src.engine.guardrails.redact import Redactor, drop_partial_tail
-from src.engine.guardrails.sandbox import Sandbox, default_probe, make_sandbox
+from src.engine.guardrails.sandbox import Sandbox, agent_folders, default_probe, make_sandbox
 
 if TYPE_CHECKING:
     from src.engine.tools.base import Preview, ToolContext, ToolResult
@@ -33,6 +34,7 @@ class Guardrails:
     info: tuple[str, ...] = ()  # launch lines that are not warnings (the sandbox switched off in the settings)
     removed_env: tuple[str, ...] = ()  # names only, never values
     redactions: int = 0  # how many secrets were replaced in this run, for /guardrails
+    own_folders: tuple[Path, ...] = ()  # the agent's config, data and sessions folders (`agent_folders`), unresolved
 
     def redact_result(self, result: ToolResult) -> ToolResult:
         """`result` with secrets replaced in its output and its display copy.
@@ -78,8 +80,9 @@ class Guardrails:
     def off(cls, workspace: Path) -> Guardrails:
         """For tests and a `ToolContext` without a guard: built-in protected paths, the filter on, no sandbox, no
         scan of the workspace. Built once per home folder and process (the scan of the protected folders is not free,
-        and every tool call without a guard asks for one); each caller gets its own redaction counter."""
-        return dataclasses.replace(_off(Path.home()))
+        and every tool call without a guard asks for one); each caller gets its own redaction counter. The agent's
+        own folders come from this process's environment at each call (cheap: no file system access)."""
+        return dataclasses.replace(_off(Path.home()), own_folders=agent_folders(os.environ, Path.home()))
 
 
 @functools.lru_cache(maxsize=8)
@@ -145,7 +148,9 @@ def prepare(
             config, workspace, home_folder, env, system, probe or default_probe, sessions=sessions, protected=paths
         )
 
-    return _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None, sandbox_for)
+    guard = _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None, sandbox_for)
+    guard.own_folders = agent_folders(env, home_folder, sessions)  # the same folders the sandbox denies writes to
+    return guard
 
 
 def guard_of(ctx: ToolContext) -> Guardrails:

@@ -45,6 +45,12 @@ def test_plan_text_appears_only_in_plan_mode(tmp_path: Path) -> None:
     assert "PLAN mode" not in _prompt(tmp_path, Mode.BUILD)
 
 
+def test_edits_mode_is_named_and_has_no_plan_text(tmp_path: Path) -> None:
+    prompt = _prompt(tmp_path, Mode.EDITS)
+    assert "Mode: edits" in prompt
+    assert "PLAN mode" not in prompt
+
+
 def test_agents_md_is_included(tmp_path: Path) -> None:
     (tmp_path / "AGENTS.md").write_text("Use tabs\n")
     prompt = _prompt(tmp_path)

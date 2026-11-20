@@ -193,7 +193,7 @@ async def test_with_the_popup_closed_tab_toggles_the_mode_and_escape_interrupts(
     gate = Gate()
     app = make_app([[gate]], commands=_commands())
     async with app.run_test() as pilot:
-        await pilot.press("tab")
+        await pilot.press("tab", "tab")
         assert app.agent.mode is Mode.PLAN
         await pilot.press("tab")
         await pilot.press(*"hi")
