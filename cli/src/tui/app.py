@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import functools
+import os
 import re
 import signal
 import time
@@ -21,6 +22,8 @@ from textual.message import Message
 from textual.widgets import OptionList, Tabs, TextArea
 from textual.worker import WorkerCancelled
 
+from src.client import clipboard
+from src.client.clipboard import ClipboardError, ClipboardUnsupported, PasteFolder
 from src.engine import (
     Agent,
     AgentBusy,
@@ -61,6 +64,7 @@ from src.engine.mode import Mode
 from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_init_prompt
 from src.engine.provider.base import Image, SwitchableProvider
+from src.engine.provider.images import MAX_IMAGES, ImageError, describe, read_image_fd, size_text, sniff
 from src.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
@@ -96,6 +100,7 @@ from src.tui.screens.models import ModelPicker
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.screens.usage import UsageScreen
+from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
@@ -126,7 +131,7 @@ async def _uninterrupted(work: Awaitable[None]) -> None:
 
 
 HELP = (
-    "Enter send · ctrl+j / shift+enter new line · Tab switch BUILD/PLAN · Enter during a turn queues the message (sent when it ends; Esc puts it back) · Esc interrupt · "
+    "Enter send · ctrl+j / shift+enter new line · ctrl+v paste an image (macOS) · Esc on an empty input clears pasted images · Tab switch BUILD/PLAN · Enter during a turn queues the message (sent when it ends; Esc puts it back) · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
@@ -180,6 +185,7 @@ class AgentApp(App[None]):
         vision: VisionCheck | None = None,
         window_cap: int,
         launch_notices: Sequence[str] = (),
+        paste: PasteFolder | None = None,
     ) -> None:
         super().__init__()
         self._on_close = on_close
@@ -209,6 +215,8 @@ class AgentApp(App[None]):
         self._shutting_down = False
         self._turn_active = False
         self._turn_entered = False  # the turn worker has run its first line
+        self.paste = paste if paste is not None else PasteFolder(workspace)  # removed when the app quits
+        self._pending: list[tuple[Path, str, tuple[int, int, int, int]]] = []  # pasted images waiting: (file, chip label, identity)
         self._draft: str | None = None  # the submitted message until the turn really starts sending it
         self._queue = MessageQueue()  # messages typed while a turn runs, sent together when it ends `done`
         self._interrupted = False  # Esc or ctrl+c landed while the turn or compaction was active: the queue is not sent
@@ -233,6 +241,7 @@ class AgentApp(App[None]):
             yield TerminalPane(self.terminals)
         yield TodoPanel(id="todos")
         yield QueuePanel(id="queue")
+        yield AttachmentPanel(id="attachments")
         yield CommandSuggestions(id="suggestions")  # above the input
         yield PathSuggestions(id="path-suggestions")
         yield ChatInput(id="input")
@@ -718,6 +727,8 @@ class AgentApp(App[None]):
             await self._refuse_switch()
             return False
         self.query_one(TodoPanel).show(self.agent.todos)
+        self._pending.clear()  # pasted images belong to the old session
+        self._show_pending()
         await self._close_old(old)
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
@@ -784,6 +795,7 @@ class AgentApp(App[None]):
         self._shutting_down = True
         self.file_index.cancel()  # the build thread stops at its next check instead of walking on
         self.agent.close()
+        self.paste.remove()
         try:
             if self.mcp is not None:
                 await self.mcp.close_all()  # no server process outlives the app, whatever ended it
@@ -918,6 +930,10 @@ class AgentApp(App[None]):
     def interrupt_turn(self) -> None:
         if self._undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
             return
+        if self._pending and not self._turn_active and not self._switching and self._input_empty():
+            self._pending.clear()  # Esc on an empty input: only the pasted images go
+            self._show_pending()
+            return
         self.workers.cancel_group(self, "turn")
         self.workers.cancel_group(self, "session-start")
         self.workers.cancel_group(self, "model-pick")  # only while the list loads: an open picker takes Esc itself
@@ -926,6 +942,79 @@ class AgentApp(App[None]):
         if self._turn_active and not self._turn_entered:
             # Cancelled before its first line ran: the `finally` in `_turn` never will.
             self._end_turn()
+
+    def _input_empty(self) -> bool:
+        with contextlib.suppress(NoMatches):
+            return not self.query_one(ChatInput).text
+        return False
+
+    def _show_pending(self) -> None:
+        with contextlib.suppress(NoMatches):  # gone when the app is shutting down
+            self.query_one(AttachmentPanel).show([label for _, label, _ in self._pending])
+
+    async def on_chat_input_paste_image(self, event: ChatInput.PasteImage) -> None:
+        self.run_worker(self._paste_image(), group="paste")
+
+    async def _paste_image(self) -> None:
+        """ctrl+v: an image on the clipboard becomes a chip; anything else is the input's ordinary text paste."""
+        transcript = self.query_one(Transcript)
+        chat = self.query_one(ChatInput)
+        try:
+            if len(self._pending) >= MAX_IMAGES:
+                await transcript.add_notice("warn", f"not attached clipboard (image limit ({MAX_IMAGES} per message))")
+                return
+            try:
+                path = await clipboard.read_clipboard_image(self.paste.path())
+            except ClipboardUnsupported:
+                await transcript.add_notice("info", "clipboard images need macOS")
+            except ClipboardError as error:
+                await transcript.add_notice("warn", f"could not read the clipboard: {escape(error.reason)}")
+            else:
+                if path is not None:
+                    try:
+                        label, ident = await asyncio.to_thread(_label_and_identity, path)
+                    except OSError:
+                        _unlink(path)
+                        raise
+                    if len(self._pending) >= MAX_IMAGES:  # another paste filled the list while this one read
+                        _unlink(path)
+                        await transcript.add_notice("warn", f"not attached clipboard (image limit ({MAX_IMAGES} per message))")
+                        return
+                    self._pending.append((path, label, ident))
+                    self._show_pending()
+                    return
+            chat.action_paste()  # no image: today's text paste
+        except OSError as error:  # the paste folder or the file could not be used
+            with contextlib.suppress(NoMatches):
+                await transcript.add_notice("warn", f"could not read the clipboard: {escape(str(error))[:200]}")
+                chat.action_paste()
+        except NoMatches:
+            pass
+
+    async def _take_pasted(self) -> tuple[list[Image], list[str]]:
+        """The pending images, read now; the chips go. A file that is gone or no image is a warning."""
+        taken, self._pending = self._pending, []
+        self._show_pending()
+        images: list[Image] = []
+        warnings: list[str] = []
+        for path, _, ident in taken:
+            try:
+                if await asyncio.to_thread(_identity, path) != ident:
+                    warnings.append("not attached clipboard (file changed)")
+                    continue
+                image = await asyncio.to_thread(_read_pasted, path)
+            except FileNotFoundError:
+                warnings.append("not attached clipboard (file is gone)")
+            except ImageError as error:
+                warnings.append(f"not attached clipboard ({error.reason})")
+            except OSError:
+                warnings.append("not attached clipboard (unreadable)")
+            else:
+                if image is None:
+                    warnings.append("not attached clipboard (not an image)")
+                else:
+                    images.append(image)
+        return images, warnings
 
     def _restore_draft(self, text: str) -> None:
         """Put a message that was not sent back in the input, ahead of anything typed since."""
@@ -1040,6 +1129,8 @@ class AgentApp(App[None]):
                     await transcript.add_notice("warn", self._busy_text(name))
                     return
                 self.query_one(TodoPanel).show(self.agent.todos)
+                self._pending.clear()  # pasted images belong to the old session
+                self._show_pending()
                 self._switching = True  # no message is accepted until the notice is back in the new transcript
                 self._cancel_diff()
                 handed = False  # the worker that runs the SessionStart hook releases the claim
@@ -1326,6 +1417,8 @@ class AgentApp(App[None]):
         notes: tuple[MentionNote, ...] = ()
         images: tuple[Image, ...] = ()
         image_warnings: list[str] = []  # images that were not attached, and why
+        pasted_taken: list[tuple[Path, str, tuple[int, int, int, int]]] = []  # pending pasted images this turn took, given back if it never sends
+        pasted: list[Image] = []
 
         async def work(emit: EventSink) -> None:
             nonlocal started
@@ -1339,7 +1432,11 @@ class AgentApp(App[None]):
                 return
             if not init:  # /init's prompt is the app's own, not something the user sent
                 expansion = await asyncio.to_thread(expand_mentions, text, self.workspace, self.guard)
+                pasted_taken = list(self._pending)
+                pasted, pasted_warnings = await self._take_pasted()
+                expansion = replace(expansion, images=(*expansion.images, *pasted))
                 expansion, image_warnings = await apply_vision(expansion, self.vision, self.provider.model)
+                image_warnings = [*pasted_warnings, *image_warnings]
                 sent_text, notes, images = expansion.text, expansion.notes, expansion.images
                 decision = await self.agent.prompt_hooks(sent_text, hook_events.append)
                 if decision.blocked:  # the prompt is dropped: `_end_turn` puts it back in the box
@@ -1357,12 +1454,18 @@ class AgentApp(App[None]):
             await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
             for note in notes:
                 await transcript.add_notice("info" if note.attached else "warn", note_text(note))
+            for image in images:
+                if any(image is p for p in pasted):
+                    await transcript.add_notice("info", f"image clipboard ({describe(image)})")
             for warning in image_warnings:
                 await transcript.add_notice("warn", warning)
             self._finished_since_toggle = False
             status.pending_mode = False
             await self._run_with_events(work)
         finally:
+            if pasted_taken and not started:
+                self._pending[:0] = pasted_taken  # the agent never got the message: its images wait for the next one
+                self._show_pending()
             try:
                 if shown and not self._shutting_down:
                     with contextlib.suppress(Exception):
@@ -1493,3 +1596,34 @@ class AgentApp(App[None]):
                 await transcript.close_open_tools(turn_status.replace("_", " "))
                 if turn_status == "interrupted":
                     await transcript.add_notice("info", "interrupted", icon="⏹")
+
+
+def _chip_label(path: Path) -> str:
+    """`clipboard (PNG, 214 KB)` for a pasted file (its first bytes decide the format)."""
+    size = path.stat().st_size
+    with path.open("rb") as f:
+        fmt = sniff(f.read(12)) or "png"
+    return f"clipboard ({fmt.upper()}, {size_text(size)})"
+
+
+def _identity(path: Path) -> tuple[int, int, int, int]:
+    """What a pasted file was when it was added: a replaced or rewritten file differs."""
+    info = path.lstat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _label_and_identity(path: Path) -> tuple[str, tuple[int, int, int, int]]:
+    return _chip_label(path), _identity(path)
+
+
+def _unlink(path: Path) -> None:
+    with contextlib.suppress(OSError):
+        path.unlink()
+
+
+def _read_pasted(path: Path) -> Image | None:
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        return read_image_fd(fd, "clipboard")
+    finally:
+        os.close(fd)

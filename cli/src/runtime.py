@@ -9,6 +9,7 @@ import builtins
 import os
 import platform
 import sys
+import tempfile
 from collections.abc import Awaitable, Callable, Collection
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from src.client import OllamaClient, SearxClient, WebClient
+    from src.client.clipboard import PasteFolder
     from src.config.settings import Settings
     from src.engine import Agent
     from src.engine.agents.loader import Agents
@@ -79,10 +81,12 @@ class Runtime:
     model_notices: list[str]
     warnings: tuple[str, ...]
     close: Callable[[], Awaitable[None]]
+    paste: PasteFolder
 
     def kill_all(self) -> None:
         """Synchronous fallback once the loop is gone: whatever `close` did not stop is killed."""
         self.hook_runner.kill_all()  # nor a hook (a no-op once `close` ran)
+        self.paste.remove()  # pasted images (idempotent)
         if self.checkpoints is not None:
             self.checkpoints.close()  # idempotent: the shadow folder is gone after the first call
         self.mcp.kill_all()  # a server still running means `close` never ran, and its loop is gone
@@ -149,6 +153,8 @@ def build_runtime(
     (for tests), and so does `connector` for the MCP servers. `trust_project_mcp` treats the project's MCP file as
     trusted for this run (nothing is remembered). `checkpoints=True` (the app) snapshots the workspace around each turn for `/undo`."""
     from src.client import OllamaClient, SearxClient, WebClient
+    from src.client.clipboard import PasteFolder
+    from src.client.clipboard import prune_stale as prune_pastes
     from src.client.mcp import SdkConnector
     from src.client.ollama import OllamaCatalog, OllamaUnreachable
     from src.config.settings import get_settings
@@ -289,7 +295,11 @@ def build_runtime(
                 vision=vision,
             )
 
+        prune_pastes(Path(tempfile.gettempdir()), Path.home() / ".cache" / "agent")  # folders of dead runs
+        paste = PasteFolder(root)
+
         async def close() -> None:
+            paste.remove()
             hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
             if shadow is not None:
                 shadow.close()  # the run's shadow repository is deleted
@@ -335,6 +345,7 @@ def build_runtime(
             model_notices=model_notices,
             warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,
+            paste=paste,
         )
     except BaseException:
         _abort(web, search)  # setup failed before anyone could close them (no loop is running here)
