@@ -89,7 +89,7 @@ async def test_a_custom_command_is_queued_while_a_turn_runs_and_runs_after_it(ma
         await pilot.pause()
 
         assert not any("busy" in n for n in _notices(app))
-        assert app.query_one(QueuePanel).plain == "queued: /x now"
+        assert app.query_one(QueuePanel).plain == "/x now"
         assert app.query_one(ChatInput).text == ""
         gate.release.set()
         await settled(app)

@@ -107,8 +107,11 @@ async def test_a_slow_snapshot_turns_the_store_off_and_kills_the_git_group(
     bin_dir.mkdir()
     marker = tmp_path / "child.pid"
     script = bin_dir / "git"
-    script.write_text(f"#!/bin/sh\nsleep 30 &\necho $! > {marker}\nwait\n")
+    script.write_text(f'#!/bin/sh\n[ "$1" = --warm ] && exit 0\nsleep 30 &\necho $! > {marker}\nwait\n')
     script.chmod(0o755)
+    # macOS checks a newly written executable on its first exec (about 0.3 s, more under load), which could use up the
+    # 0.5 s timeout before the script wrote its marker; one run first makes the timed run start at once.
+    subprocess.run([script, "--warm"], check=True)
     store = make_store(workspace, data, {"PATH": f"{bin_dir}:/bin:/usr/bin"}, timeout=0.5)
 
     assert await store.snapshot() is None
