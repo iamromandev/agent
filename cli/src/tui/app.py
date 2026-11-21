@@ -94,6 +94,7 @@ from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
 from src.engine.usage import summary
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
+from src.tui.hints import MIN_ROWS, hint_text
 from src.tui.queue import MessageQueue, Queued, merge
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.diff import DiffScreen
@@ -105,6 +106,7 @@ from src.tui.screens.usage import UsageScreen
 from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import PLACEHOLDER, ChatInput, InputRow
 from src.tui.widgets.command_suggestions import CommandSuggestions
+from src.tui.widgets.key_hints import KeyHints
 from src.tui.widgets.path_suggestions import PathSuggestions
 from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar, display_path
@@ -247,6 +249,7 @@ class AgentApp(App[None]):
         yield CommandSuggestions(id="suggestions")  # above the input
         yield PathSuggestions(id="path-suggestions")
         yield InputRow(ChatInput(id="input", placeholder=PLACEHOLDER))
+        yield KeyHints(id="hints")
         yield StatusBar()
 
     def on_mount(self) -> None:
@@ -258,11 +261,40 @@ class AgentApp(App[None]):
         self.query_one(ChatInput).suggestions = self.query_one(CommandSuggestions)
         self.query_one(ChatInput).paths = self.query_one(PathSuggestions)
         self.query_one(ChatInput).focus()
+        self.watch(status, "busy", lambda _: self._refresh_hints(), init=False)
+        self._refresh_hints()
+        self._apply_height(self.size.height)
         self._reindex()
         self._stop_on_signals()
         self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
+
+    def _refresh_hints(self) -> None:
+        """Recompute the key-hints line; called wherever one of its inputs changes."""
+        try:
+            chat = self.query_one(ChatInput)
+            hints = self.query_one(KeyHints)
+            self.query_one(StatusBar)
+        except NoMatches:  # an early event, before `compose` finished
+            return
+        hints.show(
+            hint_text(
+                busy=self._queueing(),  # exactly when Esc interrupts and Enter queues
+                popup_open=chat.popup_open,
+                terminal_focused=isinstance(self.focused, TerminalView),
+                has_terminals=self.terminals is not None,
+            )
+        )
+
+    def _apply_height(self, rows: int) -> None:
+        try:
+            self.query_one(KeyHints).display = rows >= MIN_ROWS
+        except NoMatches:
+            return
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_height(event.size.height)
 
     async def _run_check(self) -> bool:
         """Ask the provider whether it is ready. Shows the problem; returns True when ready."""
@@ -1036,6 +1068,7 @@ class AgentApp(App[None]):
     def _end_turn(self) -> None:
         """Every turn and compaction ends here: a `done` end sends the queue as one turn, any other puts it back."""
         self._turn_active = False
+        self._refresh_hints()
         done = self._job_status == "done" and not self._interrupted
         self._job_status = None
         self._interrupted = False
@@ -1083,6 +1116,7 @@ class AgentApp(App[None]):
     def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> None:
         """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
         self._turn_active = True
+        self._refresh_hints()
         self._job_status = None
         self._interrupted = False
         self._cancel_diff()
@@ -1272,16 +1306,24 @@ class AgentApp(App[None]):
         if isinstance(event.text_area, ChatInput) and event.text_area.paths is not None:
             self._update_paths(event.text_area)  # a cursor move only changes the token; the command list reads the text
 
+    def on_command_suggestions_toggled(self, event: CommandSuggestions.Toggled) -> None:
+        self._refresh_hints()
+
+    def on_path_suggestions_toggled(self, event: PathSuggestions.Toggled) -> None:
+        self._refresh_hints()
+
     def on_descendant_blur(self, event: events.DescendantBlur) -> None:
         if isinstance(event.widget, ChatInput):
             if event.widget.suggestions is not None:
                 event.widget.suggestions.hide()  # the popup belongs to the focused input
             if event.widget.paths is not None:
                 event.widget.paths.hide()
+        self._refresh_hints()
 
     def on_descendant_focus(self, event: events.DescendantFocus) -> None:
         if isinstance(event.widget, ChatInput):
             self._update_suggestions(event.widget)
+        self._refresh_hints()
 
     def on_option_list_option_selected(self, event: OptionList.OptionSelected) -> None:
         if isinstance(event.option_list, CommandSuggestions):
@@ -1373,6 +1415,7 @@ class AgentApp(App[None]):
         self._cancel_diff()
         self._undoing = True
         status.busy = True
+        self._refresh_hints()
         events: list[AgentEvent] = []
         prompt: str | None = None
         try:
@@ -1385,6 +1428,7 @@ class AgentApp(App[None]):
             self._turn_active = False
             self._undoing = False
             status.busy = False
+            self._refresh_hints()
         if prompt is not None:
             await transcript.remove_last_turn()
             self.query_one(TodoPanel).show(self.agent.todos)

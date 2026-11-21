@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich.text import Text
+from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
@@ -16,9 +17,17 @@ class CommandSuggestions(OptionList, can_focus=False):
 
     DEFAULT_CSS = "CommandSuggestions { display: none; height: auto; max-height: 10; }"
 
+    class Toggled(Message):
+        """The list opened or closed; bubbles to the app, which refreshes the key hints."""
+
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._names: list[str] = []
+
+    def _set_open(self, value: bool) -> None:
+        if bool(self.display) != value:
+            self.display = value
+            self.post_message(self.Toggled())
 
     @property
     def is_open(self) -> bool:
@@ -39,11 +48,11 @@ class CommandSuggestions(OptionList, can_focus=False):
         self.clear_options()
         self.add_options([Option(_row(*entry)) for entry in matches])
         self.highlighted = 0
-        self.display = True
+        self._set_open(True)
 
     def _hide(self) -> None:
         self._names = []
-        self.display = False
+        self._set_open(False)
 
     def hide(self) -> None:
         self._hide()
