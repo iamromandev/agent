@@ -174,7 +174,10 @@ def _alive(pid: int) -> bool:
 
 async def test_a_hanging_pngpaste_times_out_and_its_whole_group_is_killed(real: Path, tmp_path: Path) -> None:
     pids = tmp_path / "pids"
-    _fake_pngpaste(real, f'echo $$ > "{pids}"\nsleep 30 &\necho $! >> "{pids}"\nsleep 30')
+    _fake_pngpaste(real, f'[ "$1" = --warm ] && exit 0\necho $$ > "{pids}"\nsleep 30 &\necho $! >> "{pids}"\nsleep 30')
+    # macOS checks a newly written executable on its first exec (about 0.3 s, more under load), which could use up the
+    # 0.5 s timeout before the script wrote its pids; one run first makes the timed run start at once.
+    subprocess.run([real / "pngpaste", "--warm"], check=True)
     with pytest.raises(ClipboardError, match="timed out"):
         await read_clipboard_image(tmp_path, timeout=0.5)
     shell, child = (int(p) for p in pids.read_text().split())

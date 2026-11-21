@@ -39,22 +39,22 @@ def test_merge_of_one_plain_message_has_no_label() -> None:
 
 def test_panel_lines_show_five_then_the_count() -> None:
     lines = panel_lines([_q(str(n)) for n in range(7)])
-    assert lines == [f"queued: {n}" for n in range(5)] + ["and 2 more"]
+    assert lines == [f"{n}" for n in range(5)] + ["and 2 more"]
 
 
 def test_panel_lines_cut_the_first_line_to_80_characters_with_an_ellipsis() -> None:
-    assert panel_lines([_q("x" * 100)]) == ["queued: " + "x" * 80 + "…"]
-    assert panel_lines([_q("x" * 80)]) == ["queued: " + "x" * 80]
+    assert panel_lines([_q("x" * 100)]) == ["x" * 80 + "…"]
+    assert panel_lines([_q("x" * 80)]) == ["x" * 80]
 
 
 def test_panel_lines_show_only_the_first_line_of_a_multi_line_entry() -> None:
-    assert panel_lines([_q("one\ntwo")]) == ["queued: one…"]
+    assert panel_lines([_q("one\ntwo")]) == ["one…"]
 
 
 def test_panel_lines_escape_control_and_bidi_characters() -> None:
     (line,) = panel_lines([_q("a\x1b[2Jb‮c")])
     assert "\x1b" not in line and "‮" not in line
-    assert line.startswith("queued: a")
+    assert line.startswith("a")
 
 
 def test_a_hundred_large_entries_are_quick() -> None:

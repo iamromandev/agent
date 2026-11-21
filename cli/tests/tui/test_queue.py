@@ -73,7 +73,7 @@ async def test_ac1_a_message_sent_during_a_turn_is_queued(make_app: AppFactory) 
         await type_and_send(pilot, "hello")
         await pilot.pause()
 
-        assert _box(app) == "" and _panel(app).display and _panel(app).plain == "queued: hello"
+        assert _box(app) == "" and _panel(app).display and _panel(app).plain == "hello"
         assert not any("busy" in n for n in _notices(app))
         assert app.query_one(StatusBar).busy and len(scripted(app).requests) == 1
         gate.release.set()
@@ -144,7 +144,7 @@ async def test_ac5_a_queued_custom_command_runs_expanded_with_its_label(make_app
         await _hold(pilot, app, gate)
         await type_and_send(pilot, "/review x")
         await pilot.pause()
-        assert _panel(app).plain == "queued: /review x"
+        assert _panel(app).plain == "/review x"
         gate.release.set()
         await settled(app)
         await pilot.pause()
@@ -282,7 +282,7 @@ async def test_ac13_something_queued_during_the_merged_turn_runs_after_it(make_a
         await reached(second)
         await type_and_send(pilot, "b")
         await pilot.pause()
-        assert _panel(app).plain == "queued: b"
+        assert _panel(app).plain == "b"
         second.release.set()
         await settled(app)
         await pilot.pause()
@@ -303,7 +303,7 @@ async def test_ac14_a_message_queued_during_compact_runs_when_it_finishes(make_a
         await reached(gate)
         await type_and_send(pilot, "a")
         await pilot.pause()
-        assert _panel(app).plain == "queued: a"
+        assert _panel(app).plain == "a"
         gate.release.set()
         await settled(app)
         await pilot.pause()
@@ -319,7 +319,7 @@ async def test_ac15_the_panel_shows_five_lines_a_count_and_escapes(make_app: App
         for n in range(7):
             await type_and_send(pilot, str(n))
         await pilot.pause()
-        assert _panel(app).plain.splitlines() == [f"queued: {n}" for n in range(5)] + ["and 2 more"]
+        assert _panel(app).plain.splitlines() == [f"{n}" for n in range(5)] + ["and 2 more"]
 
         app._queue.take()
         from src.tui.queue import Queued
@@ -426,7 +426,7 @@ async def test_ac21_escape_after_done_while_init_checks_the_file_restores_the_qu
         await until(pilot, lambda: app._job_status == "done")
         await type_and_send(pilot, "a")
         await pilot.pause()
-        assert _panel(app).plain == "queued: a"
+        assert _panel(app).plain == "a"
         await pilot.press("escape")
         await settled(app)
         await pilot.pause()

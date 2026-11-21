@@ -51,12 +51,12 @@ def merge(entries: Sequence[Queued]) -> Merged:
 
 
 def panel_lines(entries: Sequence[Queued]) -> list[str]:
-    """One `queued: <first line>` per entry, at most 5, then `and N more`. Only the shown entries are read."""
+    """One `<first line>` per entry, at most 5, then `and N more`. Only the shown entries are read."""
     lines = []
     for entry in entries[:SHOWN_LINES]:
         first, newline, _ = entry.typed.partition("\n")
         cut = len(first) > SHOWN_CHARS or bool(newline)
-        lines.append("queued: " + escape_display(first[:SHOWN_CHARS]) + ("…" if cut else ""))
+        lines.append(escape_display(first[:SHOWN_CHARS]) + ("…" if cut else ""))
     if len(entries) > SHOWN_LINES:
         lines.append(f"and {len(entries) - SHOWN_LINES} more")
     return lines
