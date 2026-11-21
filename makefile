@@ -12,7 +12,7 @@ UI_PORT := 3000
 .PHONY: check test setup down restart clean help \
 	api-check api-test api-run api-up api-down api-build api-build-prod api-push-prod api-restart api-ps api-logs \
 	api-migrate api-install api-export api-clean-all api-clean-volumes api-clean-host \
-	cli-sync cli-install cli-check cli-test cli-run cli-eval cli-tool-install cli-tool-uninstall \
+	cli-sync cli-install cli-check cli-test cli-run cli-eval cli-uninstall cli-tool-install cli-tool-uninstall \
 	ui-install ui-dev ui-down ui-restart ui-build ui-check ui-format
 
 ## both stacks
@@ -102,8 +102,10 @@ cli-eval: # Run the real-model smoke test (needs Ollama), e.g. make cli-eval EVA
 
 cli-tool-install: cli-install # Same as cli-install (older name)
 
-cli-tool-uninstall: # Remove the installed agent command
-	$(MAKE) -C $(CLI) tool-uninstall
+cli-uninstall: # Remove the installed agent command
+	$(MAKE) -C $(CLI) uninstall
+
+cli-tool-uninstall: cli-uninstall # Same as cli-uninstall (older name)
 
 ## ui — delegates to ui/package.json
 ui-install: # Install UI dependencies

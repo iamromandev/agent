@@ -8,7 +8,7 @@ EXTRAS := $(if $(APPLE_SILICON),--extra image,)
 TOOL_SPEC := $(if $(APPLE_SILICON),.[image],.)
 
 # phony targets
-.PHONY: sync install check check-ci test run eval tool-install tool-uninstall help
+.PHONY: sync install uninstall check check-ci test run eval tool-install tool-uninstall help
 
 # python tools (uv)
 sync: # Install the dependencies into cli/.venv (with the image extra on Apple Silicon)
@@ -38,8 +38,10 @@ install: # Install the agent command on your PATH (editable, from this checkout;
 
 tool-install: install # Same as install (older name)
 
-tool-uninstall: # Remove the installed agent command
+uninstall: # Remove the installed agent command
 	-$(UV) tool uninstall agent-cli
+
+tool-uninstall: uninstall # Same as uninstall (older name)
 
 # help
 help:

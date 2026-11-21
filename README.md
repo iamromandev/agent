@@ -165,7 +165,7 @@ cd ~/projects/other-app && agent
 
 - This is an editable install of `cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. On Apple Silicon it includes the `image` extra (mflux). Rerun `make cli-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout.
 - `agent` not found: run `uv tool update-shell` and open a new shell. `command -v agent` shows which `agent` runs.
-- Uninstall: `make cli-tool-uninstall`.
+- Uninstall: `make cli-uninstall`.
 
 ### 7. Launch options
 
