@@ -3,12 +3,21 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Literal, cast
+from typing import Any, Literal, cast
 
+from rich.cells import cell_len
+from rich.color import Color as RichColor
+from rich.color import ColorType
+from rich.segment import Segment
+from rich.style import Style
 from rich.syntax import Syntax
+from rich.terminal_theme import TerminalTheme
 from rich.text import Text
+from textual.color import Color
 from textual.containers import VerticalScroll
 from textual.content import Content
+from textual.geometry import Region
+from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
@@ -16,7 +25,17 @@ from textual.widgets.markdown import MarkdownStream
 from src.engine.session import TranscriptItem
 from src.engine.text import escape
 from src.engine.tools.base import Preview, ToolResult
-from src.tui.styles import Outcome, ansi_output, diff_theme, notice_text, tool_title
+from src.tui.styles import (
+    ACCENT,
+    ICONS,
+    MARK_USER,
+    NOTICE,
+    Outcome,
+    ansi_output,
+    diff_theme,
+    notice_text,
+    tool_title,
+)
 
 REPLAY_BATCH = 500  # entries mounted at once when a saved conversation is redrawn
 
@@ -26,30 +45,107 @@ def _readable(text: str) -> str:
     return "\n".join("\t".join(escape(part) for part in line.split("\t")) for line in text.split("\n"))
 
 
-class UserEntry(Static):
-    DEFAULT_CSS = "UserEntry { margin: 1 0 0 0; padding: 0 1; background: $boost; }"
+def _themed(style: Style | None, theme: TerminalTheme) -> Style | None:
+    """`style` with a standard ANSI colour written as the theme's own colour, the way the text beside it is drawn."""
+    if style is None or style.color is None or style.color.type != ColorType.STANDARD:
+        return style
+    number = style.color.number
+    return style + Style(color=RichColor.from_triplet(theme.ansi_colors[number])) if number is not None else style
+
+
+class GutterMark:
+    """Mixin: writes `gutter_mark` over the first cells of the widget's left padding, on row `gutter_row`.
+
+    Listed before the widget class in the bases. The padding keeps wrapped rows indented, so the mark
+    needs no extra widget. Skipped when the widget is narrower than the mark or the crop does not start at 0."""
+
+    gutter_mark: Text | None = None
+    gutter_row: int = 0
+
+    def set_gutter(self, mark: Text | None, row: int | None = None) -> None:
+        self.gutter_mark = mark
+        if row is not None:
+            self.gutter_row = row
+        cast("Widget", self).refresh()
+
+    def render_lines(self, crop: Region) -> list[Strip]:
+        strips = cast("Any", super()).render_lines(crop)
+        mark = self.gutter_mark
+        if mark is None or crop.x != 0 or not crop.y <= self.gutter_row < crop.bottom:
+            return strips
+        i = self.gutter_row - crop.y
+        if i >= len(strips):
+            return strips
+        strip: Strip = strips[i]
+        padding = cast("Widget", self).styles.padding.left
+        if strip.cell_length < min(cell_len(mark.plain), padding):
+            return strips
+        base = next(iter(strip), None)  # keep the padding's background under the mark
+        theme = cast("Widget", self).app.ansi_theme
+        shown = [Segment(seg.text, _themed(seg.style, theme)) for seg in Content.from_rich_text(mark).render_segments()]
+        if base is not None and base.style is not None:
+            shown = [Segment(seg.text, base.style + seg.style if seg.style else base.style) for seg in shown]
+        width = min(sum(seg.cell_length for seg in shown), padding)  # never over the text
+        drawn = Strip(shown).crop(0, width)
+        strips[i] = Strip([*drawn, *strip.crop(width, strip.cell_length)], strip.cell_length)
+        return strips
+
+
+class UserEntry(GutterMark, Static):
+    DEFAULT_CSS = """
+    UserEntry { margin: 1 0 0 0; padding: 0 0 0 2; background: transparent; }
+    UserEntry:first-child { margin-top: 0; }
+    """
 
     def __init__(self, text: str, label: str | None = None) -> None:
-        shown = Text()
+        body = Text()
         if label:
-            shown.append(f"{label}\n", "dim")
-            text_shown = _readable(text)  # a custom command's prompt comes from a file: no escape sequences
+            body.append(f"{label}\n", "dim")
+            body.append(_readable(text))  # a custom command's prompt comes from a file: no escape sequences
         else:
-            text_shown = text
-        shown.append(f"> {text_shown}")
-        super().__init__(shown)
+            body.append(text)
+        super().__init__(body)
+        self.gutter_mark = Text(MARK_USER)
+        self.gutter_row = 1 if label else 0
         self.text = text
         self.label = label
+        self.body = body
         self.turn: int | None = None  # set by Transcript.add_user
 
 
-class AssistantEntry(Markdown):
-    DEFAULT_CSS = "AssistantEntry { margin: 0 1; }"
+class AssistantEntry(GutterMark, Markdown):
+    DEFAULT_CSS = """
+    AssistantEntry { padding: 0 0 0 2; margin: 0; }
+    AssistantEntry > .newest { margin-bottom: 0; }
+    """
 
     def __init__(self, text: str = "") -> None:
-        super().__init__(text, open_links=False)  # model text must not open the browser by itself
+        # model text must not open the browser by itself
+        super().__init__(text, open_links=False)
+        self.gutter_mark = Text("● ", ACCENT)
         self.text = text
         self._stream: MarkdownStream | None = None
+
+    def mount(self, *widgets: Widget, before: Any = None, after: Any = None) -> Any:
+        """The newest block has no bottom margin, so a reply leaves no blank row after it.
+
+        Every mount goes through here (`mount_all` calls it, and so does a streamed list or quote that
+        replaces its block), so the last block always carries the class. A class set here, not a
+        `:last-child` rule: that selector costs about 40% more when many replies mount."""
+        if widgets and before is None and after is None:
+            if self.children:
+                self.children[-1].remove_class("newest")  # no longer last: the default gap again
+            widgets[-1].add_class("newest")
+        return super().mount(*widgets, before=before, after=after)
+
+    @property
+    def markdown(self) -> AssistantEntry:
+        return self
+
+    def on_mount(self) -> None:
+        accent = self.app.current_theme.accent  # a plain hex colour, not `auto`
+        if accent is not None:
+            self.set_gutter(Text("● ", Style(color=Color.parse(accent).rich_color)))
 
     async def write(self, delta: str) -> None:
         if self._stream is None:
@@ -63,12 +159,14 @@ class AssistantEntry(Markdown):
             self._stream = None
 
 
-class NoticeEntry(Static):
-    DEFAULT_CSS = "NoticeEntry { padding: 0 1; }"
+class NoticeEntry(GutterMark, Static):
+    DEFAULT_CSS = "NoticeEntry { margin: 0 0 0 2; padding: 0 0 0 2; }"
 
     def __init__(self, level: Literal["info", "warn", "error"], text: str, icon: str | None = None) -> None:
         rendered = notice_text(level, text, icon)
-        super().__init__(rendered)
+        style = NOTICE[level]
+        super().__init__(Text(text, style))
+        self.gutter_mark = Text(f"{icon or ICONS[level]} ", style)
         self.text = rendered.plain
 
 
@@ -80,22 +178,29 @@ def _title(text: Text) -> str:
 
 
 def _child_line(label: str, summary: str, outcome: Outcome) -> Text:
-    line = Text("  ")
-    if outcome is None:
-        line.append("⋯ ")
-    line.append_text(tool_title(label, summary, outcome))
-    return line
+    return tool_title(label, summary, outcome)
 
 
 class ToolEntry(Collapsible):
     """One tool call: `label · summary`, with the output (and the applied diff) inside."""
+
+    DEFAULT_CSS = """
+    ToolEntry { background: transparent; border-top: none; padding: 0; }
+    ToolEntry > CollapsibleTitle { padding: 0 0 0 1; }
+    ToolEntry > Contents { margin: 0 0 0 4; padding: 0 0 0 1; border-left: solid $foreground 30%; }
+    """
 
     def __init__(self, label: str, summary: str | None = None, task: bool = False) -> None:
         """`summary` given: a finished call that is only shown (a replayed one), with nothing inside.
 
         `task`: a running `task` call, open while it runs and folded when it ends."""
         running_task = task and summary is None
-        super().__init__(title=_title(tool_title(label, summary or "", None)), collapsed=not running_task)
+        super().__init__(
+            title=_title(tool_title(label, summary or "", "replayed" if summary is not None else None)),
+            collapsed=not running_task,
+            collapsed_symbol="",
+            expanded_symbol="",
+        )
         self.label = label
         self.finished = summary is not None
         self.is_task = running_task
@@ -209,7 +314,7 @@ class Transcript(VerticalScroll):
         far too long to draw.
         """
         await self.end_assistant()
-        entries: list[Static | Markdown | Collapsible] = []
+        entries: list[Widget] = []
         for item in items:
             match item.kind:
                 case "user":
@@ -255,6 +360,6 @@ class Transcript(VerticalScroll):
         self._ended.clear()
         await self.remove_children()
 
-    async def _add(self, widget: Static | Markdown | Collapsible) -> None:
+    async def _add(self, widget: Widget) -> None:
         await self.mount(widget)
         self.scroll_end(animate=False)

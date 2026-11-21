@@ -30,16 +30,22 @@ NOTICE = {
 }
 ICONS = {"info": "ℹ", "warn": "⚠", "error": "✗"}  # noqa: RUF001 - the info sign is the intended glyph
 MARK_OK, MARK_ERROR, MARK_ENDED = "✓", "✗", "⏹"
+MARK_RUNNING = "⋯"
+MARK_REPLAYED = "·"  # a replayed call: the session does not keep its outcome
+MARK_USER = "› "  # noqa: RUF001 - the prompt marker is the intended glyph
 
 Level = Literal["info", "warn", "error"]
-Outcome = Literal["ok", "error", "ended"] | None
-_MARKS = {"ok": (MARK_OK, OK), "error": (MARK_ERROR, ERROR), "ended": (MARK_ENDED, DIM)}
+Outcome = Literal["ok", "error", "ended", "replayed"] | None
+_MARKS = {"ok": (MARK_OK, OK), "error": (MARK_ERROR, ERROR), "ended": (MARK_ENDED, DIM), "replayed": (MARK_REPLAYED, DIM)}
 
 
 def tool_title(label: str, summary: str, outcome: Outcome) -> Text:
-    """`mark name argument · summary`; the mark only once the outcome is known."""
+    """`mark name argument · summary`; a dim `⋯` while the call runs (outcome None)."""
     text = Text()
-    if outcome is not None:
+    if outcome is None:
+        text.append(MARK_RUNNING, DIM)
+        text.append(" ")
+    else:
         mark, style = _MARKS[outcome]
         text.append(mark, style)
         text.append(" ")

@@ -146,8 +146,10 @@ async def test_the_transcript_shows_a_custom_prompt_escaped_but_the_model_gets_i
         await settled(app)
 
         (entry,) = app.query(UserEntry)
-        shown = str(entry.render())
+        shown = entry.body.plain
         assert "\x1b" not in shown and "\u202e" not in shown
         assert "\\x1b[2J" in shown and "\\u202e" in shown
-        assert shown.endswith("\n> a\\x1b[2Jb\\u202eevil\n\tline2")
+        assert shown.endswith("\na\\x1b[2Jb\\u202eevil\n\tline2")
+        strips = entry.screen._compositor.render_strips()
+        assert any("›" in strips[y].text for y in range(entry.region.y, entry.region.bottom))  # noqa: RUF001
         assert scripted(app).requests[0][0][-1].content == body
