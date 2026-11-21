@@ -216,3 +216,12 @@ def test_an_agents_built_directly_keeps_its_warnings_through_with_models() -> No
     agents = Agents({}, ("a.md: odd",))
     assert agents.with_models(["x"]).warnings == ("a.md: odd",)
     assert agents.with_models(None).warnings == ("a.md: odd",)
+
+
+def test_generate_image_is_not_allowed_in_an_agent_file(dirs, tmp_path: Path) -> None:
+    glob, _, env = dirs
+    (glob / "a.md").write_text("---\ndescription: d\ntools: read, generate_image\n---\nb")
+    agents = load_agents(tmp_path / "ws", env)
+    agent = agents.get("a")
+    assert agent is not None and agent.tools == ("read",)
+    assert len(agents.warnings) == 1 and "tool 'generate_image' is not allowed in an agent; ignored" in agents.warnings[0]

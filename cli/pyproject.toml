@@ -12,6 +12,15 @@ dependencies = [
     "mcp==2.3.0",
 ]
 
+[project.optional-dependencies]
+# Image generation (the `generate_image` tool): Apple Silicon Macs only. `uv sync --extra image`.
+image = ["mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+
+[tool.uv]
+# The CLI is Unix-only (ptys). Without this, uv's universal lock fails on the `image` extra: mflux's other-platform
+# dependencies (mlx[cuda13]==0.32.2) have no cp315 wheels, even though the extra is limited to Apple Silicon.
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+
 [project.scripts]
 agent = "src.main:main"
 

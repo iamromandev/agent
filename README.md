@@ -96,14 +96,14 @@ ollama list
 ### 3. Install the dependencies and configure
 
 ```bash
-make cli-install
+make cli-sync
 ```
 
 ```bash
 cp cli/.env.example cli/.env
 ```
 
-`make cli-install` runs `uv sync` in `cli/`. The `.env` file is optional: every value has a default. `.env` is read from the folder the agent is launched in, so for other folders export the variables in `~/.zshrc` or put a `.env` there. Main settings (all in [cli/.env.example](cli/.env.example)):
+`make cli-sync` runs `uv sync` in `cli/` (with `--extra image` on Apple Silicon, for the `generate_image` tool). The `.env` file is optional: every value has a default. `.env` is read from the folder the agent is launched in, so for other folders export the variables in `~/.zshrc` or put a `.env` there. Main settings (all in [cli/.env.example](cli/.env.example)):
 
 | Variable | Default | What it sets |
 | --- | --- | --- |
@@ -156,16 +156,16 @@ Use `--project`, not `--directory`: `--project` keeps the current folder as the 
 ### 6. Install `agent` on your PATH (optional)
 
 ```bash
-make cli-tool-install
+make cli-install
 ```
 
 ```bash
 cd ~/projects/other-app && agent
 ```
 
-- This is an editable install of `cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. Rerun `make cli-tool-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout.
+- This is an editable install of `cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. On Apple Silicon it includes the `image` extra (mflux). Rerun `make cli-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout.
 - `agent` not found: run `uv tool update-shell` and open a new shell. `command -v agent` shows which `agent` runs.
-- Uninstall: `make cli-tool-uninstall`.
+- Uninstall: `make cli-uninstall`.
 
 ### 7. Launch options
 

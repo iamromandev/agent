@@ -26,3 +26,14 @@ def test_skill_tool_is_offered_only_with_skills() -> None:
     assert "skill" not in [t.name for t in read_only_tools(skills=empty)]
     assert "skill" in [t.name for t in default_tools(skills=some)]
     assert [t.name for t in read_only_tools(skills=some)] == ["read", "glob", "grep", "skill"]
+
+
+def test_generate_image_is_offered_only_with_a_generator(tmp_path) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.imagegen import MfluxGenerator
+
+    generator = MfluxGenerator(tmp_path / "mflux", "x/y", 5, Guardrails.off(tmp_path))
+    plain = [t.name for t in default_tools()]
+    assert "generate_image" not in plain
+    assert [t.name for t in default_tools(imager=generator)] == [*plain, "generate_image"]
+    assert "generate_image" not in [t.name for t in read_only_tools()]
