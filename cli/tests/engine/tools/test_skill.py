@@ -40,3 +40,14 @@ async def test_ac11_unknown_name_lists_valid_names(ctx: ToolContext) -> None:
 async def test_missing_argument_is_invalid(ctx: ToolContext) -> None:
     result = await run(tool(skill("a")), ctx)
     assert result.is_error and result.summary == "invalid arguments"
+
+
+async def test_header_names_a_builtin_skill_and_its_folder(ctx: ToolContext, tmp_path: Path) -> None:
+    from src.engine.skills.loader import load_skills
+
+    folder = tmp_path / "b" / "debug"
+    folder.mkdir(parents=True)
+    (folder / "SKILL.md").write_text("---\ndescription: d\n---\nsteps\n")
+    skills = load_skills(tmp_path / "ws", {"XDG_CONFIG_HOME": str(tmp_path / "cfg")}, builtin=tmp_path / "b")
+    result = await run(SkillTool(skills), ctx, name="debug")
+    assert result.output.splitlines()[0] == f"Skill 'debug' (builtin) from {folder.resolve()}"

@@ -189,7 +189,7 @@ def build_runtime(
     from src.engine.provider.ollama import OllamaProvider
     from src.engine.provider.vision import VisionCheck
     from src.engine.session import FileRecorder, SessionStore, sessions_root, workspace_dir
-    from src.engine.skills.loader import load_skills
+    from src.engine.skills.loader import builtin_skills_dir, load_skills
     from src.engine.terminal.manager import TerminalManager
     from src.engine.tools import default_tools, read_only_tools
     from src.engine.tools.base import ToolContext
@@ -206,7 +206,7 @@ def build_runtime(
         # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
-        skills = load_skills(root)  # read once, like the commands
+        skills = load_skills(root, builtin=builtin_skills_dir())  # read once, like the commands
         image_command = find_mflux() if images else None  # None: no tool, no warning (not macOS arm64, or no extra)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
         permissions = permission_setup.prepare(
