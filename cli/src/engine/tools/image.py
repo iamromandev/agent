@@ -8,6 +8,7 @@ import os
 import secrets
 import shutil
 import tempfile
+import time
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -21,8 +22,10 @@ from src.engine.imagegen import (
     MIN_SIDE,
     SIDE_STEP,
     ImageGenError,
+    ImageProgress,
     ImageRequest,
     MfluxGenerator,
+    format_progress,
     model_cached,
     png_size,
 )
@@ -35,6 +38,7 @@ from .paths import InvalidPath, inside_workspace, invalid_path_result, resolve_p
 from .protected import refuse_protected
 
 SEED_LIMIT = 2**32
+PROGRESS_TICK = 0.25  # seconds between progress lines
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _IEND = b"IEND\xaeB`\x82"
 _FORMAT_NAMES = {"jpeg": "a JPEG", "gif": "a GIF", "webp": "a WebP image"}
@@ -147,11 +151,46 @@ class GenerateImageTool(Tool):
 
         return Prepared(preview, execute)
 
+    async def _generate(self, request: ImageRequest, out_dir: Path, ctx: ToolContext) -> Path:
+        """Run mflux; with a progress sink, a ticker sends the display line when it changes (at most 4 a second)."""
+        from src.engine.events import ToolProgress  # not at module level: events imports the tools package
+
+        sink = ctx.progress
+        if sink is None:
+            return await self.generator.generate(request, out_dir)
+        start = time.monotonic()
+        latest = ImageProgress("starting")
+        last: str | None = None
+
+        def send() -> None:
+            nonlocal last
+            text = format_progress(latest, time.monotonic() - start)
+            if text != last:
+                last = text
+                with contextlib.suppress(Exception):
+                    sink(ToolProgress(text))
+
+        def update(value: ImageProgress) -> None:
+            nonlocal latest
+            latest = value
+
+        async def ticker() -> None:
+            while True:
+                send()
+                await asyncio.sleep(PROGRESS_TICK)
+
+        task = asyncio.create_task(ticker())
+        try:
+            return await self.generator.generate(request, out_dir, on_progress=update)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
     async def _run(self, request: ImageRequest, path: Path, raw: str, ctx: ToolContext) -> ToolResult:
         out_dir = Path(tempfile.mkdtemp(prefix="agent-image-"))
         try:
             try:
-                generated = await self.generator.generate(request, out_dir)
+                generated = await self._generate(request, out_dir, ctx)
             except ImageGenError as exc:
                 message = str(exc)
                 return ToolResult(message, is_error=True, summary="timed out" if message.startswith("timed out") else "failed")

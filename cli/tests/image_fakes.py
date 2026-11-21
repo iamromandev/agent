@@ -70,9 +70,52 @@ elif mode == "token":
     print("boom ghp_" + "a" * 40, file=sys.stderr)
     sys.exit(1)
 elif mode == "tqdm":
-    sys.stderr.write("  0%|          | 0/9 [00:00<?, ?it/s]\r 11%|#1        | 1/9 [00:09<01:12, 9.00s/it]\r")
+    sys.stderr.write("  0%|          | 0/9 [00:00<?, ?it/s]\r 11%|#1        | 1/9 [00:09<01:12, 9.00s/it]")
     sys.stderr.write("\nValueError: real reason\n")
     sys.exit(1)
+elif mode in ("progress", "download", "badlines", "flood", "progressfail", "hugedigits"):
+    total = int(opt("--steps"))
+    delay = float(os.environ.get("FAKE_MFLUX_DELAY", "0"))
+
+    def say(text):
+        sys.stderr.write(text)
+        sys.stderr.flush()
+
+    def bar(n, left):
+        pct = 100 * n // total
+        say("\r%3d%%|%s| %d/%d [00:%02d<%s, 1.00s/it]" % (pct, "#" * (n * 10 // total), n, total, n, left))
+
+    if mode == "download":
+        for pct in (10, 42, 100):
+            say("\rmodel.safetensors: %3d%%|####      | 2.3G/5.5G [00:30<00:41, 77MB/s]" % pct)
+            time.sleep(delay)
+        say("\n")
+    if mode == "hugedigits":
+        say("\r 1%|x| " + "9" * 5000 + "/9 [00:26<03:34, 1s/it]\n")
+    if mode == "badlines":
+        say("\xff\xfe garbage \x00\x01\n")
+        say("Loading weights\n")
+        say(" 50%|#####     | 5/")
+        say("\n")
+        bar(1, "00:09")
+        say("\r100%|##########| 3/3 [00:03<00:00, 1.00s/it]")
+        say("\rsome prefix 11%|#1 | 1/9 [00:01<00:08, 1.00s/it]")
+    if mode == "flood":
+        for _ in range(10000):
+            say("\r  0%|          | 0/9 [00:00<?, ?it/s]")
+    time.sleep(delay)
+    for n in range(0, total + 1):
+        bar(n, "?" if n == 0 else "00:%02d" % (total - n))
+        time.sleep(delay)
+    if mode == "badlines":
+        bar(2, "00:07")
+    say("\n")
+    bar(total, "00:00")
+    say("\nINFO: Image saved successfully at: %s\nPeak MLX memory: 4.54 GB\n" % out)
+    if mode == "progressfail":
+        say("ValueError: real reason\n")
+        sys.exit(1)
+    open(out, "wb").write(png(w, h))
 elif mode == "sleep":
     child = subprocess.Popen(["sleep", "60"])
     with open(os.environ["FAKE_MFLUX_PIDS"], "w") as handle:

@@ -6,10 +6,12 @@ import asyncio
 import dataclasses
 import os
 import threading
+import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+from src.engine.events import ToolProgress
 from src.engine.guardrails.setup import Guardrails
 from src.engine.imagegen import MfluxGenerator, png_size
 from src.engine.tools.base import Prepared, ToolContext, ToolResult
@@ -342,3 +344,76 @@ async def test_an_overwrite_keeps_the_permission_bits(tool: GenerateImageTool, c
     await (await _prepared(tool, ctx)).execute()
     assert target.stat().st_mode & 0o7777 == 0o640
     assert png_size(target.read_bytes()) == (1024, 1024)
+
+
+def _collect(ctx: ToolContext, sink: Any) -> ToolContext:
+    return dataclasses.replace(ctx, progress=sink)
+
+
+async def test_progress_lines_follow_the_phases(
+    tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.02)
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+    monkeypatch.setenv("FAKE_MFLUX_DELAY", "0.1")
+    events: list[Any] = []
+    run = await _prepared(tool, _collect(ctx, events.append), width=256, height=256, steps=4)
+    result = await run.execute()
+    assert not result.is_error, result
+    texts = [e.text for e in events]
+    assert all(isinstance(e, ToolProgress) for e in events)
+    assert texts[0].startswith("starting")
+    assert any(t.startswith("downloading model") for t in texts)
+    steps = [int(t.split()[1].split("/")[0]) for t in texts if t.startswith("step ")]
+    assert steps and steps == sorted(steps) and steps[-1] >= 3  # the last step and saving arrive together
+    assert any(t.startswith("step 2/4 ") and "left" in t for t in texts)
+    assert texts[-1].startswith("saving")
+    assert all(len(t) <= 80 and t.isprintable() for t in texts)
+
+
+async def test_a_flood_reaches_the_sink_at_most_five_times_a_second(
+    tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "flood")
+    stamps: list[float] = []
+    sink = lambda e: stamps.append(time.monotonic())  # noqa: E731
+    run = await _prepared(tool, _collect(ctx, sink), width=256, height=256)
+    started = time.monotonic()
+    result = await run.execute()
+    assert not result.is_error, result
+    seconds = max(time.monotonic() - started, 1.0)
+    assert len(stamps) <= 5 * seconds + 1
+
+
+async def test_no_sink_and_a_raising_sink_give_the_same_result(
+    tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+
+    def boom(event: Any) -> None:
+        raise RuntimeError("no")
+
+    plain = await (await _prepared(tool, ctx, seed=5, width=256, height=256)).execute()
+    raising = await (await _prepared(tool, _collect(ctx, boom), seed=5, width=256, height=256)).execute()
+    assert not plain.is_error and plain.output == raising.output and plain.summary == raising.summary
+
+
+async def test_no_event_arrives_after_the_result(
+    tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.01)
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+    events: list[Any] = []
+    await (await _prepared(tool, _collect(ctx, events.append), width=256, height=256)).execute()
+    count = len(events)
+    await asyncio.sleep(0.1)
+    assert len(events) == count
+
+
+async def test_a_failure_after_progress_keeps_the_error_text(
+    tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progressfail")
+    result = await (await _prepared(tool, _collect(ctx, lambda e: None), width=256, height=256)).execute()
+    assert result.is_error and result.output.startswith("mflux failed (exit 1): ")
+    assert "step " not in result.output and "%|" not in result.output

@@ -74,7 +74,23 @@ class TaskProgress:
     event: AgentEvent  # ToolStarted, ToolFinished, Notice, UsageUpdate or Compacting of the child
 
 
+@dataclass(frozen=True)
+class ToolProgress:
+    """A display-only status line of a running tool call (inside `TaskProgress`); never recorded."""
+
+    text: str
+
+
 AgentEvent = (
-    AssistantText | ToolStarted | ToolFinished | Notice | UsageUpdate | Compacting | TurnEnded | TaskProgress | TodosChanged
+    AssistantText
+    | ToolStarted
+    | ToolFinished
+    | Notice
+    | UsageUpdate
+    | Compacting
+    | TurnEnded
+    | TaskProgress
+    | TodosChanged
+    | ToolProgress
 )
 EventSink = Callable[[AgentEvent], None]

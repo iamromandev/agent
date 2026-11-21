@@ -7,16 +7,17 @@ UI-free: no `textual`, no `httpx`.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import platform as platform_module
 import re
 import struct
 import sys
 from asyncio.subprocess import DEVNULL, PIPE
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 
 from src.engine.env import child_environment
 from src.engine.process import kill_group
@@ -98,6 +99,127 @@ def _tail(raw: bytes) -> str:
     return escape("\n".join(lines[-STDERR_LINES:]))[-STDERR_CHARS:]
 
 
+Phase = Literal["starting", "downloading", "loading", "steps", "saving"]
+_STEP_LINE = re.compile(r"^\s*\d{1,3}%\|[^|]*\|\s*(\d{1,4})/(\d{1,4}) \[([0-9:]+)<([0-9:]+|\?)[,\]]")
+_DOWNLOAD_LINE = re.compile(r"^(.+?):\s*(\d{1,3})%\|")
+_TAIL_CAP = 4096
+DISPLAY_LIMIT = 80
+
+
+@dataclass(frozen=True)
+class ImageProgress:
+    phase: Phase
+    step: int = 0  # steps phase: completed steps
+    total: int = 0  # steps phase: mflux's total (the requested steps)
+    left: int | None = None  # seconds, mflux's estimate; None when tqdm printed "?"
+    percent: int | None = None  # downloading phase, 0-100, when readable
+
+
+def _seconds(text: str) -> int | None:
+    parts = text.split(":")
+    if not 2 <= len(parts) <= 3 or not all(part.isdigit() for part in parts):
+        return None
+    total = 0
+    for part in parts:
+        total = total * 60 + int(part)
+    return total
+
+
+def clock(seconds: float) -> str:
+    """`m:ss`, or `h:mm:ss` from one hour."""
+    whole = max(0, int(seconds))
+    hours, rest = divmod(whole, 3600)
+    minutes, secs = divmod(rest, 60)
+    return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
+
+
+class ProgressParser:
+    """Incremental: `feed` returns the progress values for the complete lines in the bytes so far."""
+
+    def __init__(self, total: int, downloading: bool) -> None:
+        self.total = total
+        self.downloading = downloading
+        self._tail = b""
+        self._last = 0
+        self._stepping = False
+        self._in_download = False
+        self._percent = -1
+
+    def start(self) -> ImageProgress:
+        return ImageProgress("downloading" if self.downloading else "loading")
+
+    def feed(self, chunk: bytes) -> list[ImageProgress]:
+        data = self._tail + chunk
+        pieces = re.split(rb"([\r\n])", data)
+        tail = pieces.pop()
+        self._tail = tail[-_TAIL_CAP:]
+        values: list[ImageProgress] = []
+        for index in range(0, len(pieces), 2):
+            if pieces[index]:
+                values.extend(self._line(pieces[index].decode("utf-8", errors="replace"), pieces[index + 1] == b"\n"))
+        # the newest bar has no terminator until the next one starts: read it now, without consuming it
+        if tail:
+            values.extend(self._line(self._tail.decode("utf-8", errors="replace"), None))
+        return values
+
+    def _line(self, line: str, newline: bool | None) -> list[ImageProgress]:
+        """`newline` is None for the unfinished tail, else whether a `\\n` ended the line."""
+        if match := _STEP_LINE.match(line):
+            return self._step(int(match[1]), int(match[2]), match[4])
+        if self.downloading and not self._stepping:
+            if match := _DOWNLOAD_LINE.match(line):
+                percent = int(match[2])
+                if percent > 100:
+                    return []
+                self._in_download = True
+                if newline:
+                    self._in_download = False
+                    seen, self._percent = self._percent == percent, percent
+                    shown = [] if seen else [ImageProgress("downloading", percent=percent)]
+                    return [*shown, ImageProgress("loading")]
+                if percent == self._percent and newline is None:
+                    return []
+                self._percent = percent
+                return [ImageProgress("downloading", percent=percent)]
+            if self._in_download and newline is not None:
+                self._in_download = False
+                return [ImageProgress("loading")]
+        return []
+
+    def _step(self, step: int, total: int, left: str) -> list[ImageProgress]:
+        if total != self.total or step > total or step < self._last:
+            return []
+        if step == 0:
+            return []
+        if step == self._last:
+            return []
+        self._last = step
+        self._stepping = True
+        values = [ImageProgress("steps", step, total, None if left == "?" else _seconds(left))]
+        if step == total:
+            values.append(ImageProgress("saving"))
+        return values
+
+
+def format_progress(p: ImageProgress, elapsed: float) -> str:
+    """The one display line, at most 80 characters, built from numbers and fixed words only."""
+    time_text = clock(elapsed)
+    match p.phase:
+        case "starting":
+            text = f"starting… {time_text}"
+        case "downloading":
+            percent = f"{p.percent}% · " if p.percent is not None else ""
+            text = f"downloading model… {percent}{time_text}"
+        case "loading":
+            text = f"loading model… {time_text}"
+        case "steps":
+            left = f" · ~{clock(p.left)} left" if p.left is not None else ""
+            text = f"step {p.step}/{p.total} · {time_text} elapsed{left}"
+        case "saving":
+            text = f"saving… {time_text}"
+    return text[:DISPLAY_LIMIT]
+
+
 class MfluxGenerator:
     def __init__(self, command: Path, model: str, timeout: float, guard: Guardrails) -> None:
         self.command = command
@@ -122,7 +244,12 @@ class MfluxGenerator:
             ]
         )  # fmt: skip
 
-    async def generate(self, request: ImageRequest, out_dir: Path) -> Path:
+    async def generate(
+        self,
+        request: ImageRequest,
+        out_dir: Path,
+        on_progress: Callable[[ImageProgress], None] | None = None,
+    ) -> Path:
         """The PNG mflux wrote inside `out_dir`. Kills the whole process group on timeout and on cancel."""
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -137,11 +264,23 @@ class MfluxGenerator:
         except OSError as exc:
             raise ImageGenError(f"Could not start mflux: {escape(str(exc))}") from exc
         kept = bytearray()
+        parser = ProgressParser(request.steps, downloading=not model_cached(self.model))
+
+        def report(value: ImageProgress) -> None:
+            if on_progress is not None:
+                with contextlib.suppress(Exception):
+                    on_progress(value)
+
+        report(parser.start())
 
         async def drain() -> None:
             assert proc.stderr is not None
             while chunk := await proc.stderr.read(65_536):
                 kept.extend(chunk)
+                if on_progress is not None:
+                    with contextlib.suppress(Exception):
+                        for value in parser.feed(chunk):
+                            report(value)
                 if len(kept) > _KEEP:
                     del kept[: len(kept) - _KEEP]
             await proc.wait()

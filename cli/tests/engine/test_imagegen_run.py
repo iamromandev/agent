@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 from src.engine.guardrails.setup import Guardrails
-from src.engine.imagegen import ImageGenError, ImageRequest, MfluxGenerator, png_size
+from src.engine.imagegen import ImageGenError, ImageProgress, ImageRequest, MfluxGenerator, png_size
 
 from tests.fakes import recording_sandbox
 from tests.image_fakes import fake_mflux
@@ -192,3 +192,72 @@ def test_the_tail_stays_within_the_cap_after_escaping() -> None:
     from src.engine.imagegen import _tail
 
     assert len(_tail(b"\x01" * 5000)) <= 2000
+
+
+async def _progress(tmp_path: Path, out_dir: Path, mode: str, monkeypatch: pytest.MonkeyPatch, request: ImageRequest | None = None):
+    monkeypatch.setenv("FAKE_MFLUX_MODE", mode)
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    seen: list[ImageProgress] = []
+    await _generator(tmp_path).generate(request or ImageRequest("p", 256, 256, 9, 1), out_dir, on_progress=seen.append)
+    return seen
+
+
+async def test_progress_values_arrive_in_order(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = await _progress(tmp_path, out_dir, "progress", monkeypatch)
+    assert seen[0].phase == "downloading"  # the fake model is not cached
+    steps = [p.step for p in seen if p.phase == "steps"]
+    assert steps == list(range(1, 10))
+    assert seen[-1] == ImageProgress("saving")
+
+
+async def test_cached_model_starts_with_loading(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    snap = tmp_path / "hub" / "models--x--y" / "snapshots" / "abc"
+    snap.mkdir(parents=True)
+    (snap / "f").write_text("x")
+    seen = await _progress(tmp_path, out_dir, "progress", monkeypatch)
+    assert seen[0] == ImageProgress("loading")
+
+
+async def test_download_output_gives_a_percentage(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = await _progress(tmp_path, out_dir, "download", monkeypatch)
+    first_step = next(i for i, p in enumerate(seen) if p.phase == "steps")
+    assert [p.percent for p in seen[:first_step] if p.phase == "downloading"][1:] == [10, 42, 100]
+
+
+async def test_bad_lines_give_no_wrong_step(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = await _progress(tmp_path, out_dir, "badlines", monkeypatch)
+    steps = [p.step for p in seen if p.phase == "steps"]
+    assert steps == sorted(steps) and set(steps) <= set(range(1, 10))
+    assert seen[-1] == ImageProgress("saving")
+
+
+async def test_failure_text_is_unchanged_by_progress(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progressfail")
+    with pytest.raises(ImageGenError) as info:
+        await _generator(tmp_path).generate(ImageRequest("p", 256, 256, 9, 1), out_dir, on_progress=lambda p: None)
+    text = str(info.value)
+    assert text.startswith("mflux failed (exit 1): ")
+    assert "ValueError: real reason" in text and "it/s" not in text and "%|" not in text
+
+
+async def test_a_raising_callback_changes_nothing(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+
+    def boom(p: ImageProgress) -> None:
+        raise RuntimeError("no")
+
+    path = await _generator(tmp_path).generate(ImageRequest("p", 256, 256, 9, 1), out_dir, on_progress=boom)
+    assert png_size(path.read_bytes()) == (256, 256)
+
+
+async def test_a_huge_digit_line_does_not_break_the_call(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seen = await _progress(tmp_path, out_dir, "hugedigits", monkeypatch)
+    assert [p.step for p in seen if p.phase == "steps"] == list(range(1, 10))
+
+
+async def test_phase_is_loading_between_the_download_and_the_first_step(
+    tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen = await _progress(tmp_path, out_dir, "download", monkeypatch)
+    first_step = next(i for i, p in enumerate(seen) if p.phase == "steps")
+    assert ImageProgress("loading") in seen[1:first_step]

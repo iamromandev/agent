@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from src.engine.approval import Choice, Decision
 from src.engine.checkpoints.store import CheckpointStore
-from src.engine.events import AgentEvent, ToolFinished
+from src.engine.events import AgentEvent, TaskProgress, ToolFinished, ToolProgress
 from src.engine.guardrails.setup import Guardrails
 from src.engine.imagegen import MfluxGenerator, png_size
 from src.engine.loop import Agent
@@ -202,3 +202,19 @@ async def test_undo_works_from_the_file_log_without_checkpoints(ctx: ToolContext
     assert (workspace / "icon.png").exists()
     await agent.undo(events.append)
     assert not (workspace / "icon.png").exists()
+
+
+async def test_progress_reaches_the_events_but_not_the_history_or_the_session(
+    ctx: ToolContext, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+    agent, _, _ = _agent(ctx, tmp_path, [ONCE])
+    events = await _run(agent)
+    texts = [e.event.text for e in events if isinstance(e, TaskProgress) and isinstance(e.event, ToolProgress)]
+    assert texts and all(e.call_id == "c1" for e in events if isinstance(e, TaskProgress))
+    finished = next(e for e in events if isinstance(e, ToolFinished))
+    assert not finished.result.is_error
+    for text in (_tool_message(agent), finished.result.output):
+        assert "loading model" not in text and "step " not in text and "downloading" not in text
+    recorder = agent.recorder
+    assert not any(t in repr(vars(recorder)) for t in ("loading model", "downloading model", "starting\u2026"))
