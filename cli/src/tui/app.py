@@ -35,6 +35,7 @@ from src.engine import (
     TaskProgress,
     TodosChanged,
     ToolFinished,
+    ToolProgress,
     ToolStarted,
     TurnEnded,
     UsageUpdate,
@@ -1578,6 +1579,8 @@ class AgentApp(App[None]):
                         await entry.add_child(child_id, label)
                     case ToolFinished(child_id, result, _, _) if entry is not None:
                         await entry.finish_child(child_id, result)
+                    case ToolProgress(text) if entry is not None:
+                        entry.show_progress(text)
                     case Notice("warn" | "info" as level, text):  # an error ends the call: its result shows it
                         await transcript.add_notice(level, f"task: {text}")
             case TodosChanged(items):

@@ -30,7 +30,7 @@ class ToolContext:
     workspace: Path  # resolved absolute path
     bash_timeout: float
     journal: FileJournal | None = None  # told about each file write/edit changes
-    progress: Callable[[AgentEvent], None] | None = None  # set per call by the loop; only the task tool uses it
+    progress: Callable[[AgentEvent], None] | None = None  # set per call by the loop; the task and generate_image tools use it
     guard: Guardrails | None = None  # None: the built-in defaults (see `guard_of`)
     protected_ok: bool = False  # set per call by the loop: the user allowed this call to read the protected file it names
     has_vision: Callable[[], Awaitable[bool]] | None = None  # set per call by the loop; asked only once `read` found an image; None: no
