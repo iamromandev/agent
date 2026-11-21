@@ -5,18 +5,61 @@ from __future__ import annotations
 from typing import Any, ClassVar
 
 from textual import events
+from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
+from textual.containers import Horizontal
 from textual.message import Message
-from textual.widgets import TextArea
+from textual.widgets import Static, TextArea
 
 from src.engine.mentions_index import Suggestion, current_token
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
 
 POPUP_KEYS = frozenset({"up", "down", "tab", "enter", "escape"})
+PLACEHOLDER = "ask anything, @ for files, / for commands"
+PROMPT = chr(0x203A) + " "  # the marker: a single right-pointing angle quotation mark
+
+
+class InputRow(Horizontal):
+    """The prompt marker beside the chat input, between a line above and a line below (accent while focus is inside)."""
+
+    DEFAULT_CSS = """
+    InputRow {
+        height: auto;
+        border-top: solid $panel;
+        border-bottom: solid $panel;
+    }
+    InputRow:focus-within {
+        border-top: solid $accent;
+        border-bottom: solid $accent;
+    }
+    InputRow > #prompt { width: 2; height: 1; color: $accent; }
+    """
+
+    def __init__(self, chat: ChatInput, *, id: str = "input-row") -> None:
+        super().__init__(id=id)
+        self._chat = chat
+
+    def compose(self) -> ComposeResult:
+        yield Static(PROMPT, id="prompt", markup=False)
+        yield self._chat
 
 
 class ChatInput(TextArea):
+    DEFAULT_CSS = """
+    ChatInput {
+        width: 1fr;
+        height: auto;
+        min-height: 1;
+        max-height: 8;
+        border: none;
+        padding: 0;
+        background: transparent;
+    }
+    ChatInput:focus { border: none; }
+    ChatInput .text-area--cursor-line { background: transparent; }
+    """
+
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+j", "newline", "New line", show=False),
         Binding("shift+enter", "newline", "New line", show=False),

@@ -103,7 +103,7 @@ from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.screens.sessions import SessionPicker
 from src.tui.screens.usage import UsageScreen
 from src.tui.widgets.attachment_panel import AttachmentPanel
-from src.tui.widgets.chat_input import ChatInput
+from src.tui.widgets.chat_input import PLACEHOLDER, ChatInput, InputRow
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
 from src.tui.widgets.queue_panel import QueuePanel
@@ -147,7 +147,6 @@ _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
 class AgentApp(App[None]):
     CSS = """
     #transcript { height: 1fr; }
-    ChatInput { height: auto; max-height: 10; min-height: 3; }
     """
     ENABLE_COMMAND_PALETTE = False  # it would open over a pending approval dialog
     BINDINGS: ClassVar[list[BindingType]] = [
@@ -247,7 +246,7 @@ class AgentApp(App[None]):
         yield AttachmentPanel(id="attachments")
         yield CommandSuggestions(id="suggestions")  # above the input
         yield PathSuggestions(id="path-suggestions")
-        yield ChatInput(id="input")
+        yield InputRow(ChatInput(id="input", placeholder=PLACEHOLDER))
         yield StatusBar()
 
     def on_mount(self) -> None:
