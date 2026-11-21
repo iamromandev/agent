@@ -40,6 +40,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             agents=rt.agents,
             guard=rt.guard,
             hooks=rt.hooks,
+            paste=rt.paste,
         )
     except BaseException:
         rt.abort()  # the app could not be built, so it can never close them

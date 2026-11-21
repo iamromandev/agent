@@ -20,12 +20,16 @@ class ChatInput(TextArea):
     BINDINGS: ClassVar[list[BindingType]] = [
         Binding("ctrl+j", "newline", "New line", show=False),
         Binding("shift+enter", "newline", "New line", show=False),
+        Binding("ctrl+v", "paste_image", "Paste", show=False),
     ]
 
     class Submitted(Message):
         def __init__(self, text: str) -> None:
             super().__init__()
             self.text = text
+
+    class PasteImage(Message):
+        """ctrl+v: the app looks for an image on the clipboard and falls back to `action_paste`."""
 
     def __init__(self, text: str = "", **kwargs: Any) -> None:
         super().__init__(text, **kwargs)
@@ -75,6 +79,9 @@ class ChatInput(TextArea):
         self.move_cursor(self.document.end)
         if self.suggestions is not None:
             self.suggestions.hide()
+
+    def action_paste_image(self) -> None:
+        self.post_message(self.PasteImage())
 
     def action_newline(self) -> None:
         self.insert("\n")
