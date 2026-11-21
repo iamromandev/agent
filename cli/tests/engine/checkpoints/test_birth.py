@@ -61,17 +61,18 @@ def born_with(folder: Path, name: str, info: os.stat_result) -> float | None:
 
 
 @KEEPS_BIRTH_TIMES
-@pytest.mark.parametrize("attempt", range(20))
-def test_after_settle_a_file_made_at_once_is_born_after_the_mark(tmp_path: Path, attempt: int) -> None:
+def test_after_settle_a_file_made_at_once_is_born_after_the_mark(tmp_path: Path) -> None:
     """Linux stamps files from a coarse clock up to a tick behind `time.time()`: without `settle`, a file the turn
-    writes right after the `before` snapshot can look older than the snapshot."""
-    mark = time.time()
-    settle(mark)
-    (tmp_path / "new.txt").write_text("new")
+    writes right after the `before` snapshot can look older than the snapshot. Repeated, because the race is rare."""
+    for attempt in range(20):
+        mark = time.time()
+        settle(mark)
+        path = tmp_path / f"new-{attempt}.txt"
+        path.write_text("new")
 
-    found = born(tmp_path / "new.txt")
+        found = born(path)
 
-    assert found is not None and found > mark
+        assert found is not None and found > mark, f"attempt {attempt}"
 
 
 def test_settle_returns_within_its_limit_whatever_the_mark() -> None:
