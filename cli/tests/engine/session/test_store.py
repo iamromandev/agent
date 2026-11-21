@@ -536,3 +536,18 @@ def test_an_old_file_without_images_loads_unchanged(root: Path, workspace: Path)
     loaded = SessionStore(root, workspace).load("01AAAAAAAAAAAAAAAAAAAAAAAA")
     assert [m.images for m in loaded.history] == [(), ()]
     assert [i.kind for i in loaded.items] == ["user", "assistant"]
+
+
+def test_images_on_a_tool_message_survive_a_save_and_a_resume(root: Path, workspace: Path) -> None:
+    from src.engine.provider.base import Image, ToolCall
+
+    image = Image("png", PNG_BYTES, "a.png")
+    messages = [
+        Message("user", "look"),
+        Message("assistant", "", [ToolCall("c1", "read", {"path": "a.png"})]),
+        Message("tool", "image a.png (PNG, 1 KB)", tool_call_id="c1", name="read", images=(image,)),
+        Message("assistant", "ok"),
+    ]
+    loaded = record_and_load(root, workspace, messages)
+    assert loaded.history[2].images == (image,)
+    assert loaded.skipped_lines == 0

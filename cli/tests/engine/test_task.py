@@ -248,3 +248,18 @@ async def test_ac24_a_custom_agent_failures_match_todays_results(ctx: ToolContex
     assert _tool_message(agent, "t1") == (
         f"{AGENT_REPORT_HEADER.format(name='a')}\n[step limit (2) reached before the subagent finished]"
     )
+
+
+async def test_the_built_in_child_reads_an_image_and_the_parent_keeps_only_text(ctx: ToolContext) -> None:
+    from src.engine.provider.vision import VisionCheck
+
+    data = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+    (ctx.workspace / "p.png").write_bytes(data)
+    agent, provider, _ = _make(ctx, [_task(), _call("r", "read", path="p.png"), _say("report"), _say("done")])
+    check = VisionCheck(None)
+    check.set("fake", True)
+    agent.vision = check
+    await _run(agent)
+    child_request = provider.requests[2][0]
+    assert [i.data for m in child_request if m.role == "tool" for i in m.images] == [data]
+    assert all(m.images == () for m in agent.history)

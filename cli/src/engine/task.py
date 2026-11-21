@@ -111,6 +111,7 @@ class TaskTool(Tool):
             compact_keep_turns=parent.compact_keep_turns,
             instructions_share=parent.instructions_share,
             role="task",
+            vision=parent.vision,  # one answer per model, shared: a pinned child's model is asked about by name
             rules=parent.rules,  # one set of rules for both: a deny on `read` stops the subagent too
             # A custom child's tool calls run the parent's PreToolUse/PostToolUse hooks (its run_turn never runs the
             # others); the built-in child stays unhooked. The parent's `task` call is hooked either way.

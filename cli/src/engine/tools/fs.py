@@ -9,10 +9,13 @@ from typing import Any, ClassVar
 
 from src.engine.guardrails.redact import PLACEHOLDER, adds_placeholder
 from src.engine.guardrails.setup import guard_of
+from src.engine.provider.base import Image
+from src.engine.provider.images import ImageError, describe, read_image_fd
+from src.engine.provider.models import shown_name
 
 from .base import Prepared, Preview, Tool, ToolContext, ToolResult
 from .paths import InvalidPath, inside_workspace, invalid_path_result, resolve_path
-from .protected import NotRegular, ProtectedFile, open_text_checked, refuse_protected
+from .protected import NotRegular, ProtectedFile, as_text, open_checked, refuse_protected
 from .text import is_binary, unified_diff
 
 READ_MAX_LINES = 2000
@@ -21,7 +24,7 @@ READ_MAX_LINES = 2000
 class ReadTool(Tool):
     name: ClassVar[str] = "read"
     description: ClassVar[str] = (
-        "Read a text file and return its lines with line numbers. "
+        "Read a text file and return its lines with line numbers, or show an image (PNG, JPEG, GIF, WebP) to a model with vision. "
         "Use offset (1-based first line) and limit (max 2000) for large files."
     )
     parameters: ClassVar[dict[str, Any]] = {
@@ -42,10 +45,17 @@ class ReadTool(Tool):
             path = resolve_path(ctx, raw)
         except InvalidPath as exc:
             return invalid_path_result(exc)
-        return await asyncio.to_thread(_read, path, raw, offset, limit, ctx)
+        result = await asyncio.to_thread(_read, path, raw, offset, limit, ctx)
+        if not isinstance(result, Image):
+            return result
+        if ctx.has_vision is None or not await ctx.has_vision():  # asked only now: a text read never waits on it
+            message = f"{raw} is an image and the model '{shown_name(ctx.model)}' has no vision"
+            return ToolResult(message, is_error=True, summary="no vision")
+        described = describe(result)
+        return ToolResult(f"image {raw} ({described})", summary=described, images=(result,))
 
 
-def _read(path: Path, raw: str, offset: int, limit: int, ctx: ToolContext) -> ToolResult:
+def _read(path: Path, raw: str, offset: int, limit: int, ctx: ToolContext) -> ToolResult | Image:
     if path.is_dir():
         return ToolResult(f"{raw} is a directory", is_error=True, summary="directory")
     if not path.exists():
@@ -54,7 +64,20 @@ def _read(path: Path, raw: str, offset: int, limit: int, ctx: ToolContext) -> To
         return ToolResult(f"{raw} is not a regular file", is_error=True, summary="not a regular file")
     try:
         # One open, and the open file is what gets checked: the path check in the loop is not enough on its own.
-        handle, binary = open_text_checked(path, ctx)
+        raw_handle = open_checked(path, ctx)
+        try:
+            try:
+                image = read_image_fd(raw_handle.fileno(), raw)
+            except ImageError as exc:
+                raw_handle.close()
+                return ToolResult(f"{raw}: {exc.reason}", is_error=True, summary="image too large")
+            if image is not None:
+                raw_handle.close()
+                return image
+            handle, binary = as_text(raw_handle)  # the same open file: no second open to race
+        except BaseException:
+            raw_handle.close()
+            raise
         with handle:
             if binary:
                 return ToolResult(f"{raw} is binary or not UTF-8", is_error=True, summary="binary")

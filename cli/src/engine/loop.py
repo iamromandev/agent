@@ -8,7 +8,7 @@ import dataclasses
 import os
 import platform
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
@@ -960,6 +960,14 @@ class Agent:
             return None
         return Message("assistant", "".join(parts), calls), total
 
+    def _vision_asker(self, model: str, emit: EventSink) -> Callable[[], Awaitable[bool]]:
+        async def ask() -> bool:
+            if self.vision is None:
+                return False
+            return await self.vision.has(model, lambda text: emit(Notice("warn", text)))
+
+        return ask
+
     async def _run_tool_call(self, call: ToolCall, mode: Mode, emit: EventSink) -> None:
         tool = next((t for t in self.all_tools() if t.name == call.name), None)
         self._inflight = call.id
@@ -990,6 +998,9 @@ class Agent:
                 call_ctx = dataclasses.replace(
                     self.ctx, progress=lambda event: emit(TaskProgress(call.id, event)), protected_ok=gate
                 )
+                if call.name == "read":  # asked only when `read` has found an image, about the model that gets it
+                    model = self.provider.model
+                    call_ctx = dataclasses.replace(call_ctx, has_vision=self._vision_asker(model, emit), model=model)
                 prepared = await tool.prepare(call.arguments, call_ctx)
                 if isinstance(prepared, ToolResult):
                     result, ran = prepared, True  # the tool did its work (and failed, or finished) while preparing
@@ -1018,7 +1029,8 @@ class Agent:
             except Exception as exc:  # a broken hook step never costs the result the tool produced
                 emit(hook_failed("PostToolUse", exc))
         self._record(
-            Message("tool", result.output, tool_call_id=call.id, name=call.name), ToolMeta(label, result.summary)
+            Message("tool", result.output, tool_call_id=call.id, name=call.name, images=result.images),
+            ToolMeta(label, result.summary)
         )
         self._inflight = None
         self._flush_save_error(emit)

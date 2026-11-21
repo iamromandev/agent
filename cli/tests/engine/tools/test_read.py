@@ -38,13 +38,31 @@ async def test_read_directory_is_an_error(workspace: Path, ctx: ToolContext) -> 
     assert result.output == "src is a directory"
 
 
-async def test_read_png_is_an_error(workspace: Path, ctx: ToolContext) -> None:
+async def test_read_png_without_vision_is_an_error(workspace: Path, ctx: ToolContext) -> None:
     (workspace / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe")
 
     result = await _read(ctx, path="logo.png")
 
     assert result.is_error
-    assert result.output == "logo.png is binary or not UTF-8"
+    assert result.output == "logo.png is an image and the model '' has no vision"
+    assert result.images == ()
+
+
+async def _yes() -> bool:
+    return True
+
+
+async def test_read_png_with_vision_returns_the_image(workspace: Path, ctx: ToolContext) -> None:
+    import dataclasses
+
+    data = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\xff\xfe"
+    (workspace / "logo.png").write_bytes(data)
+
+    result = await _read(dataclasses.replace(ctx, has_vision=_yes, model="v"), path="logo.png", offset=5)
+
+    assert not result.is_error
+    assert result.output == "image logo.png (PNG, 1 KB)"
+    assert [(i.format, i.data, i.name) for i in result.images] == [("png", data, "logo.png")]
 
 
 async def test_read_with_a_nul_byte_in_the_path_is_an_error_result(ctx: ToolContext) -> None:

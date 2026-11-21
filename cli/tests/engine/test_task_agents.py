@@ -509,3 +509,52 @@ async def test_ac17_a_model_switch_between_two_child_runs_is_seen_by_the_second(
     plain.switch("new:2b", 100_000)
     await _run(agent, "two")
     assert plain.used[1][0] == "fake" and plain.used[-2][0] == "new:2b"
+
+
+# `read` of an image in a child: the vision answer is by the child's own model (AC8, AC11)
+
+PNG_DATA = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def _vision_agent(ctx: ToolContext, provider: ScriptedProvider, resolved: str | None, vision: dict[str, bool]) -> Agent:
+    from src.engine.provider.vision import VisionCheck
+
+    check = VisionCheck(None)
+    for model, value in vision.items():
+        check.set(model, value)
+    defn = dataclasses.replace(_def("w", ("read",)), model=resolved, resolved_model=resolved)
+    return Agent(
+        provider,
+        default_tools(),
+        RecordingApprover(),
+        ctx,
+        25,
+        today=lambda: date(2026, 11, 14),
+        recorder=MemoryRecorder(),
+        task_tools=read_only_tools(None),
+        agents=Agents({"w": defn}, ()),
+        vision=check,
+    )
+
+
+async def test_a_custom_child_reads_an_image_with_its_own_models_vision(ctx: ToolContext) -> None:
+    (ctx.workspace / "p.png").write_bytes(PNG_DATA)
+    child_script = [_call("r", "read", path="p.png"), _say("report")]
+    provider = _PinningProvider([_delegate(), _say("done")], child_script)
+    agent = _vision_agent(ctx, provider, "other:1b", {"main": False, "other:1b": True})
+    await _run(agent)
+    child = provider.made[0]
+    tool = next(m for m in child.requests[1][0] if m.role == "tool")
+    assert [i.data for i in tool.images] == [PNG_DATA]
+    assert all(m.images == () for m in agent.history)  # the parent keeps only text
+
+
+async def test_a_child_whose_model_has_no_vision_gets_the_error(ctx: ToolContext) -> None:
+    (ctx.workspace / "p.png").write_bytes(PNG_DATA)
+    child_script = [_call("r", "read", path="p.png"), _say("report")]
+    provider = _PinningProvider([_delegate(), _say("done")], child_script)
+    agent = _vision_agent(ctx, provider, "other:1b", {"main": True, "other:1b": False})
+    await _run(agent)
+    tool = next(m for m in provider.made[0].requests[1][0] if m.role == "tool")
+    assert tool.images == ()
+    assert "has no vision" in tool.content
