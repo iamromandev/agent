@@ -222,6 +222,7 @@ class AgentApp(App[None]):
         self._queue = MessageQueue()  # messages typed while a turn runs, sent together when it ends `done`
         self._interrupted = False  # Esc or ctrl+c landed while the turn or compaction was active: the queue is not sent
         self._job_status: str | None = None  # how the running turn or compaction ended, once known
+        self._progress_call: str | None = None  # the call whose live line the status bar shows
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
         self._undoing = False  # /undo is running: keys that act on a turn leave it alone
         self._switching = False  # a session is being loaded and drawn: no turn may start meanwhile
@@ -1567,6 +1568,8 @@ class AgentApp(App[None]):
                 await transcript.add_tool(call_id, label, task=task)
             case ToolFinished(call_id, result, preview, applied):
                 self._finished_since_toggle = True
+                if call_id == self._progress_call:
+                    status.progress, self._progress_call = "", None
                 if (entry := transcript.tool(call_id)) is not None:
                     await entry.finish(result, preview, applied)
             case Notice(level, text):
@@ -1579,8 +1582,8 @@ class AgentApp(App[None]):
                         await entry.add_child(child_id, label)
                     case ToolFinished(child_id, result, _, _) if entry is not None:
                         await entry.finish_child(child_id, result)
-                    case ToolProgress(text) if entry is not None:
-                        entry.show_progress(text)
+                    case ToolProgress(text) if entry is not None and not entry.finished:
+                        status.progress, self._progress_call = text, call_id  # shown in the status bar
                     case Notice("warn" | "info" as level, text):  # an error ends the call: its result shows it
                         await transcript.add_notice(level, f"task: {text}")
             case TodosChanged(items):

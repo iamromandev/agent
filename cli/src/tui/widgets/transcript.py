@@ -102,11 +102,6 @@ class ToolEntry(Collapsible):
         self.detail = ""
         self._children: dict[str, tuple[Static, str]] = {}  # a task's child calls: line and label, by child call id
 
-    def show_progress(self, text: str) -> None:
-        """A live status line in the title (visible while the block is folded); a finished block ignores it."""
-        if not self.finished:
-            self.title = _title(tool_title(self.label, text[:80], None))
-
     async def add_child(self, call_id: str, label: str) -> None:
         """A tool call of a task's child, as a line inside the block."""
         if (earlier := self._children.get(call_id)) is not None and earlier[1]:

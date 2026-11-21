@@ -417,3 +417,9 @@ async def test_a_failure_after_progress_keeps_the_error_text(
     result = await (await _prepared(tool, _collect(ctx, lambda e: None), width=256, height=256)).execute()
     assert result.is_error and result.output.startswith("mflux failed (exit 1): ")
     assert "step " not in result.output and "%|" not in result.output
+
+
+def test_the_label_names_the_file_not_the_prompt() -> None:
+    tool = GenerateImageTool(MfluxGenerator(Path("/nonexistent/mflux"), "x/y", 60, Guardrails.off(Path.cwd())))
+    assert tool.label({"prompt": "a very long prompt " * 50, "path": "images/fox.png"}) == "generate_image images/fox.png"
+    assert tool.label({"prompt": "p"}) == "generate_image"
