@@ -4,6 +4,7 @@ from typing import TYPE_CHECKING
 
 from .base import Tool
 from .fs import EditTool, ReadTool, WriteTool
+from .image import GenerateImageTool
 from .search import GlobTool, GrepTool
 from .shell import BashTool
 from .skill import SkillTool
@@ -13,6 +14,7 @@ from .web import WebFetch
 from .web_search import WebSearch
 
 if TYPE_CHECKING:
+    from src.engine.imagegen import MfluxGenerator
     from src.engine.search_web import Searcher
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
@@ -38,8 +40,9 @@ def default_tools(
     fetcher: Fetcher | None = None,
     searcher: Searcher | None = None,
     skills: Skills | None = None,
+    imager: MfluxGenerator | None = None,
 ) -> list[Tool]:
-    """The built-in tools; the terminal and web tools only when there is a manager or fetcher to use."""
+    """The built-in tools; the terminal, web and image tools only when there is a manager, fetcher or generator to use."""
     tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool(), WriteTool(), EditTool(), BashTool(), TodoTool()]
     if terminals is not None:
         tools += [TermStart(terminals), TermRead(terminals), TermStop(terminals)]
@@ -49,4 +52,6 @@ def default_tools(
         tools.append(WebSearch(searcher))
     if skills is not None and skills.by_name:
         tools.append(SkillTool(skills))
+    if imager is not None:
+        tools.append(GenerateImageTool(imager))
     return tools

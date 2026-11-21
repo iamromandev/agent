@@ -12,7 +12,7 @@ UI_PORT := 3000
 .PHONY: check test setup down restart clean help \
 	api-check api-test api-run api-up api-down api-build api-build-prod api-push-prod api-restart api-ps api-logs \
 	api-migrate api-install api-export api-clean-all api-clean-volumes api-clean-host \
-	cli-install cli-check cli-test cli-run cli-eval cli-tool-install cli-tool-uninstall \
+	cli-sync cli-install cli-check cli-test cli-run cli-eval cli-tool-install cli-tool-uninstall \
 	ui-install ui-dev ui-down ui-restart ui-build ui-check ui-format
 
 ## both stacks
@@ -82,7 +82,10 @@ api-clean-host: # Prune all unused Docker data on the host
 	$(MAKE) -C $(API) clean-host
 
 ## cli — delegates to cli/makefile
-cli-install: # Install CLI dependencies
+cli-sync: # Install the CLI dependencies into cli/.venv
+	$(MAKE) -C $(CLI) sync
+
+cli-install: # Install the agent command on your PATH (with image generation on Apple Silicon)
 	$(MAKE) -C $(CLI) install
 
 cli-check: # Lint + typecheck the CLI
@@ -97,8 +100,7 @@ cli-run: # Run the CLI, e.g. make cli-run ARGS="health check"
 cli-eval: # Run the real-model smoke test (needs Ollama), e.g. make cli-eval EVAL_RUNS=1
 	$(MAKE) -C $(CLI) eval
 
-cli-tool-install: # Install the agent command on your PATH
-	$(MAKE) -C $(CLI) tool-install
+cli-tool-install: cli-install # Same as cli-install (older name)
 
 cli-tool-uninstall: # Remove the installed agent command
 	$(MAKE) -C $(CLI) tool-uninstall

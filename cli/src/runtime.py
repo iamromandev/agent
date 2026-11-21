@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from src.engine.guardrails.setup import Guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import Hooks
+    from src.engine.imagegen import MfluxGenerator
     from src.engine.mcp.contract import McpConnector
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import McpSetup
@@ -48,6 +49,15 @@ class StartChoice:
 
 
 NEW = StartChoice("new")
+
+
+def _image_generator(command: Path | None, settings: Settings, guard: Guardrails) -> MfluxGenerator | None:
+    """The mflux generator for the main agent, or None when mflux was not asked for or not found."""
+    from src.engine.imagegen import MfluxGenerator
+
+    if command is None:
+        return None
+    return MfluxGenerator(command, settings.image_model, settings.image_timeout, guard)
 
 
 @dataclass
@@ -144,6 +154,7 @@ def build_runtime(
     trust_project_mcp: bool = False,
     checkpoints: bool = False,
     catalog: ModelCatalog | None = None,
+    images: bool = False,
 ) -> Runtime:
     """Read the settings files once and wire the run for `workspace` (a folder).
 
@@ -151,7 +162,8 @@ def build_runtime(
     `builtins` are the slash commands a custom command may not shadow. With `terminals=False` there is no
     terminal manager and no `term_*` tool. `provider` replaces the Ollama one and skips the launch model lookup
     (for tests), and so does `connector` for the MCP servers. `trust_project_mcp` treats the project's MCP file as
-    trusted for this run (nothing is remembered). `checkpoints=True` (the app) snapshots the workspace around each turn for `/undo`."""
+    trusted for this run (nothing is remembered). `images=True` (the app) offers `generate_image` to the main agent when
+    mflux is found. `checkpoints=True` (the app) snapshots the workspace around each turn for `/undo`."""
     from src.client import OllamaClient, SearxClient, WebClient
     from src.client.clipboard import PasteFolder
     from src.client.clipboard import prune_stale as prune_pastes
@@ -162,9 +174,11 @@ def build_runtime(
     from src.engine.agents.loader import load_agents
     from src.engine.checkpoints.setup import prepare_checkpoints
     from src.engine.commands.loader import load_commands
+    from src.engine.guardrails.setup import Guardrails
     from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import prepare as prepare_hooks
+    from src.engine.imagegen import find_mflux
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
@@ -193,13 +207,22 @@ def build_runtime(
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
         skills = load_skills(root)  # read once, like the commands
+        image_command = find_mflux() if images else None  # None: no tool, no warning (not macOS arm64, or no extra)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
             TrustStore(trust_store_path(name="permission-trust.json")),
             # to warn about rules that never apply; the manager is only asked for its tools' names, it starts nothing
-            permission_setup.tool_keys(default_tools(TerminalManager(root), fetcher=web, searcher=search, skills=skills)),
+            permission_setup.tool_keys(
+                default_tools(
+                    TerminalManager(root),
+                    fetcher=web,
+                    searcher=search,
+                    skills=skills,
+                    imager=_image_generator(image_command, settings, Guardrails.off(root)),
+                )
+            ),
         )
         # The model: --model, then AGENT_MODEL, then the project's `model` key (read without trust: it only picks an
         # installed model), then the default. A throwaway client, because this loop is closed before the app's starts.
@@ -277,7 +300,9 @@ def build_runtime(
         def agent_factory(approver: Approver) -> Agent:
             return Agent(
                 run_provider,
-                default_tools(manager, fetcher=web, searcher=search, skills=skills),
+                default_tools(
+                    manager, fetcher=web, searcher=search, skills=skills, imager=_image_generator(image_command, settings, guard)
+                ),
                 approver,
                 ctx,
                 settings.max_steps,

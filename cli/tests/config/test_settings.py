@@ -115,3 +115,23 @@ def test_search_url_needs_an_http_scheme_and_a_host(value: str) -> None:
 
 def test_search_url_accepts_http_and_https() -> None:
     assert Settings(_env_file=None, search_url="https://searx.local/base").search_url == "https://searx.local/base"
+
+
+def test_image_settings_defaults() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.image_model == "filipstrand/Z-Image-Turbo-mflux-4bit"
+    assert settings.image_timeout == 900.0
+
+
+def test_image_settings_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_IMAGE_MODEL", "x/y")
+    monkeypatch.setenv("AGENT_IMAGE_TIMEOUT", "30")
+    settings = Settings(_env_file=None)
+    assert (settings.image_model, settings.image_timeout) == ("x/y", 30.0)
+
+
+@pytest.mark.parametrize("name, value", [("AGENT_IMAGE_TIMEOUT", "0"), ("AGENT_IMAGE_MODEL", "")])
+def test_invalid_image_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

@@ -447,3 +447,17 @@ def test_a_builtin_command_prompt_such_as_agents_is_exit_2(ws: Path, capsys: pyt
     assert code == EXIT_USAGE
     assert "/agents" in capsys.readouterr().err
     assert provider.requests == []
+
+
+def test_headless_never_offers_generate_image_even_when_mflux_is_found(
+    ws: Path, spy: Spy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.image_fakes import fake_mflux
+
+    command = fake_mflux(tmp_path)
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", lambda: command)
+    provider = ScriptedProvider([say("x")])
+
+    assert go(ws, provider) == EXIT_OK
+
+    assert "generate_image" not in provider.requests[0][1]

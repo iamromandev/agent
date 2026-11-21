@@ -49,6 +49,17 @@ class Settings(BaseSettings):
     search_url: Annotated[
         str | None, Field(default=None, description="SearXNG base URL for web_search; unset hides the tool")
     ]
+    image_model: Annotated[
+        str,
+        Field(
+            default="filipstrand/Z-Image-Turbo-mflux-4bit",
+            min_length=1,
+            description="mflux model (Hugging Face repo or folder) for generate_image",
+        ),
+    ]
+    image_timeout: Annotated[
+        float, Field(default=900.0, gt=0, description="Seconds before a generate_image call is killed")
+    ]
     mcp_timeout: Annotated[
         float, Field(default=60.0, gt=0, description="Seconds before an MCP tool call gives up")
     ]

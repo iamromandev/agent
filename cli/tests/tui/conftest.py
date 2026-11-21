@@ -15,6 +15,7 @@ from src.engine.checkpoints.store import CheckpointStore
 from src.engine.commands.loader import Commands
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.setup import Hooks
+from src.engine.imagegen import MfluxGenerator
 from src.engine.mcp.hub import McpHub
 from src.engine.permissions.setup import Rules
 from src.engine.provider.base import Message, ProviderEvent
@@ -113,6 +114,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         window_cap: int = 8192,
         launch_notices: Sequence[str] = (),
         checkpoints: CheckpointStore | None = None,
+        imager: MfluxGenerator | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -132,7 +134,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         def factory(approver: Approver) -> Agent:
             return Agent(
                 provider,
-                default_tools(manager, skills=skills) if tools else [],
+                default_tools(manager, skills=skills, imager=imager) if tools else [],
                 approver,
                 ToolContext(root, 5.0, guard=guard),
                 max_steps,
