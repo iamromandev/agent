@@ -68,7 +68,7 @@ async def test_the_input_stays_usable_and_escape_cancels_a_running_generation(
         assert results == ["Interrupted by user"]  # the loop's own wording for an Esc during a call
 
 
-async def test_the_block_title_shows_progress_while_running_and_the_summary_after(
+async def test_the_status_bar_shows_progress_while_running_and_clears_after(
     make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.05)
@@ -87,12 +87,15 @@ async def test_the_block_title_shows_progress_while_running_and_the_summary_afte
         await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
         await choose(pilot, "once")
         transcript = app.query_one(Transcript)
-        await until(pilot, lambda: (e := transcript.tool("c1")) is not None and "step " in str(e.title))
+        status = app.query_one(StatusBar)
+        await until(pilot, lambda: "◐ step " in status.line and "● working" not in status.line)
         entry = transcript.tool("c1")
         assert entry is not None and not entry.finished
-        await until(pilot, lambda: not app.query_one(StatusBar).busy)
-        assert entry.finished and "step " not in str(entry.title) and "PNG" in str(entry.title)
-        before = str(entry.title)
-        entry.show_progress("step 1/9")  # a finished block ignores late updates
-        assert str(entry.title) == before
+        assert "step " not in str(entry.title)  # the block title is left alone
+        await until(pilot, lambda: not status.busy)
+        assert entry.finished and "PNG" in str(entry.title)
+        assert status.progress == "" and "◐" not in status.line
+        await app._on_agent_event(TaskProgress("c1", ToolProgress("step 1/9")))  # a finished call: ignored
+        assert status.progress == ""
         await app._on_agent_event(TaskProgress("gone", ToolProgress("step 1/9")))  # no block: dropped silently
+        assert status.progress == ""

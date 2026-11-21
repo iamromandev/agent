@@ -100,6 +100,11 @@ class GenerateImageTool(Tool):
     def __init__(self, generator: MfluxGenerator) -> None:
         self.generator = generator
 
+    def label(self, args: dict[str, Any]) -> str:
+        """The file, not the prompt: a prompt can be 2,000 characters and would fill the block's one-line title."""
+        path = args.get("path")
+        return f"{self.name} {path}" if isinstance(path, str) and path else self.name
+
     async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
         if (problem := check_args(self.parameters, args)) is not None:
             return _invalid(problem)

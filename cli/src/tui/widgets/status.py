@@ -41,6 +41,7 @@ class StatusBar(Static):
     busy: reactive[bool] = reactive(False)
     compacting: reactive[bool] = reactive(False)  # a summary is being written: slow, and Esc cancels it
     error: reactive[str | None] = reactive(None)
+    progress: reactive[str] = reactive("")  # a running tool's live line (generate_image); cleared when it ends
 
     line: str = ""
 
@@ -55,6 +56,8 @@ class StatusBar(Static):
         parts = [mode, self.model, f"ctx {'~' if self.estimated else ''}{self.used} / {self.window}", self.workspace]
         if self.compacting:
             parts.append("◐ compacting…")
+        elif self.progress:
+            parts.append(f"◐ {self.progress[:80]}")
         elif self.busy:
             parts.append("● working")
         if self.error:
@@ -67,5 +70,10 @@ class StatusBar(Static):
     def _watch_all(self, *_: object) -> None:
         self._redraw()
 
+    def watch_busy(self, busy: bool) -> None:
+        if not busy:
+            self.progress = ""  # nothing runs any more: a line left by an ended call must not stay
+        self._redraw()
+
     watch_mode = watch_pending_mode = watch_model = watch_used = _watch_all
-    watch_window = watch_workspace = watch_busy = watch_error = watch_estimated = watch_compacting = _watch_all
+    watch_window = watch_workspace = watch_error = watch_estimated = watch_compacting = watch_progress = _watch_all
