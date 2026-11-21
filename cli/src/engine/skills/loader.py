@@ -1,4 +1,4 @@
-"""Finding and reading skills. Files come from a repository: nothing in them is run."""
+"""Finding and reading skills (built-in, global, project). Files come from a repository: nothing in them is run."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from src.engine.commands.loader import NAME, Source, front_matter
+from src.engine.commands.loader import NAME, front_matter
 from src.engine.fileio import read_regular
 from src.engine.permissions.setup import MAX_WARNINGS
 from src.engine.text import escape, one_line
@@ -16,6 +17,7 @@ MAX_BYTES = 64 * 1024
 DESCRIPTION_CHARS = 200
 SECTION_CHARS = 8_000
 FILE = "SKILL.md"
+SkillSource = Literal["builtin", "global", "project"]
 _HEADER = (
     "Available skills (call the skill tool with a name to load its instructions "
     "before doing a task its description matches):"
@@ -27,7 +29,7 @@ class Skill:
     name: str
     description: str  # raw from the file, not escaped
     body: str
-    source: Source
+    source: SkillSource
     folder: Path  # absolute
 
 
@@ -68,6 +70,11 @@ def global_skills_dir(env: Mapping[str, str] = os.environ) -> Path:
     return base / "agent" / "skills"
 
 
+def builtin_skills_dir() -> Path:
+    """The skills shipped with the agent: `<this package>/builtin`."""
+    return Path(__file__).resolve().parent / "builtin"
+
+
 def project_skills_dir(workspace: Path) -> Path:
     return workspace / ".agent" / "skills"
 
@@ -80,8 +87,8 @@ def parse_skill(text: str) -> tuple[dict[str, str], str]:
     return keys, body
 
 
-def _read_file(folder: Path, source: Source) -> bytes:
-    if source == "global":
+def _read_file(folder: Path, source: SkillSource) -> bytes:
+    if source != "project":
         return read_regular(folder / FILE, MAX_BYTES)
     # The folder is opened without following a symlink and SKILL.md inside that open directory, so neither can be
     # swapped for a link between a check and the read.
@@ -92,18 +99,18 @@ def _read_file(folder: Path, source: Source) -> bytes:
         os.close(dir_fd)
 
 
-def _read(folder: Path, name: str, source: Source) -> Skill:
+def _read(folder: Path, name: str, source: SkillSource) -> Skill:
     data = _read_file(folder, source)
     keys, body = parse_skill(data.decode("utf-8"))
     if not keys.get("description"):
         raise ValueError("description is missing or empty")
     if "name" in keys and keys["name"] != name:
         raise ValueError(f"name '{keys['name']}' does not match the folder name '{name}'")
-    shown = folder.resolve() if source == "global" else folder.absolute()
+    shown = folder.resolve() if source != "project" else folder.absolute()
     return Skill(name, keys["description"], body, source, shown)
 
 
-def _load_dir(directory: Path, source: Source, found: dict[str, Skill], warnings: list[str]) -> None:
+def _load_dir(directory: Path, source: SkillSource, found: dict[str, Skill], warnings: list[str]) -> None:
     try:
         entries = sorted(directory.iterdir())
     except FileNotFoundError:
@@ -128,10 +135,12 @@ def _load_dir(directory: Path, source: Source, found: dict[str, Skill], warnings
                 warnings.append(f"{path / FILE}: {reason}")
 
 
-def load_skills(workspace: Path, env: Mapping[str, str] = os.environ) -> Skills:
-    """Read both folders once. A project skill replaces a global one; problems become warnings."""
+def load_skills(workspace: Path, env: Mapping[str, str] = os.environ, builtin: Path | None = None) -> Skills:
+    """Read the folders once. Later sources replace earlier ones by name: builtin, global, project. Problems become warnings."""
     found: dict[str, Skill] = {}
     warnings: list[str] = []
+    if builtin is not None:
+        _load_dir(builtin, "builtin", found, warnings)
     _load_dir(global_skills_dir(env), "global", found, warnings)
     project = project_skills_dir(workspace)
     if project.parent.is_symlink() or project.is_symlink():

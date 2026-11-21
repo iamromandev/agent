@@ -37,3 +37,13 @@ async def test_skills_shows_non_ascii_descriptions_readable_and_writes_out_bidi(
         (text,) = [n for n in _notices(app) if "(global)" in n]
 
     assert text.removeprefix("\u2139 ") == "ru (global): Проверка кода \\u202e"
+
+
+async def test_skills_shows_the_builtin_source(make_app: AppFactory) -> None:
+    app = make_app(skills=_skills(_skill("tdd", "x", source="builtin")))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/skills")
+        await pilot.pause()
+        (text,) = [n for n in _notices(app) if "(builtin)" in n]
+
+    assert text.removeprefix("\u2139 ") == "tdd (builtin): x"
