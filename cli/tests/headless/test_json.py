@@ -60,6 +60,19 @@ def two_calls() -> ScriptedProvider:
     return ScriptedProvider([call("read", "c1", path="a.txt"), call("glob", "c2", pattern="*.txt"), say("done")], context_window=100_000)
 
 
+def test_stream_json_has_no_phase_event_and_the_same_types_as_before(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    (ws / "a.txt").write_text("alpha")
+
+    code = go(ws, two_calls(), "stream-json")
+
+    out = capsys.readouterr().out
+    events = lines(out)
+    assert code == 0
+    assert {e["type"] for e in events} == {"start", "tool_call", "tool_result", "result"}
+    assert not any("kind" in e or "phase" in e for e in events)
+    assert events[-1]["result"] == "done"
+
+
 def test_the_step_limit_is_exit_1_step_limit(ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setenv("AGENT_MAX_STEPS", "1")
     get_settings.cache_clear()

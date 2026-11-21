@@ -32,6 +32,7 @@ from src.engine import (
     Compacting,
     EventSink,
     Notice,
+    Phase,
     TaskProgress,
     TodosChanged,
     ToolFinished,
@@ -1563,7 +1564,10 @@ class AgentApp(App[None]):
             case AssistantText(delta):
                 if self._finished_since_toggle:  # text after a tool result: a new request has started
                     status.pending_mode = False
+                status.add_reply_chars(len(delta))
                 await transcript.write_assistant(delta)
+            case Phase() as phase:
+                status.set_phase(phase)
             case ToolStarted(call_id, label, task):
                 await transcript.add_tool(call_id, label, task=task)
             case ToolFinished(call_id, result, preview, applied):
@@ -1590,12 +1594,15 @@ class AgentApp(App[None]):
                 self.query_one(TodoPanel).show(items)
             case Compacting(active):
                 status.compacting = active
-            case UsageUpdate(used, window, estimated):
+            case UsageUpdate(used, window, estimated, _, completion_tokens):
                 status.used = used
                 status.window = window
                 status.estimated = estimated
+                if not estimated and completion_tokens:
+                    status.set_reply_tokens(completion_tokens)
             case TurnEnded(turn_status):
                 self._job_status = turn_status
+                status.clear_phase()
                 self._reindex()
                 status.pending_mode = False
                 await transcript.end_assistant()
