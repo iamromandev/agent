@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar, Literal, Protocol
 
-from src.engine.provider.base import ToolSpec
+from src.engine.provider.base import Image, ToolSpec
 
 if TYPE_CHECKING:
     from src.engine.events import AgentEvent
@@ -33,6 +33,8 @@ class ToolContext:
     progress: Callable[[AgentEvent], None] | None = None  # set per call by the loop; only the task tool uses it
     guard: Guardrails | None = None  # None: the built-in defaults (see `guard_of`)
     protected_ok: bool = False  # set per call by the loop: the user allowed this call to read the protected file it names
+    has_vision: Callable[[], Awaitable[bool]] | None = None  # set per call by the loop; asked only once `read` found an image; None: no
+    model: str = ""  # set per call by the loop with `has_vision`: the model that gets the result
 
 
 @dataclass(frozen=True)
@@ -41,6 +43,7 @@ class ToolResult:
     is_error: bool = False
     summary: str = ""  # short transcript text: "31 lines", "exit 0", "refused: outside workspace"
     display: str | None = None  # display-only copy (may contain ANSI SGR); never sent to the model or saved
+    images: tuple[Image, ...] = ()  # sent to the model with the result and saved in the session
 
 
 @dataclass(frozen=True)

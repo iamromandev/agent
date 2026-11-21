@@ -10,7 +10,7 @@ import signal
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Literal
 
@@ -21,10 +21,11 @@ from src.engine.events import AgentEvent, Notice, TurnEnded
 from src.engine.loop import close_recorder
 from src.engine.mcp.contract import McpConnector
 from src.engine.mcp.hub import HubEvent
-from src.engine.mentions import MentionNote, expand_mentions, note_text
+from src.engine.mentions import Expansion, MentionNote, apply_vision, expand_mentions, note_text
 from src.engine.permissions.rules import Rule, RuleError, parse_rule
 from src.engine.permissions.setup import run_rule_warnings, tool_keys
-from src.engine.provider.base import SwitchableProvider
+from src.engine.provider.base import Image, SwitchableProvider
+from src.engine.provider.models import ModelCatalog
 from src.engine.session import FileRecorder, SessionError, SessionWriteError
 from src.engine.text import escape_display
 from src.engine.tools import default_tools
@@ -55,6 +56,8 @@ class _State:
     model: str | None = None
     redact: Callable[[str], str] = lambda text: text  # the runtime's redactor once there is one
     finished: bool = False
+    image_notes: list[MentionNote] = field(default_factory=list)  # `attached` lines of the image mentions, shown once vision is known
+    images: list[Image] = field(default_factory=list)
 
 
 def _fanout(*sinks: Callable[[AgentEvent], None]) -> Callable[[AgentEvent], None]:
@@ -106,9 +109,11 @@ def run_headless(
     provider: SwitchableProvider | None = None,
     connector: McpConnector | None = None,
     stdin: BinaryIO | None = None,
+    catalog: ModelCatalog | None = None,
 ) -> int:
     """Run one turn for `opts` in `workspace` and return the exit code. `provider` replaces Ollama, `connector` the
-    MCP servers' and `stdin` the process's (bytes; all for tests)."""
+    MCP servers', `catalog` the model catalog that answers the vision check and `stdin` the process's (bytes; all
+    for tests)."""
     json_mode = opts.output != "text"
     state = _State(json_mode)
     stderr_sink = StderrSink(sys.stderr, opts.quiet or json_mode, want_color(sys.stderr))
@@ -131,6 +136,7 @@ def run_headless(
             provider=provider,
             connector=connector,
             trust_project_mcp=opts.trust_project,
+            catalog=catalog,
         )
         state.redact = _redactor(rt)
         model = getattr(rt.provider, "model", None)
@@ -139,7 +145,10 @@ def run_headless(
 
         def attach(text: str) -> str:  # the user's own prompt only, not piped input
             expansion = expand_mentions(text, rt.root, rt.guard)
-            mention_notes.extend(expansion.notes)
+            # image lines wait for the vision check, which is async and asks about the model that runs
+            mention_notes.extend(n for n in expansion.notes if n.image is None)
+            state.image_notes.extend(n for n in expansion.notes if n.image is not None)
+            state.images.extend(expansion.images)
             return expansion.text
 
         prompt = build_prompt(opts.prompt, *_stdin(stdin), rt.commands, BUILTINS, attach)
@@ -305,7 +314,14 @@ async def _run(
             if decision.blocked:
                 state.outcome = Outcome(EXIT_FAIL, "blocked", decision.reason)  # the hook's line is already on stderr
                 return
-            await agent.run_turn(prompt, emit, context=decision.context)
+            vision_ok, warnings = await apply_vision(
+                Expansion("", tuple(state.image_notes), tuple(state.images)), rt.vision, rt.provider.model
+            )
+            for note in vision_ok.notes:
+                sink(Notice("info", note_text(note)))
+            for warning in warnings:
+                sink(Notice("warn", warning))
+            await agent.run_turn(prompt, emit, context=decision.context, images=vision_ok.images)
         except UsageError:
             raise
         except Exception as exc:  # an internal error is exit 1 with the message, never a traceback

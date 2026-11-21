@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 Role = Literal["system", "user", "assistant", "tool"]
+ImageFormat = Literal["png", "jpeg", "gif", "webp"]
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,13 @@ class ToolCall:
     arguments: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class Image:
+    format: ImageFormat
+    data: bytes = field(repr=False)  # never in a repr
+    name: str = ""  # display only: "screens/login.png", "clipboard"
+
+
 @dataclass
 class Message:
     role: Role
@@ -23,6 +31,7 @@ class Message:
     tool_calls: list[ToolCall] = field(default_factory=list)  # assistant only
     tool_call_id: str | None = None  # tool only
     name: str | None = None  # tool only: tool name
+    images: tuple[Image, ...] = ()  # user and tool messages only
 
 
 @dataclass(frozen=True)

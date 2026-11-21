@@ -46,7 +46,11 @@ def open_checked(path: Path, ctx: ToolContext) -> BinaryIO:
 
 def open_text_checked(path: Path, ctx: ToolContext) -> tuple[io.TextIOWrapper, bool]:
     """`open_checked` as UTF-8 text from the first byte, and whether the first 8 KB look binary."""
-    raw = open_checked(path, ctx)
+    return as_text(open_checked(path, ctx))
+
+
+def as_text(raw: BinaryIO) -> tuple[io.TextIOWrapper, bool]:
+    """An already checked open file as UTF-8 text from the first byte, and whether its first 8 KB look binary."""
     try:
         binary = head_is_binary(raw.read(SNIFF_BYTES))
         raw.seek(0)

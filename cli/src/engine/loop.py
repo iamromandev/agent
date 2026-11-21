@@ -8,7 +8,7 @@ import dataclasses
 import os
 import platform
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
@@ -56,6 +56,7 @@ from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_system_prompt, build_task_prompt
 from src.engine.provider.base import (
     Done,
+    Image,
     Message,
     Provider,
     ProviderError,
@@ -63,6 +64,7 @@ from src.engine.provider.base import (
     ToolCall,
     ToolCallEvent,
 )
+from src.engine.provider.vision import VisionCheck
 from src.engine.session import NullRecorder, Recorder, ToolMeta
 from src.engine.session.records import compaction_notice
 from src.engine.task import TaskTool
@@ -198,8 +200,10 @@ class Agent:
         role_prompt: str | None = None,
         undo: UndoLog | None = None,
         mode_source: Callable[[], Mode] | None = None,
+        vision: VisionCheck | None = None,
     ) -> None:
         self.provider = provider
+        self.vision = vision  # whether the model has vision; None: never (the callers ask it before they send images)
         self.subagent = subagent  # the custom agent this child runs, "" otherwise
         self.role_prompt = role_prompt  # a custom child's own system prompt, in place of the research role
         self._checkpoints = checkpoints  # the `task` child never gets one
@@ -605,9 +609,16 @@ class Agent:
         return tool.mutating or (bool(self.subagent) and tool.name == "bash")
 
     async def run_turn(
-        self, text: str, emit: EventSink, *, draft: str | None = None, context: Sequence[str] = ()
+        self,
+        text: str,
+        emit: EventSink,
+        *,
+        draft: str | None = None,
+        context: Sequence[str] = (),
+        images: Sequence[Image] = (),
     ) -> None:
-        """Run one user turn. `context` is what the `UserPromptSubmit` hooks added: a system note for the first request."""
+        """Run one user turn. `context` is what the `UserPromptSubmit` hooks added: a system note for the first request.
+        `images` go with the user message as they are: the caller checked the model's vision and the limits."""
         if self._busy:
             raise AgentBusy("a turn is already running")
         if not text.strip():
@@ -618,7 +629,7 @@ class Agent:
             self._undo.begin(len(self.history), draft if draft is not None else text)
         kept = len(self._hook_notes)  # what stands before this turn's own context (SessionStart's)
         try:
-            self._record(Message("user", text))
+            self._record(Message("user", text, images=tuple(images)))
             try:
                 await self._checkpoint(emit, end=False)
                 for notice in self._add_hook_context("UserPromptSubmit", context):
@@ -949,6 +960,14 @@ class Agent:
             return None
         return Message("assistant", "".join(parts), calls), total
 
+    def _vision_asker(self, model: str, emit: EventSink) -> Callable[[], Awaitable[bool]]:
+        async def ask() -> bool:
+            if self.vision is None:
+                return False
+            return await self.vision.has(model, lambda text: emit(Notice("warn", text)))
+
+        return ask
+
     async def _run_tool_call(self, call: ToolCall, mode: Mode, emit: EventSink) -> None:
         tool = next((t for t in self.all_tools() if t.name == call.name), None)
         self._inflight = call.id
@@ -979,6 +998,9 @@ class Agent:
                 call_ctx = dataclasses.replace(
                     self.ctx, progress=lambda event: emit(TaskProgress(call.id, event)), protected_ok=gate
                 )
+                if call.name == "read":  # asked only when `read` has found an image, about the model that gets it
+                    model = self.provider.model
+                    call_ctx = dataclasses.replace(call_ctx, has_vision=self._vision_asker(model, emit), model=model)
                 prepared = await tool.prepare(call.arguments, call_ctx)
                 if isinstance(prepared, ToolResult):
                     result, ran = prepared, True  # the tool did its work (and failed, or finished) while preparing
@@ -1007,7 +1029,8 @@ class Agent:
             except Exception as exc:  # a broken hook step never costs the result the tool produced
                 emit(hook_failed("PostToolUse", exc))
         self._record(
-            Message("tool", result.output, tool_call_id=call.id, name=call.name), ToolMeta(label, result.summary)
+            Message("tool", result.output, tool_call_id=call.id, name=call.name, images=result.images),
+            ToolMeta(label, result.summary)
         )
         self._inflight = None
         self._flush_save_error(emit)

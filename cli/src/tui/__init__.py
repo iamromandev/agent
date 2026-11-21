@@ -32,6 +32,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             permissions=rt.permissions.rules,
             permission_warnings=rt.warnings,
             catalog=rt.catalog,
+            vision=rt.vision,
             window_cap=rt.settings.num_ctx,
             launch_notices=rt.model_notices,
             commands=rt.commands,

@@ -271,3 +271,42 @@ async def test_catalog_gives_up_on_a_slow_answer() -> None:
         await catalog.context_length("m")
     with pytest.raises(CatalogError, match="did not answer"):
         await catalog.list()
+
+
+@pytest.mark.parametrize(
+    ("body", "expected"),
+    [
+        ({"capabilities": ["completion", "vision"]}, ("completion", "vision")),
+        ({"capabilities": ["completion", 3, None, "tools"]}, ("completion", "tools")),
+        ({"capabilities": "vision"}, ()),
+        ({}, ()),
+    ],
+)
+async def test_catalog_reads_the_capabilities(body: dict, expected: tuple[str, ...]) -> None:
+    from src.client.ollama import OllamaCatalog
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert json.loads(request.content) == {"model": "m"}
+        return httpx.Response(200, json=body)
+
+    assert await OllamaCatalog(_client(handler)).capabilities("m") == expected
+
+
+async def test_catalog_capabilities_fail_as_catalog_errors() -> None:
+    import asyncio
+
+    from src.client.ollama import OllamaCatalog
+    from src.engine.provider.models import CatalogError
+
+    async def handler(_request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(5)
+        return httpx.Response(200, json={})
+
+    with pytest.raises(CatalogError, match="did not answer"):
+        await OllamaCatalog(_client(handler), timeout=0.05).capabilities("m")
+
+    async def broken(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(500, json={"error": "boom"})
+
+    with pytest.raises(CatalogError):
+        await OllamaCatalog(_client(broken)).capabilities("m")

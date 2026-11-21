@@ -55,12 +55,12 @@ from src.engine.instructions import fingerprint, levels
 from src.engine.loop import NOT_SUMMARIZED, close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
 from src.engine.mcp.names import tool_name
-from src.engine.mentions import MentionNote, expand_mentions, note_text
+from src.engine.mentions import MentionNote, apply_vision, expand_mentions, note_text
 from src.engine.mentions_index import FileIndex
 from src.engine.mode import Mode
 from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
 from src.engine.prompt import build_init_prompt
-from src.engine.provider.base import SwitchableProvider
+from src.engine.provider.base import Image, SwitchableProvider
 from src.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
@@ -70,6 +70,7 @@ from src.engine.provider.models import (
     resolve_window,
     shown_name,
 )
+from src.engine.provider.vision import VisionCheck
 from src.engine.session import (
     FileRecorder,
     NullRecorder,
@@ -176,6 +177,7 @@ class AgentApp(App[None]):
         guard: Guardrails | None = None,
         hooks: Hooks | None = None,
         catalog: ModelCatalog | None = None,
+        vision: VisionCheck | None = None,
         window_cap: int,
         launch_notices: Sequence[str] = (),
     ) -> None:
@@ -196,6 +198,7 @@ class AgentApp(App[None]):
         self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
         self.provider = provider
         self.catalog = catalog
+        self.vision = vision if vision is not None else VisionCheck(catalog)  # one answer per model per run
         self.window_cap = window_cap  # AGENT_NUM_CTX: caps every window
         self._launch_notices = tuple(launch_notices)  # info lines for the transcript, already escaped
         self.workspace = workspace
@@ -1321,22 +1324,27 @@ class AgentApp(App[None]):
         context: list[str] = []  # and what they added for the model
         sent_text = text  # what the hooks and the model get: `text` plus the files its @mentions attach
         notes: tuple[MentionNote, ...] = ()
+        images: tuple[Image, ...] = ()
+        image_warnings: list[str] = []  # images that were not attached, and why
 
         async def work(emit: EventSink) -> None:
             nonlocal started
             started = True
             for hook_event in hook_events:
                 emit(hook_event)
-            await self.agent.run_turn(sent_text, emit, draft=draft, context=context)
+            await self.agent.run_turn(sent_text, emit, draft=draft, context=context, images=images)
 
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
                 return
             if not init:  # /init's prompt is the app's own, not something the user sent
                 expansion = await asyncio.to_thread(expand_mentions, text, self.workspace, self.guard)
-                sent_text, notes = expansion.text, expansion.notes
+                expansion, image_warnings = await apply_vision(expansion, self.vision, self.provider.model)
+                sent_text, notes, images = expansion.text, expansion.notes, expansion.images
                 decision = await self.agent.prompt_hooks(sent_text, hook_events.append)
                 if decision.blocked:  # the prompt is dropped: `_end_turn` puts it back in the box
+                    for warning in image_warnings:  # still true when it is sent again, so say it now
+                        await transcript.add_notice("warn", warning)
                     for hook_event in hook_events:
                         if isinstance(hook_event, Notice):
                             await transcript.add_notice(hook_event.level, hook_event.text)
@@ -1349,6 +1357,8 @@ class AgentApp(App[None]):
             await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
             for note in notes:
                 await transcript.add_notice("info" if note.attached else "warn", note_text(note))
+            for warning in image_warnings:
+                await transcript.add_notice("warn", warning)
             self._finished_since_toggle = False
             status.pending_mode = False
             await self._run_with_events(work)

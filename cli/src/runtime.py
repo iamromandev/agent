@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from src.engine.permissions.setup import PermissionSetup
     from src.engine.provider.base import SwitchableProvider
     from src.engine.provider.models import ModelCatalog, ModelInfo
+    from src.engine.provider.vision import VisionCheck
     from src.engine.session import Recorder, SessionStore
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
@@ -74,6 +75,7 @@ class Runtime:
     skills: Skills
     agents: Agents
     catalog: ModelCatalog
+    vision: VisionCheck  # shared by the app, headless mode and the agents: one answer per model
     model_notices: list[str]
     warnings: tuple[str, ...]
     close: Callable[[], Awaitable[None]]
@@ -114,6 +116,9 @@ class _ListOnce:
 
     async def context_length(self, name: str) -> int | None:
         return await self._inner.context_length(name)
+
+    async def capabilities(self, name: str) -> tuple[str, ...]:
+        return await self._inner.capabilities(name)
 
 
 def _abort(web: WebClient, search: SearxClient | None) -> None:
@@ -162,6 +167,7 @@ def build_runtime(
     from src.engine.permissions.config import global_settings_path, project_settings_path
     from src.engine.provider.models import SHOW_TIMEOUT, SLOW_AFTER, CatalogError, launch_model, shown_name
     from src.engine.provider.ollama import OllamaProvider
+    from src.engine.provider.vision import VisionCheck
     from src.engine.session import FileRecorder, SessionStore, sessions_root, workspace_dir
     from src.engine.skills.loader import load_skills
     from src.engine.terminal.manager import TerminalManager
@@ -243,6 +249,8 @@ def build_runtime(
         shadow, shadow_warnings = prepare_checkpoints(
             root, guard, guard.env.filter(os.environ), enabled=checkpoints
         )
+        run_catalog = catalog if catalog is not None else OllamaCatalog(client)
+        vision = VisionCheck(run_catalog)  # the uncached catalog: the check keeps its own answers
         ctx = ToolContext(root, settings.bash_timeout, guard=guard)
         # lives for the whole run; /new and session switches do not touch it
         manager = TerminalManager(root, guard=guard) if terminals else None
@@ -278,6 +286,7 @@ def build_runtime(
                 rules=permissions.rules,
                 hooks=hooks,
                 checkpoints=shadow,
+                vision=vision,
             )
 
         async def close() -> None:
@@ -321,7 +330,8 @@ def build_runtime(
             commands=commands,
             skills=skills,
             agents=agents,
-            catalog=catalog if catalog is not None else OllamaCatalog(client),
+            catalog=run_catalog,
+            vision=vision,
             model_notices=model_notices,
             warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,

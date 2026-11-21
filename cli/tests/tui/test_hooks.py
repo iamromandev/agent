@@ -382,3 +382,20 @@ async def test_without_session_start_hooks_no_worker_is_started_and_ctrl_c_right
         await until(pilot, lambda: not app.is_running)
 
     assert "session-start" not in groups
+
+
+async def test_a_blocking_prompt_hook_still_shows_why_an_image_was_not_attached(launch: Launch) -> None:
+    (launch.workspace / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 64)
+    launch.write(launch.global_path, hooks={"UserPromptSubmit": [{"command": "gate"}]})
+    launch.runner.script = [exit_run(2, "no")]
+    app = launch.app([_done()])  # the fake catalog reports no vision
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "see @a.png")
+        await settled(app)
+        await pilot.pause()
+
+        notices = _notices(app)
+        assert scripted(app).requests == []
+        assert "hook UserPromptSubmit (global) blocked: no" in notices
+        assert "not attached a.png (model 'fake' has no vision)" in notices
+        assert app.query_one(ChatInput).text == "see @a.png"
