@@ -2,39 +2,35 @@
 
 from __future__ import annotations
 
-import pytest
 from src.engine.guardrails.env import EnvFilter
 
-
-@pytest.mark.parametrize(
-    "name",
-    [
-        "GITHUB_TOKEN",
-        "NPM_TOKEN",
-        "AWS_SECRET_ACCESS_KEY",
-        "AWS_ACCESS_KEY_ID",
-        "AWS_SESSION_TOKEN",
-        "AWS_WHATEVER",
-        "MY_API_KEY",
-        "STRIPE_KEY",
-        "SOME_KEY_ID",
-        "OPENAI_APIKEY",
-        "DB_PASSWORD",
-        "DB_PASSWD",
-        "GOOGLE_CREDENTIALS",
-        "client_secret",
-        "github_token",
-    ],
-)
-def test_secret_looking_names_are_removed(name: str) -> None:
-    assert EnvFilter(frozenset()).filter({name: "value", "PATH": "/bin"}) == {"PATH": "/bin"}
+SECRET_NAMES = [
+    "GITHUB_TOKEN",
+    "NPM_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+    "AWS_ACCESS_KEY_ID",
+    "AWS_SESSION_TOKEN",
+    "AWS_WHATEVER",
+    "MY_API_KEY",
+    "STRIPE_KEY",
+    "SOME_KEY_ID",
+    "OPENAI_APIKEY",
+    "DB_PASSWORD",
+    "DB_PASSWD",
+    "GOOGLE_CREDENTIALS",
+    "client_secret",
+    "github_token",
+]
 
 
-@pytest.mark.parametrize(
-    "name", ["HOME", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "KEYBOARD", "KEYCHAIN", "SSH_AUTH_SOCK", "TERM"]
-)
-def test_other_names_are_kept(name: str) -> None:
-    assert EnvFilter(frozenset()).filter({name: "value"}) == {name: "value"}
+def test_secret_looking_names_are_removed() -> None:
+    for name in SECRET_NAMES:
+        assert EnvFilter(frozenset()).filter({name: "value", "PATH": "/bin"}) == {"PATH": "/bin"}, name
+
+
+def test_other_names_are_kept() -> None:
+    for name in ["HOME", "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE", "KEYBOARD", "KEYCHAIN", "SSH_AUTH_SOCK", "TERM"]:
+        assert EnvFilter(frozenset()).filter({name: "value"}) == {name: "value"}, name
 
 
 def test_ac9_the_example_environment() -> None:

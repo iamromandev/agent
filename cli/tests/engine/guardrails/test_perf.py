@@ -6,7 +6,6 @@ import statistics
 import subprocess
 import time
 
-import pytest
 from src.engine.guardrails.redact import Redactor
 
 SANDBOX_START_LIMIT_MS = 50.0  # NFR3: added per bash command, median
@@ -135,13 +134,16 @@ ADVERSARIAL = {
 }
 
 
-@pytest.mark.parametrize("name", sorted(ADVERSARIAL))
-def test_an_adversarial_text_is_redacted_in_linear_time(name: str) -> None:
+def test_an_adversarial_text_is_redacted_in_linear_time() -> None:
     redactor = Redactor({f"VAR_{i}_TOKEN": f"value-number-{i:04d}-secret" for i in range(20)})
-    text = ADVERSARIAL[name]
-    assert len(text) >= ADVERSARIAL_SIZE - 100
+    slow = []
+    for name in sorted(ADVERSARIAL):
+        text = ADVERSARIAL[name]
+        assert len(text) >= ADVERSARIAL_SIZE - 100, name
 
-    elapsed = _best_ms(redactor, text) / 1000
+        elapsed = _best_ms(redactor, text) / 1000
 
-    print(f"adversarial {name}: {elapsed * 1000:.1f}ms for {len(text)} chars")
-    assert elapsed <= ADVERSARIAL_LIMIT_S
+        print(f"adversarial {name}: {elapsed * 1000:.1f}ms for {len(text)} chars")
+        if elapsed > ADVERSARIAL_LIMIT_S:
+            slow.append(f"{name}: {elapsed * 1000:.1f}ms")
+    assert not slow, slow

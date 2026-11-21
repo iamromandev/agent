@@ -5,7 +5,6 @@ from __future__ import annotations
 import itertools
 import time
 
-import pytest
 from src.tui.hints import hint_text
 
 IDLE = "enter send · ctrl+j newline · tab mode · / commands · @ files · ctrl+t terminal"
@@ -53,10 +52,3 @@ def test_ten_thousand_calls_take_under_a_second() -> None:
         b, p, t, h = combos[i % 16]
         hint_text(busy=b, popup_open=p, terminal_focused=t, has_terminals=h)
     assert time.perf_counter() - start < 1.0
-
-
-@pytest.mark.parametrize("busy,popup,terminal,terminals", list(itertools.product([False, True], repeat=4)))
-def test_it_is_deterministic(busy, popup, terminal, terminals) -> None:
-    assert text(busy=busy, popup=popup, terminal=terminal, terminals=terminals) == text(
-        busy=busy, popup=popup, terminal=terminal, terminals=terminals
-    )

@@ -178,42 +178,42 @@ async def test_mcp_without_servers_says_so(make_app: AppFactory, tmp_path: Path)
         await until(pilot, lambda: any("No MCP servers" in n for n in _notices(app)))
 
 
-@pytest.mark.parametrize(
-    ("char", "shown"),
-    [
-        ("\x1b", "\\x1b"),
-        ("\r", "\\x0d"),
-        ("\x07", "\\x07"),
-        ("\n", "\\x0a"),
-        ("\x00", "\\x00"),
-        ("\x7f", "\\x7f"),
-        ("\u202e", "\\u202e"),
-        ("\u202a", "\\u202a"),
-        ("\u202d", "\\u202d"),
-        ("\u2066", "\\u2066"),
-        ("\u2069", "\\u2069"),
-        ("\u200b", "\\u200b"),
-        ("é", "\\xe9"),
-        ("я", "\\u044f"),
-        ("\U0001f600", "\\U0001f600"),
-    ],
-)
+ESCAPED = [
+    ("\x1b", "\\x1b"),
+    ("\r", "\\x0d"),
+    ("\x07", "\\x07"),
+    ("\n", "\\x0a"),
+    ("\x00", "\\x00"),
+    ("\x7f", "\\x7f"),
+    ("\u202e", "\\u202e"),
+    ("\u202a", "\\u202a"),
+    ("\u202d", "\\u202d"),
+    ("\u2066", "\\u2066"),
+    ("\u2069", "\\u2069"),
+    ("\u200b", "\\u200b"),
+    ("é", "\\xe9"),
+    ("я", "\\u044f"),
+    ("\U0001f600", "\\U0001f600"),
+]
+
+
 @pytest.mark.parametrize("where", ["name", "command", "arg", "env"])
-def test_every_non_printable_or_non_ascii_character_is_escaped_in_the_prompt(char: str, shown: str, where: str) -> None:
-    bad = f"a{char}b"
-    server = ServerConfig(
-        bad if where == "name" else "n",
-        bad if where == "command" else "cmd",
-        (bad if where == "arg" else "arg",),
-        {bad: "v"} if where == "env" else {},
-        "project",
-    )
+def test_every_non_printable_or_non_ascii_character_is_escaped_in_the_prompt(where: str) -> None:
+    for char, shown in ESCAPED:
+        bad = f"a{char}b"
+        server = ServerConfig(
+            bad if where == "name" else "n",
+            bad if where == "command" else "cmd",
+            (bad if where == "arg" else "arg",),
+            {bad: "v"} if where == "env" else {},
+            "project",
+        )
 
-    plain = describe(server).plain
+        plain = describe(server).plain
 
-    assert char not in plain
-    assert f"a{shown}b" in plain
-    assert all(c.isascii() and (c.isprintable() or c == "\n") for c in plain)  # only our own line break remains
+        assert char not in plain, repr(char)
+        assert f"a{shown}b" in plain, repr(char)
+        assert all(c.isascii() and (c.isprintable() or c == "\n") for c in plain), repr(char)  # only our own line break
 
 
 async def test_declining_over_a_shadowed_global_server_starts_neither_and_mcp_says_why(launch: Launch) -> None:

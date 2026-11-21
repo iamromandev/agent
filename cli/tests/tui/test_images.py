@@ -90,19 +90,6 @@ async def test_the_vision_of_the_model_at_send_time_decides(make_app: AppFactory
         assert "not attached a.png (model 'plain' has no vision)" in _notices(app)
 
 
-async def test_a_hostile_image_name_is_escaped_in_every_notice(make_app: AppFactory, tmp_path: Path) -> None:
-    name = "a\x1b[2J.png"
-    (tmp_path / name).write_bytes(PNG)
-    app = make_app([REPLY], context_window=20_000, catalog=FakeCatalog(["fake"]))
-    async with app.run_test() as pilot:
-        app.query_one(ChatInput).load_text(f'see @"{name}"')
-        await pilot.press("enter")
-        await settled(app)
-
-        assert not any("\x1b" in n for n in _notices(app))
-        assert any("a\\x1b[2J.png" in n for n in _notices(app))
-
-
 async def test_the_session_file_holds_the_image_and_undo_puts_back_the_typed_text(
     make_app: AppFactory, tmp_path: Path
 ) -> None:

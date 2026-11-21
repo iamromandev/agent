@@ -75,32 +75,32 @@ def test_several_secrets_are_all_replaced_and_counted() -> None:
     assert count == 4
 
 
-@pytest.mark.parametrize(
-    "text",
-    [
-        "commit 4b825dc642cb6eb9a060e54bf8d69288fbee4904",
-        "id 123e4567-e89b-12d3-a456-426614174000",
-        "sk-short",
-        "sk-" + "a" * 19,
-        "task-abcdefghijklmnopqrstuvwxyz",
-        "risk-assessment-for-the-whole-system",
-        "SGVsbG8gd29ybGQsIHRoaXMgaXMganVzdCBiYXNlNjQgdGV4dA==",
-        "eyJhbGciOiJIUzI1NiJ9",
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0",
-        "ghp_tooshort",
-        "gh_abcdefghijklmnopqrstuvwxyz0123456789",
-        "AKIA1234",
-        "AKIAIOSFODNN7EXAMPLEXTRA",
-        "xoxb-short",
-        "the password policy requires 12 characters",
-        "def login(user, password):",
-        "password = getpass()",
-        "DB_PASSWORD=DB_PASSWORD",
-        "password=None password=null password=true password=False",
-    ],
-)
-def test_ordinary_text_is_not_touched(text: str) -> None:
-    assert NONE.redact(text) == (text, 0)
+ORDINARY = [
+    "commit 4b825dc642cb6eb9a060e54bf8d69288fbee4904",
+    "id 123e4567-e89b-12d3-a456-426614174000",
+    "sk-short",
+    "sk-" + "a" * 19,
+    "task-abcdefghijklmnopqrstuvwxyz",
+    "risk-assessment-for-the-whole-system",
+    "SGVsbG8gd29ybGQsIHRoaXMgaXMganVzdCBiYXNlNjQgdGV4dA==",
+    "eyJhbGciOiJIUzI1NiJ9",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0",
+    "ghp_tooshort",
+    "gh_abcdefghijklmnopqrstuvwxyz0123456789",
+    "AKIA1234",
+    "AKIAIOSFODNN7EXAMPLEXTRA",
+    "xoxb-short",
+    "the password policy requires 12 characters",
+    "def login(user, password):",
+    "password = getpass()",
+    "DB_PASSWORD=DB_PASSWORD",
+    "password=None password=null password=true password=False",
+]
+
+
+def test_ordinary_text_is_not_touched() -> None:
+    for text in ORDINARY:
+        assert NONE.redact(text) == (text, 0), text
 
 
 def test_a_value_that_is_also_a_pattern_is_counted_once() -> None:
