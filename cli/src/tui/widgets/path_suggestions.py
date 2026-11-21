@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 from rich.text import Text
+from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
 
@@ -17,9 +18,17 @@ class PathSuggestions(OptionList, can_focus=False):
 
     DEFAULT_CSS = "PathSuggestions { display: none; height: auto; max-height: 10; }"
 
+    class Toggled(Message):
+        """The list opened or closed; bubbles to the app, which refreshes the key hints."""
+
     def __init__(self, *, id: str | None = None) -> None:
         super().__init__(id=id)
         self._items: list[Suggestion] = []
+
+    def _set_open(self, value: bool) -> None:
+        if bool(self.display) != value:
+            self.display = value
+            self.post_message(self.Toggled())
 
     @property
     def is_open(self) -> bool:
@@ -37,11 +46,11 @@ class PathSuggestions(OptionList, can_focus=False):
             [Option(Text(escape(s.path), style="dim" if s.folder else "", no_wrap=True, overflow="ellipsis")) for s in self._items]
         )
         self.highlighted = 0
-        self.display = True
+        self._set_open(True)
 
     def hide(self) -> None:
         self._items = []
-        self.display = False
+        self._set_open(False)
 
     def move(self, delta: int) -> None:
         if self._items:
