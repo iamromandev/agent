@@ -37,6 +37,8 @@ from src.engine.events import (
     Compacting,
     EventSink,
     Notice,
+    Phase,
+    PhaseKind,
     TaskProgress,
     TodosChanged,
     ToolFinished,
@@ -224,6 +226,7 @@ class Agent:
         self._undo = undo if undo is not None else UndoLog(ctx.workspace, undo_file_limit, undo_total_limit)
         self.ctx = dataclasses.replace(ctx, journal=self._undo)
         self.max_steps = max_steps
+        self._step = 0  # the model request number of the running turn (shown in `Phase` events)
         if not 0 < compact_at <= 1:
             raise ValueError(f"compact_at must be above 0 and at most 1, got {compact_at}")
         if compact_keep_turns < 1:
@@ -867,8 +870,10 @@ class Agent:
     async def _run_steps(self, emit: EventSink) -> None:
         continuations = 0  # times a `Stop` hook sent this user turn on
         for step in range(self.max_steps):
+            self._step = step + 1
             await self._maybe_compact(emit)
             mode = self.mode  # snapshot: a Tab press mid-step applies from the next request
+            self._phase(emit, "waiting")
             requested = await self._request(mode, emit)
             if requested is None:  # provider error, already reported
                 return
@@ -894,6 +899,13 @@ class Agent:
                 await self._run_tool_call(tool_call, mode, emit)
         emit(Notice("warn", f"Step limit ({self.max_steps}) reached"))
         emit(TurnEnded("step_limit"))
+
+    def _phase(self, emit: EventSink, kind: PhaseKind, detail: str = "") -> None:
+        """Tell the UI what the main agent is doing now. Display only: a failing sink never costs the turn."""
+        if self.role != "main":
+            return
+        with contextlib.suppress(Exception):
+            emit(Phase(kind, self._step, self.max_steps, detail))
 
     def _anchor(self, total: int | None) -> None:
         """Right after a reply was recorded: the model's count `total` covers the whole history up to it."""
@@ -923,6 +935,7 @@ class Agent:
         failure: str | None = None
         total: int | None = None
         started = time.monotonic()
+        writing = False
         try:
             async with contextlib.aclosing(self.provider.stream(messages, specs)) as events:
                 async for event in events:
@@ -931,6 +944,9 @@ class Agent:
                     match event:
                         case TextDelta(text):
                             parts.append(text)
+                            if not writing:
+                                writing = True
+                                self._phase(emit, "writing")
                             emit(AssistantText(text))
                         case ToolCallEvent(call):
                             calls.append(call)
@@ -990,7 +1006,7 @@ class Agent:
                 result = ToolResult(f"{call.name}: {error}", True, "invalid arguments")
             elif (refused := await self._pre_hooks(tool, call, mode, emit)) is not None:
                 result = refused
-            elif isinstance(gate := await self._confirm_protected(tool, call), ToolResult):
+            elif isinstance(gate := await self._confirm_protected(tool, call, emit), ToolResult):
                 result = gate
             else:
                 # `gate` is True when the user allowed this call to read a protected file: the tool's own check of
@@ -1107,6 +1123,7 @@ class Agent:
             emit(Notice("warn", "Stop hook limit reached"))
             return None
         try:
+            self._phase(emit, "hook", "Stop")
             decision = await self.hooks.run("Stop", self._hook_payload(continuations=continuations))
             for notice in self.hooks.notices(decision, self._redact_hook_text):
                 emit(notice)
@@ -1119,14 +1136,20 @@ class Agent:
         return self._redact_hook_text(decision.reason) or DEFAULT_REASON
 
     async def _pre_hooks(self, tool: Tool, call: ToolCall, mode: Mode, emit: EventSink) -> ToolResult | None:
-        """Run the `PreToolUse` hooks for a call; the refusal when one blocks, else None. Before every dialog."""
+        """Run the `PreToolUse` hooks for a call; the refusal when one blocks, else None. Before every dialog.
+
+        The call has passed the deny-rule, plan-mode and argument checks by now, so a call that goes on is reported as
+        `running` here: a refused call never shows it."""
         if not self.hooks.has("PreToolUse", call.name):
+            self._phase(emit, "running", call.name)
             return None
         payload = self._hook_payload(tool=call.name, args=call.arguments, mode=mode.value)
+        self._phase(emit, "hook", "PreToolUse")
         decision = await self.hooks.run("PreToolUse", payload, tool=call.name)
         for notice in self.hooks.notices(decision, self._redact_hook_text):
             emit(notice)
         if not decision.blocked:
+            self._phase(emit, "running", call.name)
             return None
         return ToolResult(f"blocked by hook: {decision.reason}", True, "blocked by hook")
 
@@ -1134,6 +1157,7 @@ class Agent:
         """Run the `PostToolUse` hooks on a finished call (`result` is redacted and cut already) and append what they
         add, redacted, to the output the model sees: the tool's own output is kept, the hook's text is cut to fit."""
         payload = self._hook_payload(tool=call.name, args=call.arguments, result=result.output, is_error=result.is_error)
+        self._phase(emit, "hook", "PostToolUse")
         decision = await self.hooks.run("PostToolUse", payload, tool=call.name)
         for notice in self.hooks.notices(decision, self._redact_hook_text):
             emit(notice)
@@ -1284,7 +1308,7 @@ class Agent:
             return None
         return target if target.is_file() and guard_of(self.ctx).paths.is_protected(target) else None
 
-    async def _confirm_protected(self, tool: Tool, call: ToolCall) -> ToolResult | bool:
+    async def _confirm_protected(self, tool: Tool, call: ToolCall, emit: EventSink) -> ToolResult | bool:
         """Ask before a call reads a protected path, whatever the rules, grants and mode say (deny rules ran before):
         only Allow once or Deny. Returns the refusal; else whether the user allowed a protected read (False: the call
         names no protected file)."""
@@ -1301,8 +1325,10 @@ class Agent:
             protected_path=str(target),
             subagent=self.subagent,
         )
+        self._phase(emit, "approval", call.name)
         decision = await self.approver.ask(request)
         if decision.choice in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # an Always is not offered: it counts as once
+            self._phase(emit, "running", call.name)
             return True
         note = f" Note: {decision.note}" if decision.note else ""
         return ToolResult(f"User denied this call.{note}", True, "denied")
@@ -1333,10 +1359,12 @@ class Agent:
                 save_rule,
                 subagent=self.subagent,
             )
+            self._phase(emit, "approval", call.name)
             decision = await self.approver.ask(request)
             if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no
                 note = f" Note: {decision.note}" if decision.note else ""
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False, False
+            self._phase(emit, "running", call.name)
             if decision.choice in (Choice.ALWAYS, Choice.PROJECT) and allow_always:
                 self.grants.add(call.name, call.arguments, tool.grant_arg)  # for this run, even if saving fails
                 if not any(tool is t for t in self.tools):

@@ -81,6 +81,19 @@ class ToolProgress:
     text: str
 
 
+PhaseKind = Literal["waiting", "writing", "approval", "running", "hook"]
+
+
+@dataclass(frozen=True)
+class Phase:
+    """What the main agent is doing now (display only: never recorded). Not sent by the `task` child."""
+
+    kind: PhaseKind
+    step: int  # 1-based model request number in this user turn (Stop continuations count)
+    max_steps: int  # Agent.max_steps (AGENT_MAX_STEPS)
+    detail: str = ""  # tool name for approval/running, hook event name for hook; raw (the UI escapes it)
+
+
 AgentEvent = (
     AssistantText
     | ToolStarted
@@ -92,5 +105,6 @@ AgentEvent = (
     | TaskProgress
     | TodosChanged
     | ToolProgress
+    | Phase
 )
 EventSink = Callable[[AgentEvent], None]
