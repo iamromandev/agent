@@ -25,7 +25,7 @@ def png(width: int, height: int) -> bytes:
 
 
 SCRIPT = r'''#!{python} -I
-import json, os, struct, subprocess, sys, time, zlib
+import hashlib, json, os, struct, subprocess, sys, time, zlib
 
 args = sys.argv[1:]
 
@@ -45,9 +45,21 @@ def png(w, h):
 
 mode = os.environ.get("FAKE_MFLUX_MODE", "ok")
 dump = os.environ.get("FAKE_MFLUX_DUMP")
+inputs = []
+if "--image-paths" in args:
+    for value in args[args.index("--image-paths") + 1:]:
+        if value.startswith("--"):
+            break
+        inputs.append(value)
 if dump:
+    shas = {{}}
+    for value in inputs:
+        try:
+            shas[value] = hashlib.sha256(open(value, "rb").read()).hexdigest()
+        except OSError:
+            shas[value] = None
     with open(dump, "w") as handle:
-        json.dump({{"argv": args, "env": dict(os.environ), "cwd": os.getcwd()}}, handle)
+        json.dump({{"argv": args, "env": dict(os.environ), "cwd": os.getcwd(), "inputs": inputs, "shas": shas}}, handle)
 out = opt("--output")
 w, h = int(opt("--width")), int(opt("--height"))
 if mode == "ok":
@@ -125,9 +137,9 @@ elif mode == "sleep":
 '''
 
 
-def fake_mflux(folder: Path) -> Path:
-    """Write the fake command into `folder`; its behavior comes from `FAKE_MFLUX_MODE` (and friends) in the environment."""
-    path = folder / "mflux-generate-z-image-turbo"
+def fake_mflux(folder: Path, name: str = "mflux-generate-z-image-turbo") -> Path:
+    """Write the fake command `name` into `folder`; its behavior comes from `FAKE_MFLUX_MODE` (and friends) in the environment."""
+    path = folder / name
     path.write_text(SCRIPT.format(python=sys.executable))
     path.chmod(0o755)
     return path

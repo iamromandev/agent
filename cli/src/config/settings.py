@@ -57,8 +57,16 @@ class Settings(BaseSettings):
             description="mflux model (Hugging Face repo or folder) for generate_image",
         ),
     ]
+    image_edit_model: Annotated[
+        str,
+        Field(
+            default="black-forest-labs/FLUX.2-klein-4B",
+            min_length=1,
+            description="mflux model (Hugging Face repo or folder) for edit_image",
+        ),
+    ]
     image_timeout: Annotated[
-        float, Field(default=900.0, gt=0, description="Seconds before a generate_image call is killed")
+        float, Field(default=900.0, gt=0, description="Seconds before a generate_image or edit_image call is killed")
     ]
     mcp_timeout: Annotated[
         float, Field(default=60.0, gt=0, description="Seconds before an MCP tool call gives up")

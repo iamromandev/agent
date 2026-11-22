@@ -28,6 +28,10 @@ if TYPE_CHECKING:
 
 COMMAND = "mflux-generate-z-image-turbo"
 DEFAULT_MODEL = "filipstrand/Z-Image-Turbo-mflux-4bit"
+EDIT_COMMAND = "mflux-generate-flux2-edit"
+DEFAULT_EDIT_MODEL = "black-forest-labs/FLUX.2-klein-4B"
+EDIT_EXTRA = ("--quantize", "4")
+DEFAULT_EDIT_STEPS = 4
 MIN_SIDE, MAX_SIDE, SIDE_STEP = 256, 2048, 16
 MAX_STEPS, DEFAULT_STEPS, DEFAULT_SIDE = 50, 9, 1024
 MAX_PROMPT = 2000
@@ -45,6 +49,7 @@ class ImageRequest:
     height: int
     steps: int
     seed: int
+    inputs: tuple[Path, ...] = ()  # edit commands: the source first, then the references
 
 
 class ImageGenError(Exception):
@@ -55,13 +60,14 @@ def find_mflux(
     system: str = sys.platform,
     machine: str | None = None,
     python: Path | None = None,
+    command: str = COMMAND,
 ) -> Path | None:
-    """The mflux command next to the interpreter, on macOS arm64 only."""
+    """The named mflux command next to the interpreter, on macOS arm64 only."""
     machine = platform_module.machine() if machine is None else machine
     if system != "darwin" or machine != "arm64":
         return None
-    command = (Path(sys.executable) if python is None else python).parent / COMMAND
-    return command if command.is_file() and os.access(command, os.X_OK) else None
+    found = (Path(sys.executable) if python is None else python).parent / command
+    return found if found.is_file() and os.access(found, os.X_OK) else None
 
 
 def _hub_cache(env: Mapping[str, str]) -> Path:
@@ -221,8 +227,11 @@ def format_progress(p: ImageProgress, elapsed: float) -> str:
 
 
 class MfluxGenerator:
-    def __init__(self, command: Path, model: str, timeout: float, guard: Guardrails) -> None:
+    def __init__(
+        self, command: Path, model: str, timeout: float, guard: Guardrails, extra: tuple[str, ...] = ()
+    ) -> None:
         self.command = command
+        self.extra = extra  # fixed arguments of this command, before --output
         # a folder is made absolute once: mflux runs with another cwd, and the cache check must see the same path
         self.model = str(Path(model).resolve()) if Path(model).is_dir() else model
         self.timeout = timeout
@@ -235,10 +244,12 @@ class MfluxGenerator:
                 str(self.command),
                 "--model", self.model,
                 f"--prompt={request.prompt}",
+                *(("--image-paths", *map(str, request.inputs)) if request.inputs else ()),
                 "--width", str(request.width),
                 "--height", str(request.height),
                 "--steps", str(request.steps),
                 "--seed", str(request.seed),
+                *self.extra,
                 "--output", str(out_dir / OUTPUT_NAME),
                 "--no-exif",
             ]

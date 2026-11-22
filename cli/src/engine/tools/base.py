@@ -35,6 +35,7 @@ class ToolContext:
     protected_ok: bool = False  # set per call by the loop: the user allowed this call to read the protected file it names
     has_vision: Callable[[], Awaitable[bool]] | None = None  # set per call by the loop; asked only once `read` found an image; None: no
     model: str = ""  # set per call by the loop with `has_vision`: the model that gets the result
+    pasted: tuple[Image, ...] = ()  # set per call by the loop for edit_image: the images the turn's message carried (clipboard:N)
 
 
 @dataclass(frozen=True)

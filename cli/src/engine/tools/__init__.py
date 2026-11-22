@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 from .base import Tool
 from .fs import EditTool, ReadTool, WriteTool
-from .image import GenerateImageTool
+from .image import EditImageTool, GenerateImageTool
 from .search import GlobTool, GrepTool
 from .shell import BashTool
 from .skill import SkillTool
@@ -41,6 +41,7 @@ def default_tools(
     searcher: Searcher | None = None,
     skills: Skills | None = None,
     imager: MfluxGenerator | None = None,
+    editor: MfluxGenerator | None = None,
 ) -> list[Tool]:
     """The built-in tools; the terminal, web and image tools only when there is a manager, fetcher or generator to use."""
     tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool(), WriteTool(), EditTool(), BashTool(), TodoTool()]
@@ -54,4 +55,6 @@ def default_tools(
         tools.append(SkillTool(skills))
     if imager is not None:
         tools.append(GenerateImageTool(imager))
+    if editor is not None:
+        tools.append(EditImageTool(editor))
     return tools

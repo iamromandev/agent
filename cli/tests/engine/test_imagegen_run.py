@@ -61,6 +61,29 @@ async def test_every_value_is_its_own_argv_item(tmp_path: Path, out_dir: Path, m
     assert Path(json.loads(dump.read_text())["cwd"]).resolve() == out_dir.resolve()
 
 
+async def test_inputs_and_extra_arguments_go_into_the_argv(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dump = tmp_path / "dump.json"
+    monkeypatch.setenv("FAKE_MFLUX_DUMP", str(dump))
+    a, b = out_dir / "in-0.png", out_dir / "in-1.png"
+    a.write_bytes(b"a")
+    b.write_bytes(b"b")
+    request = ImageRequest("p", 512, 256, 4, 9, inputs=(a, b))
+    generator = MfluxGenerator(fake_mflux(tmp_path), "m", 20, Guardrails.off(tmp_path), extra=("--quantize", "4"))
+    await generator.generate(request, out_dir)
+    assert json.loads(dump.read_text())["argv"] == [
+        "--model", "m",
+        "--prompt=p",
+        "--image-paths", str(a), str(b),
+        "--width", "512",
+        "--height", "256",
+        "--steps", "4",
+        "--seed", "9",
+        "--quantize", "4",
+        "--output", str(out_dir / "image.png"),
+        "--no-exif",
+    ]  # fmt: skip
+
+
 async def test_the_command_runs_behind_the_sandbox_when_it_is_on(
     tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
