@@ -51,13 +51,21 @@ class StartChoice:
 NEW = StartChoice("new")
 
 
-def _image_generator(command: Path | None, settings: Settings, guard: Guardrails) -> MfluxGenerator | None:
-    """The mflux generator for the main agent, or None when mflux was not asked for or not found."""
-    from src.engine.imagegen import MfluxGenerator
+def _image_generators(
+    commands: tuple[Path | None, Path | None], settings: Settings, guard: Guardrails
+) -> tuple[MfluxGenerator | None, MfluxGenerator | None]:
+    """The mflux generators (generate_image, edit_image) for the main agent; each is None when mflux was not asked for
+    or its own command was not found."""
+    from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator
 
-    if command is None:
-        return None
-    return MfluxGenerator(command, settings.image_model, settings.image_timeout, guard)
+    generate, edit = commands
+    imager = None if generate is None else MfluxGenerator(generate, settings.image_model, settings.image_timeout, guard)
+    editor = (
+        None
+        if edit is None
+        else MfluxGenerator(edit, settings.image_edit_model, settings.image_timeout, guard, extra=EDIT_EXTRA)
+    )
+    return imager, editor
 
 
 @dataclass
@@ -178,7 +186,7 @@ def build_runtime(
     from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import prepare as prepare_hooks
-    from src.engine.imagegen import find_mflux
+    from src.engine.imagegen import EDIT_COMMAND, find_mflux
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
@@ -207,8 +215,10 @@ def build_runtime(
         setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
         skills = load_skills(root, builtin=builtin_skills_dir())  # read once, like the commands
-        image_command = find_mflux() if images else None  # None: no tool, no warning (not macOS arm64, or no extra)
+        # None: no tool, no warning (not macOS arm64, or no extra); each command is found on its own
+        image_commands = (find_mflux(), find_mflux(command=EDIT_COMMAND)) if images else (None, None)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
+        probe_imager, probe_editor = _image_generators(image_commands, settings, Guardrails.off(root))
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
@@ -220,7 +230,8 @@ def build_runtime(
                     fetcher=web,
                     searcher=search,
                     skills=skills,
-                    imager=_image_generator(image_command, settings, Guardrails.off(root)),
+                    imager=probe_imager,
+                    editor=probe_editor,
                 )
             ),
         )
@@ -298,11 +309,10 @@ def build_runtime(
             return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
 
         def agent_factory(approver: Approver) -> Agent:
+            imager, editor = _image_generators(image_commands, settings, guard)
             return Agent(
                 run_provider,
-                default_tools(
-                    manager, fetcher=web, searcher=search, skills=skills, imager=_image_generator(image_command, settings, guard)
-                ),
+                default_tools(manager, fetcher=web, searcher=search, skills=skills, imager=imager, editor=editor),
                 approver,
                 ctx,
                 settings.max_steps,

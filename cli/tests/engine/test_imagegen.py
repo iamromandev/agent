@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.engine.imagegen import COMMAND, find_mflux, model_cached, png_size
+from src.engine.imagegen import COMMAND, EDIT_COMMAND, find_mflux, model_cached, png_size
 
 from tests.image_fakes import fake_mflux, png
 
@@ -39,6 +39,13 @@ def test_find_mflux_is_none_for_a_directory_of_that_name(tmp_path: Path) -> None
 def test_find_mflux_is_none_on_other_platforms_even_with_the_command(tmp_path: Path, system: str, machine: str) -> None:
     fake_mflux(tmp_path)
     assert find_mflux(system, machine, _python(tmp_path)) is None
+
+
+def test_find_mflux_looks_up_the_named_command(tmp_path: Path) -> None:
+    fake_mflux(tmp_path)
+    assert find_mflux("darwin", "arm64", _python(tmp_path), command=EDIT_COMMAND) is None
+    edit = fake_mflux(tmp_path, EDIT_COMMAND)
+    assert find_mflux("darwin", "arm64", _python(tmp_path), command=EDIT_COMMAND) == edit
 
 
 def _cache(root: Path, repo: str, snapshots: list[str]) -> None:

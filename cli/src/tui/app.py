@@ -1471,7 +1471,9 @@ class AgentApp(App[None]):
             started = True
             for hook_event in hook_events:
                 emit(hook_event)
-            await self.agent.run_turn(sent_text, emit, draft=draft, context=context, images=images)
+            await self.agent.run_turn(
+                sent_text, emit, draft=draft, context=context, images=images, pasted=tuple(pasted)
+            )
 
         try:
             if status.error and not await self._run_check():  # R3: re-check before giving up on the model
@@ -1500,9 +1502,9 @@ class AgentApp(App[None]):
             await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
             for note in notes:
                 await transcript.add_notice("info" if note.attached else "warn", note_text(note))
-            for image in images:
-                if any(image is p for p in pasted):
-                    await transcript.add_notice("info", f"image clipboard ({describe(image)})")
+            for number, image in enumerate(pasted, 1):  # the numbers edit_image's `clipboard:N` uses
+                if any(image is i for i in images):
+                    await transcript.add_notice("info", f"image clipboard:{number} ({describe(image)})")
             for warning in image_warnings:
                 await transcript.add_notice("warn", warning)
             self._finished_since_toggle = False

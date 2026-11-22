@@ -121,6 +121,7 @@ def test_image_settings_defaults() -> None:
     settings = Settings(_env_file=None)
     assert settings.image_model == "filipstrand/Z-Image-Turbo-mflux-4bit"
     assert settings.image_timeout == 900.0
+    assert settings.image_edit_model == "black-forest-labs/FLUX.2-klein-4B"
 
 
 def test_image_settings_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -128,9 +129,11 @@ def test_image_settings_from_the_environment(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("AGENT_IMAGE_TIMEOUT", "30")
     settings = Settings(_env_file=None)
     assert (settings.image_model, settings.image_timeout) == ("x/y", 30.0)
+    monkeypatch.setenv("AGENT_IMAGE_EDIT_MODEL", "e/m")
+    assert Settings(_env_file=None).image_edit_model == "e/m"
 
 
-@pytest.mark.parametrize("name, value", [("AGENT_IMAGE_TIMEOUT", "0"), ("AGENT_IMAGE_MODEL", "")])
+@pytest.mark.parametrize("name, value", [("AGENT_IMAGE_TIMEOUT", "0"), ("AGENT_IMAGE_MODEL", ""), ("AGENT_IMAGE_EDIT_MODEL", "")])
 def test_invalid_image_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):

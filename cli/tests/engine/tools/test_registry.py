@@ -37,3 +37,16 @@ def test_generate_image_is_offered_only_with_a_generator(tmp_path) -> None:
     assert "generate_image" not in plain
     assert [t.name for t in default_tools(imager=generator)] == [*plain, "generate_image"]
     assert "generate_image" not in [t.name for t in read_only_tools()]
+
+
+def test_edit_image_is_offered_only_with_an_editor(tmp_path) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.imagegen import MfluxGenerator
+
+    editor = MfluxGenerator(tmp_path / "mflux", "x/y", 5, Guardrails.off(tmp_path))
+    plain = [t.name for t in default_tools()]
+    assert "edit_image" not in plain
+    assert [t.name for t in default_tools(editor=editor)] == [*plain, "edit_image"]
+    both = [t.name for t in default_tools(imager=editor, editor=editor)]
+    assert both == [*plain, "generate_image", "edit_image"]
+    assert "edit_image" not in [t.name for t in read_only_tools()]

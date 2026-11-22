@@ -168,7 +168,7 @@ async def test_ctrl_v_adds_a_chip_and_sending_carries_the_image(make_app: AppFac
         assert user.content == "hi"
         assert [i.data for i in user.images] == [PNG]
         assert _chips(app) == ""
-        assert "image clipboard (PNG, 2 KB)" in _notices(app)
+        assert "image clipboard:1 (PNG, 2 KB)" in _notices(app)
     assert not folder.exists()
 
 
