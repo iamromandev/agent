@@ -13,6 +13,7 @@ import platform as platform_module
 import re
 import struct
 import sys
+import time
 from asyncio.subprocess import DEVNULL, PIPE
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ MAX_STEPS, DEFAULT_STEPS, DEFAULT_SIDE = 50, 9, 1024
 MAX_PROMPT = 2000
 STDERR_LINES, STDERR_CHARS = 20, 2000
 OUTPUT_NAME = "image.png"
+PROGRESS_TICK = 0.25  # seconds between progress lines
 _KEEP = 64 * 1024  # of stderr: the rest is read and dropped so the child never blocks
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 _PROGRESS = re.compile(r"it/s|s/it|%\|")
@@ -70,7 +72,7 @@ def find_mflux(
     return found if found.is_file() and os.access(found, os.X_OK) else None
 
 
-def _hub_cache(env: Mapping[str, str]) -> Path:
+def hub_cache(env: Mapping[str, str]) -> Path:
     if env.get("HF_HUB_CACHE"):
         return Path(env["HF_HUB_CACHE"])
     if env.get("HF_HOME"):
@@ -82,7 +84,7 @@ def model_cached(model: str, env: Mapping[str, str] = os.environ) -> bool:
     """True when the model is in the local Hugging Face cache (or is a folder that exists)."""
     if Path(model).is_dir():
         return True
-    snapshots = _hub_cache(env) / f"models--{model.replace('/', '--')}" / "snapshots"
+    snapshots = hub_cache(env) / f"models--{model.replace('/', '--')}" / "snapshots"
     try:
         return any(any(entry.iterdir()) for entry in snapshots.iterdir() if entry.is_dir())
     except OSError:
@@ -228,7 +230,7 @@ def format_progress(p: ImageProgress, elapsed: float) -> str:
 
 class MfluxGenerator:
     def __init__(
-        self, command: Path, model: str, timeout: float, guard: Guardrails, extra: tuple[str, ...] = ()
+        self, command: Path, model: str, timeout: float | None, guard: Guardrails, extra: tuple[str, ...] = ()
     ) -> None:
         self.command = command
         self.extra = extra  # fixed arguments of this command, before --output
@@ -260,6 +262,7 @@ class MfluxGenerator:
         request: ImageRequest,
         out_dir: Path,
         on_progress: Callable[[ImageProgress], None] | None = None,
+        on_start: Callable[[int], None] | None = None,
     ) -> Path:
         """The PNG mflux wrote inside `out_dir`. Kills the whole process group on timeout and on cancel."""
         try:
@@ -274,6 +277,9 @@ class MfluxGenerator:
             )
         except OSError as exc:
             raise ImageGenError(f"Could not start mflux: {escape(str(exc))}") from exc
+        if on_start is not None:
+            with contextlib.suppress(Exception):
+                on_start(proc.pid)  # the pid is the process group id: start_new_session
         kept = bytearray()
         parser = ProgressParser(request.steps, downloading=not model_cached(self.model))
 
@@ -310,3 +316,40 @@ class MfluxGenerator:
         if not output.is_file():
             raise ImageGenError("mflux wrote no image")
         return output
+
+
+async def run_with_ticker(
+    generator: MfluxGenerator,
+    request: ImageRequest,
+    out_dir: Path,
+    sink: Callable[[str], None],
+    on_start: Callable[[int], None] | None = None,
+) -> Path:
+    """Run mflux; a ticker sends the display line to `sink` when it changes (at most 4 a second)."""
+    start = time.monotonic()
+    latest = ImageProgress("starting")
+    last: str | None = None
+
+    def send() -> None:
+        nonlocal last
+        text = format_progress(latest, time.monotonic() - start)
+        if text != last:
+            last = text
+            with contextlib.suppress(Exception):
+                sink(text)
+
+    def update(value: ImageProgress) -> None:
+        nonlocal latest
+        latest = value
+
+    async def ticker() -> None:
+        while True:
+            send()
+            await asyncio.sleep(PROGRESS_TICK)
+
+    task = asyncio.create_task(ticker())
+    try:
+        return await generator.generate(request, out_dir, on_progress=update, on_start=on_start)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

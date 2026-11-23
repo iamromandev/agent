@@ -84,6 +84,7 @@ class StatusBar(Static):
     compacting: reactive[bool] = reactive(False)  # a summary is being written: slow, and Esc cancels it
     error: reactive[str | None] = reactive(None)
     progress: reactive[str] = reactive("")  # a running tool's live line (generate_image); cleared when it ends
+    background: reactive[str] = reactive("")  # the `/images pull` live line: not tied to a turn, so `busy` never clears it
 
     line: str = ""
 
@@ -150,6 +151,8 @@ class StatusBar(Static):
             parts.append(self._phase_text(self._phase))
         elif self.busy:
             parts.append("● working")
+        if self.background:
+            parts.append(f"◐ images: {self.background[:80]}")
         if self.error:
             parts.append(f"✗ {self.error}")
         if self.window and self.used / self.window >= WARN_AT:
@@ -166,4 +169,4 @@ class StatusBar(Static):
         self._redraw()
 
     watch_mode = watch_pending_mode = watch_model = watch_used = _watch_all
-    watch_window = watch_workspace = watch_error = watch_estimated = watch_compacting = watch_progress = _watch_all
+    watch_window = watch_workspace = watch_error = watch_estimated = watch_compacting = watch_progress = watch_background = _watch_all

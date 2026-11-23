@@ -27,6 +27,7 @@ if TYPE_CHECKING:
     from src.engine.guardrails.setup import Guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import Hooks
+    from src.engine.image_pull import ImagePuller
     from src.engine.imagegen import MfluxGenerator
     from src.engine.mcp.contract import McpConnector
     from src.engine.mcp.hub import McpHub
@@ -100,9 +101,12 @@ class Runtime:
     warnings: tuple[str, ...]
     close: Callable[[], Awaitable[None]]
     paste: PasteFolder
+    images: ImagePuller | None = None  # the app only: `/images` and the tools' refusal while a warm-up runs
 
     def kill_all(self) -> None:
         """Synchronous fallback once the loop is gone: whatever `close` did not stop is killed."""
+        if self.images is not None:
+            self.images.kill_all()  # a warm-up's mflux (a no-op once `close` ran)
         self.hook_runner.kill_all()  # nor a hook (a no-op once `close` ran)
         self.paste.remove()  # pasted images (idempotent)
         if self.checkpoints is not None:
@@ -186,6 +190,7 @@ def build_runtime(
     from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import prepare as prepare_hooks
+    from src.engine.image_pull import HF_COMMAND, ImagePuller
     from src.engine.imagegen import EDIT_COMMAND, find_mflux
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
@@ -305,6 +310,11 @@ def build_runtime(
             untrusted=frozenset() if trust_project_mcp else setup.untrusted,
         )
 
+        puller: ImagePuller | None = None
+        if images:
+            pull_gen, pull_edit = _image_generators(image_commands, settings, guard)
+            puller = ImagePuller({"generate": pull_gen, "edit": pull_edit}, find_mflux(command=HF_COMMAND), guard)
+
         def recorder_factory() -> Recorder:
             return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
 
@@ -312,7 +322,7 @@ def build_runtime(
             imager, editor = _image_generators(image_commands, settings, guard)
             return Agent(
                 run_provider,
-                default_tools(manager, fetcher=web, searcher=search, skills=skills, imager=imager, editor=editor),
+                default_tools(manager, fetcher=web, searcher=search, skills=skills, imager=imager, editor=editor, pull=puller),
                 approver,
                 ctx,
                 settings.max_steps,
@@ -334,6 +344,8 @@ def build_runtime(
         paste = PasteFolder(root)
 
         async def close() -> None:
+            if puller is not None:
+                await puller.cancel()  # first: it may be downloading, and its mflux must not outlive the run
             paste.remove()
             hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
             if shadow is not None:
@@ -381,6 +393,7 @@ def build_runtime(
             warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,
             paste=paste,
+            images=puller,
         )
     except BaseException:
         _abort(web, search)  # setup failed before anyone could close them (no loop is running here)

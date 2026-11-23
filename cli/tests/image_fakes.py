@@ -143,3 +143,30 @@ def fake_mflux(folder: Path, name: str = "mflux-generate-z-image-turbo") -> Path
     path.write_text(SCRIPT.format(python=sys.executable))
     path.chmod(0o755)
     return path
+
+
+HF_SCRIPT = r'''#!{python} -I
+import json, os, sys, time
+
+dump = os.environ.get("FAKE_HF_DUMP")
+if dump:
+    with open(dump, "w") as handle:
+        json.dump({{"argv": sys.argv[1:], "env": dict(os.environ), "pid": os.getpid()}}, handle)
+time.sleep({sleep!r})
+sys.stdout.write({stdout!r})
+sys.stderr.write("Warning: You are sending unauthenticated requests to the HF Hub.\n")
+sys.exit({code!r})
+'''
+
+
+def fake_hf(folder: Path, stdout: str, code: int = 0, sleep: float = 0.0) -> Path:
+    """Write a fake `hf` into `folder` that prints `stdout`; argv and environment go to `FAKE_HF_DUMP` when set."""
+    path = folder / "hf"
+    path.write_text(HF_SCRIPT.format(python=sys.executable, stdout=stdout, code=code, sleep=sleep))
+    path.chmod(0o755)
+    return path
+
+
+def dry_run(rows: list[tuple[str, str]], will: str = "9 files (out of 25) totalling 7.8G") -> str:
+    """What `hf download <repo> --dry-run` prints: a summary line, then a tab-separated table."""
+    return f"[dry-run] Will download {will}.\nfile\tsize\n" + "".join(f"{name}\t{size}\n" for name, size in rows)

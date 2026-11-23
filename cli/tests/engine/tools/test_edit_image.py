@@ -291,7 +291,7 @@ async def test_bad_outputs_give_the_generate_image_errors_and_keep_the_target(
 
 
 async def test_progress_lines_follow_the_phases(tool: EditImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.02)
+    monkeypatch.setattr("src.engine.imagegen.PROGRESS_TICK", 0.02)
     monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
     monkeypatch.setenv("FAKE_MFLUX_DELAY", "0.1")
     events: list[Any] = []

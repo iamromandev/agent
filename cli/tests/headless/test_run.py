@@ -449,6 +449,16 @@ def test_a_builtin_command_prompt_such_as_agents_is_exit_2(ws: Path, capsys: pyt
     assert provider.requests == []
 
 
+def test_images_prompt_is_exit_2_like_other_builtins(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    provider = ScriptedProvider([say("x")])
+
+    code = go(ws, provider, prompt="/images")
+
+    assert code == EXIT_USAGE
+    assert "/images" in capsys.readouterr().err
+    assert provider.requests == []
+
+
 def test_headless_never_offers_generate_image_even_when_mflux_is_found(
     ws: Path, spy: Spy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

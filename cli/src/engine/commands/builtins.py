@@ -20,5 +20,6 @@ BUILTINS: dict[str, str] = {
     "undo": "undo the last turn",
     "diff": "show what the last turn changed",
     "usage": "show the session's token totals",
+    "images": "image models: status, pull, cancel",
     "quit": "exit",
 }
