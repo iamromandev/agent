@@ -12,9 +12,10 @@ from pathlib import Path
 
 import pytest
 
-PIL = pytest.importorskip("PIL")
+# Loaded through importorskip, not `import`: CI has no image extra, and ty must not need Pillow to check this file.
+Image = pytest.importorskip("PIL.Image")
+ImageOps = pytest.importorskip("PIL.ImageOps")
 np = pytest.importorskip("numpy")
-from PIL import Image  # noqa: E402
 
 HELPER = Path(__file__).resolve().parents[2] / "src" / "engine" / "composite_helper.py"
 
@@ -155,8 +156,6 @@ def test_a_jpeg_with_orientation_6_is_composited_as_displayed(tmp_path: Path) ->
     exif[0x0112] = 6
     stored.save(tmp_path / "s.jpg", "JPEG", quality=95, exif=exif)
     with Image.open(tmp_path / "s.jpg") as opened:
-        from PIL import ImageOps
-
         shown = np.asarray(ImageOps.exif_transpose(opened).convert("RGB")).copy()
     assert shown.shape[:2] == (60, 40)
     out = composite(tmp_path, tmp_path / "s.jpg", solid(40, 60, RED), (40, 60), region=[rect(0, 0, 40, 30)])
@@ -184,8 +183,6 @@ def test_a_transparent_source_is_flattened_over_white(tmp_path: Path) -> None:
 
 def _mflux_load(path: Path) -> np.ndarray:
     """`ImageUtil.load_image` of mflux: oriented, alpha over white, convert("RGB")."""
-    from PIL import ImageOps
-
     with Image.open(path) as opened:
         image = ImageOps.exif_transpose(opened)
         if image.has_transparency_data:
