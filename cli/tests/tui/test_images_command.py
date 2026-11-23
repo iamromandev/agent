@@ -247,9 +247,14 @@ async def test_a_pull_failure_is_shown_and_nothing_is_saved_to_the_session(
 async def test_status_lists_the_upscale_row_with_the_size_of_its_two_files(make_app: AppFactory, tmp_path: Path) -> None:
     repo = tmp_path / "hub" / "models--numz--SeedVR2_comfyUI" / "snapshots" / "09ced71023636e9bc8cdf9cdecfb2625d1e691e8"
     repo.mkdir(parents=True)
-    (repo / "seedvr2_ema_3b_fp16.safetensors").write_bytes(b"x" * 3_000_000_000)
-    (repo / "ema_vae_fp16.safetensors").write_bytes(b"x" * 500_000_000)
-    (repo / "other.bin").write_bytes(b"x" * 7_000_000_000)
+    # sparse files: only `st_size` is read, so the sizes need no real bytes (writing them took 10.5 GB and ~12 s)
+    for name, size in (
+        ("seedvr2_ema_3b_fp16.safetensors", 3_000_000_000),
+        ("ema_vae_fp16.safetensors", 500_000_000),
+        ("other.bin", 7_000_000_000),
+    ):
+        with (repo / name).open("wb") as handle:
+            handle.truncate(size)
     app = make_app(images=_puller(tmp_path))
     async with app.run_test() as pilot:
         await type_and_send(pilot, "/images")
