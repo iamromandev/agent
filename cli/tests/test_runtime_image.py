@@ -202,3 +202,33 @@ def test_upscale_image_is_absent_without_its_command_without_images_and_for_the_
     agent = _build(ws, images=True).agent_factory(_NoApprover())
     task = next(t for t in agent.tools if t.name == "task")
     assert not any(isinstance(t, UpscaleImageTool) for t in task._tools)  # ty: ignore[unresolved-attribute]
+
+
+def _speak_tools(rt: Runtime) -> list:
+    from src.engine.tools.media import SpeakTool
+
+    agent = rt.agent_factory(_NoApprover())
+    return [t for t in agent.tools if isinstance(t, SpeakTool)]
+
+
+def test_the_main_agent_gets_speak_with_the_settings_when_the_engine_is_found(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("AGENT_SPEECH_MODEL", "s/m")
+    monkeypatch.setenv("AGENT_SPEECH_TIMEOUT", "17")
+    get_settings.cache_clear()
+    monkeypatch.setattr("src.engine.media.find_speech", lambda: tmp_path / "helper.py")
+    (tool,) = _speak_tools(_build(ws, images=True))
+    assert (tool.model, tool.timeout) == ("s/m", 17.0)
+
+
+def test_speak_is_absent_without_the_engine_without_images_and_for_the_task_child(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.engine.media.find_speech", lambda: None)
+    assert _speak_tools(_build(ws, images=True)) == []
+    monkeypatch.setattr("src.engine.media.find_speech", lambda: tmp_path / "helper.py")
+    assert _speak_tools(_build(ws)) == []
+    agent = _build(ws, images=True).agent_factory(_NoApprover())
+    task = next(t for t in agent.tools if t.name == "task")
+    assert not any(t.name == "speak" for t in task._tools)  # ty: ignore[unresolved-attribute]

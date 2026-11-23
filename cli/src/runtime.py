@@ -39,6 +39,7 @@ if TYPE_CHECKING:
     from src.engine.session import Recorder, SessionStore
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
+    from src.engine.tools.media import SpeakTool
 
 
 @dataclass(frozen=True)
@@ -50,6 +51,13 @@ class StartChoice:
 
 
 NEW = StartChoice("new")
+
+
+def _speaker(found: Path | None, settings: Settings, guard: Guardrails) -> SpeakTool | None:
+    """The speak tool for the main agent; None when the speech engine is not installed."""
+    from src.engine.tools.media import SpeakTool
+
+    return None if found is None else SpeakTool(settings.speech_model, settings.speech_timeout, guard)
 
 
 def _image_generators(
@@ -203,6 +211,7 @@ def build_runtime(
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
     from src.engine.mcp.trust import TrustStore, trust_store_path
+    from src.engine.media import find_speech
     from src.engine.permissions import setup as permission_setup
     from src.engine.permissions.config import global_settings_path, project_settings_path
     from src.engine.provider.models import SHOW_TIMEOUT, SLOW_AFTER, CatalogError, launch_model, shown_name
@@ -233,6 +242,7 @@ def build_runtime(
             if images
             else (None, None, None)
         )
+        speech_found = find_speech() if images else None  # same for the speak tool (the `media` extra)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
         probe_imager, probe_editor, probe_upscaler = _image_generators(image_commands, settings, Guardrails.off(root))
         permissions = permission_setup.prepare(
@@ -249,6 +259,7 @@ def build_runtime(
                     imager=probe_imager,
                     editor=probe_editor,
                     upscaler=probe_upscaler,
+                    speaker=_speaker(speech_found, settings, Guardrails.off(root)),
                 )
             ),
         )
@@ -345,6 +356,7 @@ def build_runtime(
                     editor=editor,
                     upscaler=upscaler,
                     pull=puller,
+                    speaker=_speaker(speech_found, settings, guard),
                 ),
                 approver,
                 ctx,

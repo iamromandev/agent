@@ -2,10 +2,11 @@
 # variables
 UV := uv
 UVX := $(UV)x
-# Apple Silicon Macs also get the `image` extra (mflux, for the generate_image tool); elsewhere it is not installed.
+# Apple Silicon Macs also get the `image` extra (mflux, for the generate_image tool) and the `media` extra (mlx-audio,
+# for the speak tool); elsewhere they are not installed.
 APPLE_SILICON := $(shell test "`uname -s`" = Darwin && test "`uname -m`" = arm64 && echo yes)
-EXTRAS := $(if $(APPLE_SILICON),--extra image,)
-TOOL_SPEC := $(if $(APPLE_SILICON),.[image],.)
+EXTRAS := $(if $(APPLE_SILICON),--extra image --extra media,)
+TOOL_SPEC := $(if $(APPLE_SILICON),.[image,media],.)
 
 # phony targets
 .PHONY: sync install uninstall check check-ci test run eval image-eval tool-install tool-uninstall help

@@ -147,3 +147,21 @@ def test_image_upscale_model_defaults_and_reads_the_environment(monkeypatch: pyt
     monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_media_settings_defaults_and_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.speech_model == "mlx-community/Kokoro-82M-bf16"
+    assert (settings.speech_timeout, settings.video_timeout) == (300.0, 900.0)
+    monkeypatch.setenv("AGENT_SPEECH_MODEL", "s/m")
+    monkeypatch.setenv("AGENT_SPEECH_TIMEOUT", "30")
+    monkeypatch.setenv("AGENT_VIDEO_TIMEOUT", "40")
+    settings = Settings(_env_file=None)
+    assert (settings.speech_model, settings.speech_timeout, settings.video_timeout) == ("s/m", 30.0, 40.0)
+
+
+@pytest.mark.parametrize("name, value", [("AGENT_SPEECH_MODEL", ""), ("AGENT_SPEECH_TIMEOUT", "0"), ("AGENT_VIDEO_TIMEOUT", "0")])
+def test_invalid_media_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
