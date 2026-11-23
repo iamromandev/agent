@@ -41,8 +41,11 @@ from src.engine.imagegen import (
     MAX_PROMPT,
     MAX_SIDE,
     MAX_STEPS,
+    MAX_UPSCALE_SIDE,
     MIN_SIDE,
     SIDE_STEP,
+    UPSCALE_SCALES,
+    UPSCALE_STEP,
     ImageGenError,
     ImageRequest,
     MfluxGenerator,
@@ -51,6 +54,7 @@ from src.engine.imagegen import (
     png_size,
     run_helper,
     run_with_ticker,
+    upscale_size,
 )
 from src.engine.provider.images import size_text, sniff
 from src.engine.text import escape_display
@@ -401,6 +405,100 @@ def _check_selection(args: dict[str, Any]) -> tuple[list[Shape] | None, str | No
             return _invalid(parsed)
         shapes = parsed
     return shapes, mask, DEFAULT_FEATHER if feather is None else feather
+
+
+class UpscaleImageTool(Tool):
+    name: ClassVar[str] = "upscale_image"
+    description: ClassVar[str] = (
+        "Enlarge an image 2x, 3x or 4x with a local model (mflux, SeedVR2) and save the result as a PNG at a path "
+        "inside the workspace. `image` is the source (a workspace path, or clipboard:N for an image pasted into the "
+        "latest user message). The output's longer side may be at most "
+        f"{MAX_UPSCALE_SIDE} pixels. It takes minutes, replaces a file at the path (the source included), and every "
+        "call needs user approval."
+    )
+    parameters: ClassVar[dict[str, Any]] = {
+        "type": "object",
+        "properties": {
+            "image": {"type": "string", "description": "The source image: a workspace path or clipboard:N."},
+            "path": {"type": "string", "description": "Where to save the result: a .png path inside the workspace."},
+            "scale": {"type": "integer", "enum": list(UPSCALE_SCALES), "description": "Enlargement factor. Default 2."},
+            "seed": {"type": "integer", "description": "Integer 0-4294967295 to make the same result again. Default random."},
+            "softness": {"type": "number", "minimum": 0, "maximum": 1, "description": "0.0-1.0; higher is softer. Default 0."},
+        },
+        "required": ["image", "path"],
+    }
+    mutating: ClassVar[bool] = True  # hidden and refused in plan mode
+    needs_approval: ClassVar[bool] = True  # every call asks; target stays None so accept-edits never skips it
+    uncancellable: ClassVar[bool | None] = False  # Esc kills the process group
+    grant_arg: ClassVar[str | None] = "path"
+
+    def __init__(self, generator: MfluxGenerator, pull: ImagePuller | None = None) -> None:
+        self.generator = generator
+        self.pull = pull
+
+    def label(self, args: dict[str, Any]) -> str:
+        path = args.get("path")
+        return f"{self.name} {path}" if isinstance(path, str) and path else self.name
+
+    async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
+        if self.pull is not None and self.pull.busy:
+            return ToolResult(REFUSED, is_error=True, summary="refused")
+        if (problem := check_args(self.parameters, args)) is not None:
+            return _invalid(problem)
+        raw: str = args["path"]
+        scale = args.get("scale", UPSCALE_SCALES[0])
+        softness = args.get("softness", 0.0)
+        seed = args.get("seed")
+        if scale not in UPSCALE_SCALES:
+            return _invalid(f"scale must be one of {', '.join(map(str, UPSCALE_SCALES))}")
+        if isinstance(softness, bool) or not isinstance(softness, int | float) or not 0.0 <= softness <= 1.0:
+            return _invalid("softness must be a number from 0.0 to 1.0")
+        if seed is not None and not 0 <= seed < SEED_LIMIT:
+            return _invalid(f"seed must be 0-{SEED_LIMIT - 1}")
+        if isinstance(checked := _check_output_path(raw, ctx), ToolResult):
+            return checked
+        path = checked
+        source = await asyncio.to_thread(resolve_input, args["image"], ctx)
+        if isinstance(source, ToolResult):
+            return source
+        if source.width * source.height > MAX_COMPOSITE_PIXELS:
+            return _invalid(
+                f"{source.label} is {source.width}\u00d7{source.height}: too large to upscale "
+                f"(limit {MAX_COMPOSITE_PIXELS // 1_000_000} megapixels)"
+            )
+        width, height = upscale_size(*oriented_size(source), scale)
+        if max(width, height) > MAX_UPSCALE_SIDE:
+            return _invalid(
+                f"the output would be {width}\u00d7{height}; the longer side may be at most {MAX_UPSCALE_SIDE} "
+                "(use a smaller scale)"
+            )
+        if min(width, height) < UPSCALE_STEP:  # mflux cuts the shorter side to a multiple of 16: 0 for a tiny source
+            return _invalid(
+                f"the output would be {width}\u00d7{height}; the source is too small for {scale}\u00d7 "
+                f"(the shorter side must be at least {-(-UPSCALE_STEP // scale)} px)"
+            )
+        seed = secrets.randbelow(SEED_LIMIT) if seed is None else seed
+        request = ImageRequest("", width, height, 1, seed, scale=scale, softness=float(softness))
+        model = self.generator.model
+        lines = [
+            f"source: {_describe_input(source)}",
+            f"output: {width}\u00d7{height} ({scale}\u00d7)",
+            *([f"softness: {softness:g}"] if softness else []),
+            f"seed: {seed}",
+            f"model: {escape_display(model)}",
+        ]
+        if path.exists():
+            lines.append("[overwrites the existing file]")
+        if not model_cached(model):
+            lines.append(f"[model {escape_display(model)} is not downloaded; this call may download several GB]")
+        preview = Preview("content", f"upscale image {escape_display(raw)}", "\n".join(lines))
+
+        async def execute() -> ToolResult:
+            return await _run_mflux(
+                self.generator, request, path, raw, ctx, "upscaled", lambda folder: stage([source], folder)
+            )
+
+        return Prepared(preview, execute)
 
 
 async def _generate(generator: MfluxGenerator, request: ImageRequest, out_dir: Path, ctx: ToolContext) -> Path:

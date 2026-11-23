@@ -138,3 +138,12 @@ def test_invalid_image_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, na
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_image_upscale_model_defaults_and_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).image_upscale_model == "seedvr2-3b"
+    monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "u/m")
+    assert Settings(_env_file=None).image_upscale_model == "u/m"
+    monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

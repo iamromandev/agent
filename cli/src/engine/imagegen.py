@@ -33,6 +33,12 @@ EDIT_COMMAND = "mflux-generate-flux2-edit"
 DEFAULT_EDIT_MODEL = "black-forest-labs/FLUX.2-klein-4B"
 EDIT_EXTRA = ("--quantize", "4")
 DEFAULT_EDIT_STEPS = 4
+UPSCALE_COMMAND = "mflux-upscale-seedvr2"
+DEFAULT_UPSCALE_MODEL = "seedvr2-3b"
+UPSCALE_EXTRA = ("--low-ram", "--quantize", "8")  # without them the 3B model peaks at 17 GB on a 16 GB Mac
+UPSCALE_SCALES = (2, 3, 4)
+MAX_UPSCALE_SIDE = 2048  # 4096 would not finish inside the default timeout
+UPSCALE_STEP = 16  # mflux's DIMENSION_STEP_PIXELS
 MIN_SIDE, MAX_SIDE, SIDE_STEP = 256, 2048, 16
 MAX_STEPS, DEFAULT_STEPS, DEFAULT_SIDE = 50, 9, 1024
 MAX_PROMPT = 2000
@@ -52,6 +58,48 @@ class ImageRequest:
     steps: int
     seed: int
     inputs: tuple[Path, ...] = ()  # edit commands: the source first, then the references
+    scale: int | None = None  # upscale: the factor of `--resolution <scale>x`
+    softness: float = 0.0  # upscale: 0.0-1.0
+
+
+@dataclass(frozen=True)
+class ModelFiles:
+    """A model alias mflux resolves itself: the Hugging Face repo and the files it fetches from it."""
+
+    repo: str
+    files: tuple[str, ...]
+    revision: str | None = None  # the snapshot mflux pins (`ModelRevisions`); None: any snapshot counts
+
+
+_SEEDVR2_REVISION = "09ced71023636e9bc8cdf9cdecfb2625d1e691e8"
+_SEEDVR2 = ModelFiles(
+    "numz/SeedVR2_comfyUI", ("seedvr2_ema_3b_fp16.safetensors", "ema_vae_fp16.safetensors"), _SEEDVR2_REVISION
+)
+_SEEDVR2_7B = ModelFiles(
+    "numz/SeedVR2_comfyUI", ("seedvr2_ema_7b_fp16.safetensors", "ema_vae_fp16.safetensors"), _SEEDVR2_REVISION
+)
+# mflux lower-cases the name before it looks an alias up, so keys are lower case and lookups use `.lower()`
+KNOWN_MODELS: dict[str, ModelFiles] = {"seedvr2-3b": _SEEDVR2, "seedvr2": _SEEDVR2, "seedvr2-7b": _SEEDVR2_7B}
+
+
+def is_alias(model: str) -> bool:
+    """mflux's alias branch wins over a folder of the same name in the cwd."""
+    return model.lower() in KNOWN_MODELS
+
+
+def resolve_model(model: str) -> tuple[str, tuple[str, ...] | None]:
+    """(repo id, the files mflux fetches) for a known alias; (model, None) for a repo id or a folder."""
+    known = KNOWN_MODELS.get(model.lower())
+    return (model, None) if known is None else (known.repo, known.files)
+
+
+def upscale_size(width: int, height: int, scale: int) -> tuple[int, int]:
+    """The size mflux's SeedVR2 writes (same float operations as its `seedvr2_util`): the shorter side is scaled and
+    cut down to a multiple of 16, the longer one follows, and each is rounded down to an even number."""
+    short = min(width, height)
+    target = int(scale * short - (scale * short) % UPSCALE_STEP)
+    factor = target / short
+    return (int(width * factor) // 2) * 2, (int(height * factor) // 2) * 2
 
 
 class ImageGenError(Exception):
@@ -80,10 +128,50 @@ def hub_cache(env: Mapping[str, str]) -> Path:
     return Path.home() / ".cache" / "huggingface" / "hub"
 
 
+def snapshot_files(
+    repo: str, files: tuple[str, ...], env: Mapping[str, str], revision: str | None = None
+) -> tuple[dict[str, int], bool]:
+    """(size of each listed file found in some snapshot of `repo`, whether a link is dangling or a download is
+    unfinished). `stat` follows links, so the shared-store layout (snapshot -> blobs -> hub-level blobs) works."""
+    folder = hub_cache(env) / f"models--{repo.replace('/', '--')}"
+    found: dict[str, int] = {}
+    unfinished = False
+    try:
+        snapshots = [
+            entry
+            for entry in (folder / "snapshots").iterdir()
+            if entry.is_dir() and (revision is None or entry.name == revision)
+        ]
+    except OSError:
+        snapshots = []
+    blobs = folder / "blobs"
+    for snapshot in snapshots:
+        for name in files:
+            link = snapshot / name
+            try:
+                found[name] = max(found.get(name, 0), link.stat().st_size)
+            except OSError:
+                unfinished = unfinished or os.path.lexists(link)
+            # huggingface_hub keeps a download as `blobs/<blob hash>.incomplete`; the link names the hash
+            with contextlib.suppress(OSError):
+                unfinished = unfinished or (blobs / f"{Path(os.readlink(link)).name}.incomplete").exists()
+    # A listed file that is not there yet has no link, so no `.incomplete` can be tied to it. A stale `.incomplete`
+    # of some other file must not make a complete model `partial`, so one counts only while a listed file is missing.
+    if len(found) < len(files):
+        with contextlib.suppress(OSError):
+            unfinished = unfinished or any(blob.name.endswith(".incomplete") for blob in blobs.iterdir())
+    return found, unfinished
+
+
 def model_cached(model: str, env: Mapping[str, str] = os.environ) -> bool:
-    """True when the model is in the local Hugging Face cache (or is a folder that exists)."""
-    if Path(model).is_dir():
+    """True when the model is in the local Hugging Face cache (or is a folder that exists). A known alias needs every
+    file mflux fetches; other models need any file in a snapshot."""
+    if not is_alias(model) and Path(model).is_dir():
         return True
+    repo, files = resolve_model(model)
+    if files is not None:
+        found, _ = snapshot_files(repo, files, env, KNOWN_MODELS[model.lower()].revision)
+        return len(found) == len(files)
     snapshots = hub_cache(env) / f"models--{model.replace('/', '--')}" / "snapshots"
     try:
         return any(any(entry.iterdir()) for entry in snapshots.iterdir() if entry.is_dir())
@@ -230,17 +318,38 @@ def format_progress(p: ImageProgress, elapsed: float) -> str:
 
 class MfluxGenerator:
     def __init__(
-        self, command: Path, model: str, timeout: float | None, guard: Guardrails, extra: tuple[str, ...] = ()
+        self,
+        command: Path,
+        model: str,
+        timeout: float | None,
+        guard: Guardrails,
+        extra: tuple[str, ...] = (),
+        kind: Literal["generate", "edit", "upscale"] = "generate",
     ) -> None:
         self.command = command
+        self.kind = kind
         self.extra = extra  # fixed arguments of this command, before --output
         # a folder is made absolute once: mflux runs with another cwd, and the cache check must see the same path
-        self.model = str(Path(model).resolve()) if Path(model).is_dir() else model
+        self.model = str(Path(model).resolve()) if not is_alias(model) and Path(model).is_dir() else model
         self.timeout = timeout
         self.guard = guard
 
     def argv(self, request: ImageRequest, out_dir: Path) -> list[str]:
         """Every value its own item: the prompt never goes through a shell."""
+        if self.kind == "upscale":
+            return self.guard.sandbox.wrap(
+                [
+                    str(self.command),
+                    "--model", self.model,
+                    "--image-path", str(request.inputs[0]),
+                    "--resolution", f"{request.scale}x",
+                    "--seed", str(request.seed),
+                    "--softness", f"{request.softness:g}",
+                    *self.extra,
+                    "--output", str(out_dir / OUTPUT_NAME),
+                    "--no-exif",
+                ]
+            )  # fmt: skip
         return self.guard.sandbox.wrap(
             [
                 str(self.command),

@@ -11,7 +11,7 @@ import pytest
 from src.engine.commands.builtins import BUILTINS
 from src.engine.guardrails.setup import Guardrails
 from src.engine.image_pull import NOT_INSTALLED, ImagePuller, Role
-from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator
+from src.engine.imagegen import EDIT_EXTRA, UPSCALE_EXTRA, MfluxGenerator
 from src.engine.provider.base import Done, TextDelta
 from src.tui.app import HELP
 from src.tui.widgets.chat_input import ChatInput
@@ -36,13 +36,18 @@ def _cache(tmp_path: Path, model: str, incomplete: bool = False) -> None:
         (folder / "blobs" / "z.incomplete").write_bytes(b"y")
 
 
-def _puller(tmp_path: Path, edit: bool = True, gen: bool = True) -> ImagePuller:
+def _puller(tmp_path: Path, edit: bool = True, gen: bool = True, upscale: bool = True) -> ImagePuller:
     folder = tmp_path / "bin"
     folder.mkdir(exist_ok=True)
     guard = Guardrails.off(tmp_path)
     generators: dict[Role, MfluxGenerator | None] = {
         "generate": MfluxGenerator(fake_mflux(folder, "g"), "org/gen", None, guard) if gen else None,
         "edit": MfluxGenerator(fake_mflux(folder, "e"), "org/edit", None, guard, extra=EDIT_EXTRA) if edit else None,
+        "upscale": (
+            MfluxGenerator(fake_mflux(folder, "u"), "seedvr2-3b", None, guard, extra=UPSCALE_EXTRA, kind="upscale")
+            if upscale
+            else None
+        ),
     }
     return ImagePuller(generators, None, guard, env={"HF_HUB_CACHE": str(tmp_path / "hub")})
 
@@ -91,7 +96,7 @@ async def test_status_shows_partial_and_a_local_folder(make_app: AppFactory, tmp
 
 
 async def test_not_installed(make_app: AppFactory, tmp_path: Path) -> None:
-    app = make_app(images=_puller(tmp_path, edit=False, gen=False))
+    app = make_app(images=_puller(tmp_path, edit=False, gen=False, upscale=False))
     async with app.run_test() as pilot:
         await type_and_send(pilot, "/images")
         await until(pilot, lambda: any(NOT_INSTALLED in n for n in _notices(app)))
@@ -108,18 +113,18 @@ async def test_a_bad_argument_warns_and_starts_nothing(make_app: AppFactory, tmp
         await type_and_send(pilot, "/images pull foo")
         await until(pilot, lambda: any("usage: /images" in n for n in _notices(app)))
         assert not puller.busy
-        assert any("usage: /images [pull [gen|edit] | cancel]" in n for n in _notices(app))
+        assert any("usage: /images [pull [gen|edit|upscale] | cancel]" in n for n in _notices(app))
 
 
-async def test_pull_runs_generate_then_edit(make_app: AppFactory, tmp_path: Path) -> None:
+async def test_pull_runs_generate_then_edit_then_upscale(make_app: AppFactory, tmp_path: Path) -> None:
     _cache(tmp_path, "org/gen")
     _cache(tmp_path, "org/edit")
     app = make_app(images=_puller(tmp_path))
     async with app.run_test() as pilot:
         await type_and_send(pilot, "/images pull")
-        await until(pilot, lambda: any("edit model ready" in n for n in _notices(app)))
+        await until(pilot, lambda: any("upscale model ready" in n for n in _notices(app)))
         ready = [n for n in _notices(app) if "model ready" in n]
-        assert [n.split()[1] for n in ready] == ["generate", "edit"]
+        assert [n.split()[1] for n in ready] == ["generate", "edit", "upscale"]
         assert app.query_one(StatusBar).background == ""
 
 
@@ -237,3 +242,37 @@ async def test_a_pull_failure_is_shown_and_nothing_is_saved_to_the_session(
         await until(pilot, lambda: any("edit model pull failed: mflux failed (exit 1)" in n for n in _notices(app)))
         assert app.agent.history == []
     assert not list((tmp_path / "sess").rglob("*.jsonl"))
+
+
+async def test_status_lists_the_upscale_row_with_the_size_of_its_two_files(make_app: AppFactory, tmp_path: Path) -> None:
+    repo = tmp_path / "hub" / "models--numz--SeedVR2_comfyUI" / "snapshots" / "09ced71023636e9bc8cdf9cdecfb2625d1e691e8"
+    repo.mkdir(parents=True)
+    (repo / "seedvr2_ema_3b_fp16.safetensors").write_bytes(b"x" * 3_000_000_000)
+    (repo / "ema_vae_fp16.safetensors").write_bytes(b"x" * 500_000_000)
+    (repo / "other.bin").write_bytes(b"x" * 7_000_000_000)
+    app = make_app(images=_puller(tmp_path))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/images")
+        await until(pilot, lambda: any("seedvr2-3b" in n for n in _notices(app)))
+        text = next(n for n in _notices(app) if "seedvr2-3b" in n)
+    assert [line.split(":")[0].split()[-1] for line in text.splitlines()] == ["generate", "edit", "upscale"]
+    assert "upscale: seedvr2-3b - cached, 3.5 GB" in text
+
+
+async def test_an_upscale_row_without_its_command_is_unavailable(make_app: AppFactory, tmp_path: Path) -> None:
+    app = make_app(images=_puller(tmp_path, upscale=False))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/images")
+        await until(pilot, lambda: any("upscale: unavailable" in n for n in _notices(app)))
+
+
+async def test_pull_upscale_warms_only_the_upscaler(make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    dump = tmp_path / "dump.json"
+    monkeypatch.setenv("FAKE_MFLUX_DUMP", str(dump))
+    app = make_app(images=_puller(tmp_path))
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/images pull upscale")
+        await until(pilot, lambda: any("upscale model ready" in n for n in _notices(app)))
+        assert [n for n in _notices(app) if ("model ready" in n and "generate" in n) or "edit model" in n] == []
+    argv = json.loads(dump.read_text())["argv"]
+    assert argv[argv.index("--resolution") + 1] == "2x"

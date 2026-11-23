@@ -58,6 +58,8 @@ if "--image-paths" in args:
         if value.startswith("--"):
             break
         inputs.append(value)
+elif "--image-path" in args:
+    inputs.append(opt("--image-path"))
 if dump:
     shas = {{}}
     for value in inputs:
@@ -68,7 +70,14 @@ if dump:
     with open(dump, "w") as handle:
         json.dump({{"argv": args, "env": dict(os.environ), "cwd": os.getcwd(), "inputs": inputs, "shas": shas}}, handle)
 out = opt("--output")
-w, h = int(opt("--width")), int(opt("--height"))
+if "--width" in args:
+    w, h = int(opt("--width")), int(opt("--height"))
+else:  # the upscaler: --resolution Nx of the input's size, by mflux's rule
+    scale = int(opt("--resolution").rstrip("x"))
+    sw, sh = struct.unpack(">II", open(opt("--image-path"), "rb").read()[16:24])
+    short = min(sw, sh)
+    factor = int(scale * short - (scale * short) % 16) / short
+    w, h = (int(sw * factor) // 2) * 2, (int(sh * factor) // 2) * 2
 if mode == "ok":
     open(out, "wb").write(png(w, h))
 elif mode == "jpeg":
@@ -93,7 +102,7 @@ elif mode == "tqdm":
     sys.stderr.write("\nValueError: real reason\n")
     sys.exit(1)
 elif mode in ("progress", "download", "badlines", "flood", "progressfail", "hugedigits"):
-    total = int(opt("--steps"))
+    total = int(opt("--steps")) if "--steps" in args else 1
     delay = float(os.environ.get("FAKE_MFLUX_DELAY", "0"))
 
     def say(text):

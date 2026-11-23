@@ -225,7 +225,7 @@ async def run_case(name: str, workspace: Path, tools: Tools) -> CaseResult:
 
 async def _run_case(name: str, workspace: Path, tools: Tools) -> str | None:
     from src.engine.guardrails.setup import prepare
-    from src.engine.image_pull import ROLES, ImagePuller, grey_png
+    from src.engine.image_pull import ImagePuller, grey_png
     from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator, png_size
     from src.engine.tools import image as image_tools
     from src.engine.tools.base import Prepared, ToolContext, ToolResult
@@ -264,7 +264,7 @@ async def _run_case(name: str, workspace: Path, tools: Tools) -> str | None:
 
         hf = Path(tools.hf) if tools.hf else None
         puller = ImagePuller({"generate": generator, "edit": editor}, hf, guard)
-        await puller.pull(ROLES, emit, lambda text: None)
+        await puller.pull(("generate", "edit"), emit, lambda text: None)  # this eval covers the two older models
         bad = [text for _, text in notices if "pull failed" in text or "not enough disk space" in text]
         if bad:
             return bad[0]

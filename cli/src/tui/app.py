@@ -1388,10 +1388,15 @@ class AgentApp(App[None]):
             if not await images.cancel():
                 await transcript.add_notice("info", "no image pull is running")
             return
-        choices: dict[str, tuple[Role, ...]] = {"": ROLES, "gen": ("generate",), "edit": ("edit",)}
+        choices: dict[str, tuple[Role, ...]] = {
+            "": ROLES,
+            "gen": ("generate",),
+            "edit": ("edit",),
+            "upscale": ("upscale",),
+        }
         roles = choices.get(words[1] if len(words) == 2 else "") if words[0] == "pull" and len(words) <= 2 else None
         if roles is None:
-            await transcript.add_notice("warn", "usage: /images [pull [gen|edit] | cancel]")
+            await transcript.add_notice("warn", "usage: /images [pull [gen|edit|upscale] | cancel]")
             return
         if images.busy:
             await transcript.add_notice("warn", "an image pull is already running")
