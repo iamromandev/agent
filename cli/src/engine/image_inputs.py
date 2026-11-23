@@ -76,6 +76,93 @@ def _jpeg_size(data: bytes) -> tuple[int, int] | None:
     return None
 
 
+def _tiff_orientation(tiff: bytes) -> int:
+    """Orientation (tag 0x0112) from the first IFD of a TIFF block, 1 when absent or malformed."""
+    if len(tiff) < 8 or tiff[:2] not in (b"II", b"MM"):
+        return 1
+    e = "<" if tiff[:2] == b"II" else ">"
+    if struct.unpack(e + "H", tiff[2:4])[0] != 42:
+        return 1
+    (offset,) = struct.unpack(e + "I", tiff[4:8])
+    if offset + 2 > len(tiff):
+        return 1
+    (count,) = struct.unpack(e + "H", tiff[offset : offset + 2])
+    for index in range(min(count, 256)):
+        entry = offset + 2 + index * 12
+        if entry + 12 > len(tiff):
+            return 1
+        tag, kind, number = struct.unpack(e + "HHI", tiff[entry : entry + 8])
+        if tag == 0x0112:
+            if kind != 3 or number != 1:
+                return 1
+            (value,) = struct.unpack(e + "H", tiff[entry + 8 : entry + 10])
+            return value if 1 <= value <= 8 else 1
+    return 1
+
+
+def jpeg_orientation(data: bytes) -> int:
+    """The EXIF orientation (1-8) of a JPEG from its APP1 segment, 1 when absent or malformed. Stops at SOS/EOI."""
+    pos, end = 2, len(data)
+    while pos + 4 <= end:
+        if data[pos] != 0xFF:
+            pos += 1
+            continue
+        marker = data[pos + 1]
+        if marker == 0xFF:
+            pos += 1
+            continue
+        if marker in (0xD9, 0xDA):
+            return 1
+        if marker in (0x01, 0xD8) or 0xD0 <= marker <= 0xD7:
+            pos += 2
+            continue
+        (length,) = struct.unpack(">H", data[pos + 2 : pos + 4])
+        if marker == 0xE1 and data[pos + 4 : pos + 10] == b"Exif\0\0":
+            return _tiff_orientation(data[pos + 10 : pos + 2 + length])
+        pos += 2 + max(length, 2)
+    return 1
+
+
+def _tiff_block(block: bytes) -> bytes:
+    return block[6:] if block[:6] == b"Exif\0\0" else block
+
+
+def png_orientation(data: bytes) -> int:
+    """The orientation from a PNG `eXIf` chunk, 1 when absent or malformed. Stops at IDAT or IEND."""
+    pos, end = 8, len(data)
+    while pos + 8 <= end:
+        (length,) = struct.unpack(">I", data[pos : pos + 4])
+        kind = data[pos + 4 : pos + 8]
+        if kind in (b"IDAT", b"IEND"):
+            return 1
+        if kind == b"eXIf":
+            return _tiff_orientation(_tiff_block(data[pos + 8 : pos + 8 + length]))
+        pos += 12 + length
+    return 1
+
+
+def webp_orientation(data: bytes) -> int:
+    """The orientation from a WebP RIFF `EXIF` chunk (VP8X files), 1 when absent or malformed."""
+    if data[:4] != b"RIFF" or data[8:12] != b"WEBP":
+        return 1
+    pos, end = 12, min(len(data), 8 + int.from_bytes(data[4:8], "little"))
+    while pos + 8 <= end:
+        kind = data[pos : pos + 4]
+        length = int.from_bytes(data[pos + 4 : pos + 8], "little")
+        if kind == b"EXIF":
+            return _tiff_orientation(_tiff_block(data[pos + 8 : pos + 8 + length]))
+        pos += 8 + length + (length & 1)
+    return 1
+
+
+def oriented_size(item: InputImage) -> tuple[int, int]:
+    """(width, height) as displayed: an EXIF orientation 5-8 (JPEG, PNG or WebP) turns the image a quarter."""
+    reader = {"jpeg": jpeg_orientation, "png": png_orientation, "webp": webp_orientation}.get(item.fmt)
+    if reader is not None and reader(item.data) >= 5:
+        return item.height, item.width
+    return item.width, item.height
+
+
 def _webp_size(data: bytes) -> tuple[int, int] | None:
     kind = data[12:16]
     if kind == b"VP8 " and len(data) >= 30 and data[23:26] == b"\x9d\x01\x2a":
@@ -178,13 +265,15 @@ def resolve_input(ref: str, ctx: ToolContext) -> InputImage | ToolResult:
         os.close(fd)
 
 
+def stage_one(item: InputImage, folder: Path, name: str) -> Path:
+    """Write one input as `<name>.<ext>` (mode 0600) into `folder`."""
+    path = folder / f"{name}.{_EXTENSIONS[item.fmt]}"
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(item.data)
+    return path
+
+
 def stage(inputs: Sequence[InputImage], folder: Path) -> tuple[Path, ...]:
     """Write each input as `in-<i>.<ext>` (mode 0600) into `folder`, in order. The source goes first."""
-    paths: list[Path] = []
-    for index, item in enumerate(inputs):
-        path = folder / f"in-{index}.{_EXTENSIONS[item.fmt]}"
-        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(item.data)
-        paths.append(path)
-    return tuple(paths)
+    return tuple(stage_one(item, folder, f"in-{index}") for index, item in enumerate(inputs))

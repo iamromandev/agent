@@ -318,6 +318,52 @@ class MfluxGenerator:
         return output
 
 
+async def run_helper(
+    argv: list[str],
+    cwd: Path,
+    guard: Guardrails,
+    timeout: float | None,
+    on_start: Callable[[int], None] | None = None,
+) -> tuple[int, bytes]:
+    """Run a helper process like mflux: sandbox wrap, filtered environment, its own process group, no stdin or
+    stdout. Returns (exit code, the end of stderr); kills the group on timeout (`ImageGenError`) and on cancel."""
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *guard.sandbox.wrap(argv),
+            cwd=cwd,
+            stdin=DEVNULL,
+            stdout=DEVNULL,
+            stderr=PIPE,
+            start_new_session=True,
+            env=guard.env.filter(child_environment()),
+        )
+    except OSError as exc:
+        raise ImageGenError(f"Could not start the compositing helper: {escape(str(exc))}") from exc
+    if on_start is not None:
+        with contextlib.suppress(Exception):
+            on_start(proc.pid)
+    kept = bytearray()
+
+    async def drain() -> None:
+        assert proc.stderr is not None
+        while chunk := await proc.stderr.read(65_536):
+            kept.extend(chunk)
+            if len(kept) > _KEEP:
+                del kept[: len(kept) - _KEEP]
+        await proc.wait()
+
+    try:
+        await asyncio.wait_for(drain(), timeout)
+    except TimeoutError:
+        await kill_group(proc)
+        raise ImageGenError(f"timed out after {timeout:g} s") from None
+    except BaseException:
+        await kill_group(proc)
+        raise
+    assert proc.returncode is not None
+    return proc.returncode, bytes(kept)
+
+
 async def run_with_ticker(
     generator: MfluxGenerator,
     request: ImageRequest,

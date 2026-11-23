@@ -4,17 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import copy
 import dataclasses
+import errno
+import importlib.util
+import json
 import os
+import re
 import secrets
 import shutil
+import stat
+import sys
 import tempfile
+import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ClassVar
 
 from src.engine.guardrails.setup import guard_of
-from src.engine.image_inputs import MAX_REFERENCES, InputImage, default_size, resolve_input, stage
+from src.engine.image_inputs import (
+    MAX_REFERENCES,
+    InputImage,
+    default_size,
+    oriented_size,
+    resolve_input,
+    stage,
+    stage_one,
+)
+from src.engine.image_mask import DEFAULT_FEATHER, MAX_FEATHER, MAX_SHAPES, Shape, check_region, describe, parse_region
 from src.engine.image_pull import REFUSED, ImagePuller
 from src.engine.imagegen import (
     DEFAULT_EDIT_STEPS,
@@ -28,8 +46,10 @@ from src.engine.imagegen import (
     ImageGenError,
     ImageRequest,
     MfluxGenerator,
+    _tail,
     model_cached,
     png_size,
+    run_helper,
     run_with_ticker,
 )
 from src.engine.provider.images import size_text, sniff
@@ -43,6 +63,12 @@ from .protected import refuse_protected
 SEED_LIMIT = 2**32
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _IEND = b"IEND\xaeB`\x82"
+_SPEC = importlib.util.find_spec("src.engine.composite_helper")  # found, never imported: it needs Pillow
+COMPOSITE_HELPER: Path | None = Path(_SPEC.origin) if _SPEC is not None and _SPEC.origin else None
+OUTPUT_COMPOSITE = "out.png"
+MASK_NAME = "mask.png"
+MAX_COMPOSITE_PIXELS = 50_000_000  # the helper decodes the source and the mask: its memory grows with the pixels
+_SIZES = re.compile(rb"source is (\d+)x(\d+), expected (\d+)x(\d+)")
 _FORMAT_NAMES = {"jpeg": "a JPEG", "gif": "a GIF", "webp": "a WebP image"}
 
 
@@ -180,6 +206,9 @@ class EditImageTool(Tool):
         "Edit an image from a text instruction with a local model (mflux, FLUX.2 klein) and save the result as a PNG "
         "at a path inside the workspace. `image` is the source (a workspace path, or clipboard:N for an image pasted "
         f"into the user's message; clipboard:N refers only to the images pasted into the latest user message); `references` are up to {MAX_REFERENCES} more images the edit may use. "
+        "To change only part of the image, give `region` (shapes in source pixel coordinates) or `mask` (a mask image: "
+        "white edits, black keeps), optionally with `feather`; the output then keeps the source's exact size and every "
+        "pixel outside the selection is the source's own. "
         "It takes minutes, replaces a file at the path (the source included), and every call needs user approval."
     )
     parameters: ClassVar[dict[str, Any]] = {
@@ -198,6 +227,38 @@ class EditImageTool(Tool):
             "height": {"type": "integer", "description": f"Pixels, {MIN_SIDE}-{MAX_SIDE}, a multiple of {SIDE_STEP}. Default the source's, scaled to a longer side of at most 1024."},
             "seed": {"type": "integer", "description": "Integer 0-4294967295 to make the same edit again. Default random."},
             "steps": {"type": "integer", "description": f"Denoising steps, 1-{MAX_STEPS}. Default {DEFAULT_EDIT_STEPS}."},
+            "region": {
+                "type": "array",
+                "maxItems": MAX_SHAPES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "shape": {"type": "string", "enum": ["rect", "ellipse"]},
+                        "x": {"type": "integer"},
+                        "y": {"type": "integer"},
+                        "w": {"type": "integer", "minimum": 1},
+                        "h": {"type": "integer", "minimum": 1},
+                    },
+                    "required": ["shape", "x", "y", "w", "h"],
+                },
+                "description": (
+                    f"1-{MAX_SHAPES} shapes to edit, in source pixel coordinates (x, y is the top-left corner of the "
+                    "box, w and h its size; an ellipse is inscribed in its box). Shapes may overhang the source and are "
+                    "clipped. The output keeps the source size. Not with `mask`, `width` or `height`."
+                ),
+            },
+            "mask": {
+                "type": "string",
+                "description": (
+                    "A mask image to edit through: a workspace path or clipboard:N. White edits, black keeps, grey "
+                    "blends; any size (scaled to the source). Counts as one of the 4 input images. Not with `region`, "
+                    "`width` or `height`."
+                ),
+            },
+            "feather": {
+                "type": "integer",
+                "description": f"Edge softness of the region or mask in pixels, 0-{MAX_FEATHER}. Default {DEFAULT_FEATHER}.",
+            },
         },
         "required": ["prompt", "image", "path"],
     }
@@ -238,19 +299,42 @@ class EditImageTool(Tool):
             return _invalid(f"steps must be 1-{MAX_STEPS}")
         if seed is not None and not 0 <= seed < SEED_LIMIT:
             return _invalid(f"seed must be 0-{SEED_LIMIT - 1}")
+        selection = _check_selection(args)
+        if isinstance(selection, ToolResult):
+            return selection
+        shapes, mask_ref, feather = selection
         if isinstance(checked := _check_output_path(raw, ctx), ToolResult):
             return checked
         path = checked
-        inputs: list[InputImage] = []
-        for ref in (args["image"], *references):
+        if mask_ref is not None and len(references) + 2 > 1 + MAX_REFERENCES:
+            return _invalid(f"too many input images (at most {1 + MAX_REFERENCES} with the mask)")
+        found_all: list[InputImage] = []
+        for ref in (args["image"], *references, *(() if mask_ref is None else (mask_ref,))):
             found = await asyncio.to_thread(resolve_input, ref, ctx)
             if isinstance(found, ToolResult):
                 return found
-            if any(found.identity == other.identity for other in inputs):
+            if any(found.identity == other.identity for other in found_all):
                 return _invalid(f"{escape_display(ref)} is given twice (the same image as {found.label})")
-            inputs.append(found)
+            found_all.append(found)
+        mask_item = found_all.pop() if mask_ref is not None else None  # the mask never goes to mflux
+        if shapes is not None or mask_item is not None:
+            for item in (found_all[0], *(() if mask_item is None else (mask_item,))):
+                if item.width * item.height > MAX_COMPOSITE_PIXELS:
+                    return _invalid(
+                        f"{item.label} is {item.width}\u00d7{item.height}: too large to composite "
+                        f"(limit {MAX_COMPOSITE_PIXELS // 1_000_000} megapixels)"
+                    )
+        inputs = found_all
         source = inputs[0]
-        default_width, default_height = default_size(source.width, source.height)
+        composite: Composite | None = None
+        if shapes is not None or mask_item is not None:
+            size = oriented_size(source)
+            if shapes is not None and (outside := check_region(shapes, *size)) is not None:
+                return _invalid(outside)
+            composite = Composite(shapes, mask_item, feather, size)
+            default_width, default_height = default_size(*size)
+        else:
+            default_width, default_height = default_size(source.width, source.height)
         width = args.get("width", default_width)
         height = args.get("height", default_height)
         seed = secrets.randbelow(SEED_LIMIT) if seed is None else seed
@@ -261,6 +345,14 @@ class EditImageTool(Tool):
             f"source: {_describe_input(source)}",
             *(f"reference: {_describe_input(item)}" for item in inputs[1:]),
             f"size: {width}\u00d7{height}, {steps} steps, seed {seed}",
+            *(
+                [
+                    describe(shapes, mask_item.label if mask_item else None, feather),
+                    f"output: {composite.size[0]}\u00d7{composite.size[1]} (source size)",
+                ]
+                if composite is not None
+                else []
+            ),
             f"model: {escape_display(model)}",
         ]
         if path.exists():
@@ -270,9 +362,45 @@ class EditImageTool(Tool):
         preview = Preview("content", f"edit image {escape_display(raw)}", "\n".join(lines))
 
         async def execute() -> ToolResult:
-            return await _run_mflux(self.generator, request, path, raw, ctx, "edited", lambda folder: stage(inputs, folder))
+            return await _run_mflux(
+                self.generator, request, path, raw, ctx, "edited", lambda folder: stage(inputs, folder), composite
+            )
 
         return Prepared(preview, execute)
+
+
+@dataclass(frozen=True)
+class Composite:
+    """A masked edit: what to edit (shapes or a mask image), the feather and the source's oriented size."""
+
+    shapes: list[Shape] | None
+    mask: InputImage | None
+    feather: int
+    size: tuple[int, int]
+
+
+def _check_selection(args: dict[str, Any]) -> tuple[list[Shape] | None, str | None, int] | ToolResult:
+    """(shapes, mask reference, feather) from the arguments, or the `invalid` refusal."""
+    region, mask, feather = args.get("region"), args.get("mask"), args.get("feather")
+    if region is not None and mask is not None:
+        return _invalid("give either region or mask, not both")
+    if region is None and mask is None:
+        if feather is not None:
+            return _invalid("feather needs a region or a mask")
+        return None, None, DEFAULT_FEATHER
+    if feather is not None and not 0 <= feather <= MAX_FEATHER:
+        return _invalid(f"feather must be 0-{MAX_FEATHER}")
+    if "width" in args or "height" in args:
+        return _invalid(
+            "width and height cannot be combined with a mask or region (the output keeps the source size)"
+        )
+    shapes: list[Shape] | None = None
+    if region is not None:
+        parsed = parse_region(region)
+        if isinstance(parsed, str):
+            return _invalid(parsed)
+        shapes = parsed
+    return shapes, mask, DEFAULT_FEATHER if feather is None else feather
 
 
 async def _generate(generator: MfluxGenerator, request: ImageRequest, out_dir: Path, ctx: ToolContext) -> Path:
@@ -285,6 +413,93 @@ async def _generate(generator: MfluxGenerator, request: ImageRequest, out_dir: P
     return await run_with_ticker(generator, request, out_dir, lambda text: sink(ToolProgress(text)))
 
 
+class _TooBig(Exception):
+    pass
+
+
+def _read_nofollow(path: Path) -> bytes:
+    """A regular file's bytes, never through a symlink, at most `MAX_OUTPUT_BYTES`."""
+    fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+    with os.fdopen(fd, "rb") as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise FileNotFoundError(path)
+        data = handle.read(MAX_OUTPUT_BYTES + 1)
+    if len(data) > MAX_OUTPUT_BYTES:
+        raise _TooBig
+    return data
+
+
+async def _read_png(path: Path, expected: tuple[int, int], who: str) -> tuple[bytes, tuple[int, int]] | ToolResult:
+    """The bytes of a PNG that `who` wrote, checked: size limit, signature, IHDR size equal to `expected`, IEND."""
+    try:
+        data = await asyncio.to_thread(_read_nofollow, path)
+    except _TooBig:
+        return ToolResult(f"{who} wrote an image over 64 MB", is_error=True, summary="failed")
+    except (FileNotFoundError, NotADirectoryError):
+        return ToolResult(f"{who} wrote no image", is_error=True, summary="failed")
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):  # a symlink where the image should be
+            return ToolResult(f"{who} wrote no image", is_error=True, summary="failed")
+        return ToolResult(f"Cannot read the image: {exc.strerror or exc}", is_error=True, summary="failed")
+    size = png_size(data)
+    if size is None:
+        kind = _FORMAT_NAMES.get(sniff(data[:16]) or "", "an unknown file")
+        return ToolResult(f"{who} wrote {kind} instead of a PNG", is_error=True, summary="failed")
+    if size != expected:
+        return ToolResult(
+            f"{who} wrote {size[0]}\u00d7{size[1]}, expected {expected[0]}\u00d7{expected[1]}", is_error=True, summary="failed"
+        )
+    if not data.endswith(_IEND):
+        return ToolResult(f"{who} wrote an incomplete PNG", is_error=True, summary="failed")
+    return data, size
+
+
+def _timeout_message(message: str, generator: MfluxGenerator) -> str:
+    """A timeout names the whole deadline, not the part left for the step that hit it."""
+    if message.startswith("timed out") and generator.timeout is not None:
+        return f"timed out after {generator.timeout:g} s"
+    return message
+
+
+def _helper_failure(code: int, stderr: bytes) -> ToolResult:
+    if code == 3:
+        message = "the mask selects nothing"
+    elif code == 4:
+        found = _SIZES.search(stderr)
+        message = "the source's orientation could not be matched"
+        if found is not None:
+            w, h, ew, eh = (int(g) for g in found.groups())
+            message = f"the source decoded as {w}\u00d7{h}, expected {ew}\u00d7{eh}"
+    elif code == 5:
+        message = "image too large to composite (limit 50 megapixels)"
+    else:
+        message = f"compositing failed (exit {code}): {_tail(stderr)}"
+    return ToolResult(message, is_error=True, summary="failed")
+
+
+async def _composite(
+    step: str, flags: list[str], out_dir: Path, generator: MfluxGenerator, deadline: float | None
+) -> ToolResult | None:
+    """Run one helper step in the private folder under the shared deadline; the refusal, or None when it succeeded."""
+    if COMPOSITE_HELPER is None or not COMPOSITE_HELPER.is_file():
+        return ToolResult("the compositing helper is missing", is_error=True, summary="failed")
+    left = None
+    if deadline is not None:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            message = _timeout_message("timed out", generator)
+            return ToolResult(message, is_error=True, summary="timed out")
+    with contextlib.suppress(OSError):  # never write through something another process left in the way
+        (out_dir / (MASK_NAME if step == "prepare" else OUTPUT_COMPOSITE)).unlink()
+    argv = [sys.executable, "-I", str(COMPOSITE_HELPER), step, *flags]
+    try:
+        code, stderr = await run_helper(argv, out_dir, generator.guard, left)
+    except ImageGenError as exc:
+        message = _timeout_message(str(exc), generator)
+        return ToolResult(message, is_error=True, summary="timed out" if message.startswith("timed out") else "failed")
+    return None if code == 0 else _helper_failure(code, stderr)
+
+
 async def _run_mflux(
     generator: MfluxGenerator,
     request: ImageRequest,
@@ -293,36 +508,64 @@ async def _run_mflux(
     ctx: ToolContext,
     verb: str,
     stager: Callable[[Path], tuple[Path, ...]] | None = None,
+    composite: Composite | None = None,
 ) -> ToolResult:
     """Run mflux in a private folder, check the PNG it wrote and place it at `path`. `stager` (edit_image) copies the
-    inputs into that folder first; the folder is always removed."""
+    inputs into that folder first. With a `composite` (a region or mask), a helper process first builds the feathered
+    mask and, after mflux, blends the edit over the source at the source's size; one deadline covers all three runs.
+    The folder is always removed."""
     out_dir = Path(tempfile.mkdtemp(prefix="agent-image-"))
+    deadline = None if generator.timeout is None else time.monotonic() + generator.timeout
     try:
         if stager is not None:
             try:
                 request = dataclasses.replace(request, inputs=await _finish_placement(asyncio.to_thread(stager, out_dir)))
             except OSError as exc:
                 return ToolResult(f"Cannot stage the input images: {exc.strerror or exc}", is_error=True, summary="failed")
+        mask_file = out_dir / MASK_NAME
+        if composite is not None:
+            source = request.inputs[0]
+            flags = ["--source", str(source), "--expect", str(composite.size[0]), str(composite.size[1])]
+            flags += ["--feather", str(composite.feather), "--out-mask", str(mask_file)]
+            try:
+                if composite.mask is not None:
+                    staged = await _finish_placement(asyncio.to_thread(stage_one, composite.mask, out_dir, "in-m"))
+                    flags += ["--mask", str(staged)]
+                else:
+                    region = [{"shape": s.kind, "x": s.x, "y": s.y, "w": s.w, "h": s.h} for s in composite.shapes or []]
+                    flags += ["--region", json.dumps(region)]
+            except OSError as exc:
+                return ToolResult(f"Cannot stage the input images: {exc.strerror or exc}", is_error=True, summary="failed")
+            if (failed := await _composite("prepare", flags, out_dir, generator, deadline)) is not None:
+                return failed
+        run_generator = generator
+        if composite is not None and deadline is not None:  # the preparation took part of the one deadline
+            run_generator = copy.copy(generator)
+            run_generator.timeout = max(0.1, deadline - time.monotonic())
         try:
-            generated = await _generate(generator, request, out_dir, ctx)
+            generated = await _generate(run_generator, request, out_dir, ctx)
         except ImageGenError as exc:
-            message = str(exc)
+            message = _timeout_message(str(exc), generator)
             return ToolResult(message, is_error=True, summary="timed out" if message.startswith("timed out") else "failed")
-        try:
-            if (await asyncio.to_thread(generated.stat)).st_size > MAX_OUTPUT_BYTES:
-                return ToolResult("mflux wrote an image over 64 MB", is_error=True, summary="failed")
-            data = await asyncio.to_thread(generated.read_bytes)
-        except OSError as exc:
-            return ToolResult(f"Cannot read the image: {exc.strerror or exc}", is_error=True, summary="failed")
-        size = png_size(data)
-        if size is None:
-            kind = _FORMAT_NAMES.get(sniff(data[:16]) or "", "an unknown file")
-            return ToolResult(f"mflux wrote {kind} instead of a PNG", is_error=True, summary="failed")
-        if size != (request.width, request.height):
-            expected = f"{request.width}\u00d7{request.height}"
-            return ToolResult(f"mflux wrote {size[0]}\u00d7{size[1]}, expected {expected}", is_error=True, summary="failed")
-        if not data.endswith(_IEND):
-            return ToolResult("mflux wrote an incomplete PNG", is_error=True, summary="failed")
+        checked = await _read_png(generated, (request.width, request.height), "mflux")
+        if isinstance(checked, ToolResult):
+            return checked
+        data, size = checked
+        suffix = ""
+        if composite is not None:
+            if ctx.progress is not None:
+                from src.engine.events import ToolProgress  # not at module level: events imports the tools package
+
+                ctx.progress(ToolProgress("compositing…"))
+            blend = ["--source", str(request.inputs[0]), "--edit", str(generated), "--mask", str(mask_file)]
+            blend += ["--out", str(out_dir / OUTPUT_COMPOSITE)]
+            if (failed := await _composite("blend", blend, out_dir, generator, deadline)) is not None:
+                return failed
+            checked = await _read_png(out_dir / OUTPUT_COMPOSITE, composite.size, "compositing")
+            if isinstance(checked, ToolResult):
+                return checked
+            data, size = checked
+            suffix = ", masked"
         try:
             refused = await _finish_placement(asyncio.to_thread(_place, path, data, ctx))
         except OSError as exc:
@@ -330,10 +573,9 @@ async def _run_mflux(
         if refused is not None:
             return refused
         described = f"PNG, {size[0]}\u00d7{size[1]}, {size_text(len(data))}"
-        return ToolResult(f"{verb} {raw} ({described}, seed {request.seed})", summary=described)
+        return ToolResult(f"{verb} {raw} ({described}, seed {request.seed}{suffix})", summary=described)
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
-
 
 
 def _place(path: Path, data: bytes, ctx: ToolContext) -> ToolResult | None:
