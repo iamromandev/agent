@@ -8,7 +8,7 @@ EXTRAS := $(if $(APPLE_SILICON),--extra image,)
 TOOL_SPEC := $(if $(APPLE_SILICON),.[image],.)
 
 # phony targets
-.PHONY: sync install uninstall check check-ci test run eval tool-install tool-uninstall help
+.PHONY: sync install uninstall check check-ci test run eval image-eval tool-install tool-uninstall help
 
 # python tools (uv)
 sync: # Install the dependencies into cli/.venv (with the image extra on Apple Silicon)
@@ -32,6 +32,9 @@ run: # Run the CLI, e.g. make run ARGS="health check"
 
 eval: # Run the real-model smoke test (needs Ollama)
 	$(UV) run python -m evals
+
+image-eval: # Run the real image-model smoke test (Apple Silicon + image extra)
+	$(UV) run python -m evals.images
 
 install: # Install the agent command on your PATH (editable, from this checkout; image extra on Apple Silicon)
 	$(UV) tool install --editable --force '$(TOOL_SPEC)'

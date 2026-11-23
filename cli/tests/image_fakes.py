@@ -135,7 +135,11 @@ elif mode in ("progress", "download", "badlines", "flood", "progressfail", "huge
         say("ValueError: real reason\n")
         sys.exit(1)
     open(out, "wb").write(png(w, h))
-elif mode == "sleep":
+elif mode in ("sleep", "stubborn"):
+    if mode == "stubborn":
+        import signal
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
     child = subprocess.Popen(["sleep", "60"])
     with open(os.environ["FAKE_MFLUX_PIDS"], "w") as handle:
         handle.write("%d %d" % (os.getpid(), child.pid))
@@ -246,3 +250,27 @@ def fake_hf(folder: Path, stdout: str, code: int = 0, sleep: float = 0.0) -> Pat
 def dry_run(rows: list[tuple[str, str]], will: str = "9 files (out of 25) totalling 7.8G") -> str:
     """What `hf download <repo> --dry-run` prints: a summary line, then a tab-separated table."""
     return f"[dry-run] Will download {will}.\nfile\tsize\n" + "".join(f"{name}\t{size}\n" for name, size in rows)
+
+
+COMPARE_SCRIPT = r'''import json, os, sys
+
+dump = os.environ.get("FAKE_COMPARE_DUMP")
+if dump:
+    with open(dump, "a") as handle:
+        handle.write(json.dumps(sys.argv[1:]) + "\n")
+code = int(os.environ.get("FAKE_COMPARE_EXIT", "0"))
+only = os.environ.get("FAKE_COMPARE_ONLY")
+if only and sys.argv[1:2] != [only]:
+    code = 0
+if code:
+    print("pixels differ" if code == 1 else "compare broke", file=sys.stderr)
+sys.exit(code)
+'''
+
+
+def fake_compare(folder: Path) -> Path:
+    """A fake `pixel_compare.py` (run as `python -I <path> <mode> ...`): exits with `FAKE_COMPARE_EXIT` (default 0), only
+    for the mode `FAKE_COMPARE_ONLY` when set; each argv is appended as a JSON line to `FAKE_COMPARE_DUMP` when set."""
+    path = folder / "fake_compare.py"
+    path.write_text(COMPARE_SCRIPT)
+    return path
