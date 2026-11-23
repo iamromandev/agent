@@ -61,3 +61,17 @@ def test_upscale_image_is_offered_only_with_an_upscaler(tmp_path) -> None:
     assert "upscale_image" not in plain
     assert [t.name for t in default_tools(upscaler=upscaler)] == [*plain, "upscale_image"]
     assert "upscale_image" not in [t.name for t in read_only_tools()]
+
+
+def test_edit_image_gets_the_upscaler_when_there_is_one(tmp_path) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.imagegen import MfluxGenerator
+    from src.engine.tools.image import EditImageTool
+
+    guard = Guardrails.off(tmp_path)
+    editor = MfluxGenerator(tmp_path / "mflux", "x/y", 5, guard)
+    upscaler = MfluxGenerator(tmp_path / "up", "x/y", 5, guard, kind="upscale")
+    with_up = next(t for t in default_tools(editor=editor, upscaler=upscaler) if isinstance(t, EditImageTool))
+    without = next(t for t in default_tools(editor=editor) if isinstance(t, EditImageTool))
+    assert with_up.upscaler is upscaler
+    assert without.upscaler is None

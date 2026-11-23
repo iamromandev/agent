@@ -59,7 +59,7 @@ def default_tools(
     if imager is not None:
         tools.append(GenerateImageTool(imager, pull))
     if editor is not None:
-        tools.append(EditImageTool(editor, pull))
+        tools.append(EditImageTool(editor, pull, upscaler))
     if upscaler is not None:
         tools.append(UpscaleImageTool(upscaler, pull))
     return tools

@@ -189,3 +189,29 @@ def test_generate_and_edit_argv_stay_byte_identical(tmp_path: Path) -> None:
 
 def test_unused_commands_stay_distinct() -> None:
     assert len({COMMAND, EDIT_COMMAND, UPSCALE_COMMAND}) == 3
+
+
+def test_edit_upscale_scale_picks_the_smallest_factor_covering_the_source() -> None:
+    from src.engine.imagegen import edit_upscale_scale
+
+    assert edit_upscale_scale((1024, 688), (3000, 2000)) == 2
+    assert edit_upscale_scale((1024, 1024), (1100, 1100)) == 2
+
+
+def test_edit_upscale_scale_follows_the_side_limit() -> None:
+    from src.engine.image_inputs import default_size
+    from src.engine.imagegen import edit_upscale_scale
+
+    assert edit_upscale_scale((1024, 688), (3000, 2000), max_side=4096) == 3
+    edit = default_size(5000, 3000)
+    assert edit_upscale_scale(edit, (5000, 3000), max_side=4096) == 4
+    # nothing covers the source: the largest factor that fits
+    assert edit_upscale_scale(edit, (9000, 6000), max_side=4096) == 4
+    assert edit_upscale_scale(edit, (9000, 6000)) == 2
+
+
+def test_edit_upscale_scale_is_none_when_nothing_fits() -> None:
+    from src.engine.imagegen import edit_upscale_scale
+
+    assert edit_upscale_scale((2048, 2048), (4000, 4000)) is None
+    assert edit_upscale_scale((3, 400), (100, 4000)) is None
