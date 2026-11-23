@@ -71,7 +71,7 @@ async def test_the_input_stays_usable_and_escape_cancels_a_running_generation(
 async def test_the_status_bar_shows_progress_while_running_and_clears_after(
     make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.05)
+    monkeypatch.setattr("src.engine.imagegen.PROGRESS_TICK", 0.05)
     monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
     monkeypatch.setenv("FAKE_MFLUX_DELAY", "0.15")
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))

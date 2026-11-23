@@ -284,3 +284,27 @@ async def test_phase_is_loading_between_the_download_and_the_first_step(
     seen = await _progress(tmp_path, out_dir, "download", monkeypatch)
     first_step = next(i for i, p in enumerate(seen) if p.phase == "steps")
     assert ImageProgress("loading") in seen[1:first_step]
+
+
+async def test_no_timeout_runs_to_the_end(tmp_path: Path, out_dir: Path) -> None:
+    generator = MfluxGenerator(fake_mflux(tmp_path), "x/y", None, Guardrails.off(tmp_path))
+    path = await generator.generate(REQUEST, out_dir)
+    assert png_size(path.read_bytes()) == (512, 256)
+
+
+async def test_on_start_gets_the_pid_of_a_group_leader(tmp_path: Path, out_dir: Path) -> None:
+    pids: list[int] = []
+    await _generator(tmp_path).generate(REQUEST, out_dir, on_start=pids.append)
+    assert len(pids) == 1
+    assert pids[0] > 0
+
+
+async def test_run_with_ticker_sends_progress_text(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from src.engine.imagegen import run_with_ticker
+
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
+    texts: list[str] = []
+    path = await run_with_ticker(_generator(tmp_path), ImageRequest("p", 256, 256, 2, 1), out_dir, texts.append)
+    assert path.is_file()
+    assert texts
+    assert texts[0].startswith("starting")

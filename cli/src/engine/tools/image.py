@@ -9,13 +9,13 @@ import os
 import secrets
 import shutil
 import tempfile
-import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
 from src.engine.guardrails.setup import guard_of
 from src.engine.image_inputs import MAX_REFERENCES, InputImage, default_size, resolve_input, stage
+from src.engine.image_pull import REFUSED, ImagePuller
 from src.engine.imagegen import (
     DEFAULT_EDIT_STEPS,
     DEFAULT_SIDE,
@@ -26,12 +26,11 @@ from src.engine.imagegen import (
     MIN_SIDE,
     SIDE_STEP,
     ImageGenError,
-    ImageProgress,
     ImageRequest,
     MfluxGenerator,
-    format_progress,
     model_cached,
     png_size,
+    run_with_ticker,
 )
 from src.engine.provider.images import size_text, sniff
 from src.engine.text import escape_display
@@ -42,7 +41,6 @@ from .paths import InvalidPath, inside_workspace, invalid_path_result, resolve_p
 from .protected import refuse_protected
 
 SEED_LIMIT = 2**32
-PROGRESS_TICK = 0.25  # seconds between progress lines
 MAX_OUTPUT_BYTES = 64 * 1024 * 1024
 _IEND = b"IEND\xaeB`\x82"
 _FORMAT_NAMES = {"jpeg": "a JPEG", "gif": "a GIF", "webp": "a WebP image"}
@@ -120,8 +118,9 @@ class GenerateImageTool(Tool):
     uncancellable: ClassVar[bool | None] = False  # Esc kills the process group
     grant_arg: ClassVar[str | None] = "prompt"
 
-    def __init__(self, generator: MfluxGenerator) -> None:
+    def __init__(self, generator: MfluxGenerator, pull: ImagePuller | None = None) -> None:
         self.generator = generator
+        self.pull = pull
 
     def label(self, args: dict[str, Any]) -> str:
         """The file, not the prompt: a prompt can be 2,000 characters and would fill the block's one-line title."""
@@ -129,6 +128,8 @@ class GenerateImageTool(Tool):
         return f"{self.name} {path}" if isinstance(path, str) and path else self.name
 
     async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
+        if self.pull is not None and self.pull.busy:
+            return ToolResult(REFUSED, is_error=True, summary="refused")
         if (problem := check_args(self.parameters, args)) is not None:
             return _invalid(problem)
         raw: str = args["path"]
@@ -205,8 +206,9 @@ class EditImageTool(Tool):
     uncancellable: ClassVar[bool | None] = False  # Esc kills the process group
     grant_arg: ClassVar[str | None] = "prompt"
 
-    def __init__(self, generator: MfluxGenerator) -> None:
+    def __init__(self, generator: MfluxGenerator, pull: ImagePuller | None = None) -> None:
         self.generator = generator
+        self.pull = pull
 
     def label(self, args: dict[str, Any]) -> str:
         """The output file, not the prompt."""
@@ -214,6 +216,8 @@ class EditImageTool(Tool):
         return f"{self.name} {path}" if isinstance(path, str) and path else self.name
 
     async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
+        if self.pull is not None and self.pull.busy:
+            return ToolResult(REFUSED, is_error=True, summary="refused")
         if (problem := check_args(self.parameters, args)) is not None:
             return _invalid(problem)
         raw: str = args["path"]
@@ -278,33 +282,7 @@ async def _generate(generator: MfluxGenerator, request: ImageRequest, out_dir: P
     sink = ctx.progress
     if sink is None:
         return await generator.generate(request, out_dir)
-    start = time.monotonic()
-    latest = ImageProgress("starting")
-    last: str | None = None
-
-    def send() -> None:
-        nonlocal last
-        text = format_progress(latest, time.monotonic() - start)
-        if text != last:
-            last = text
-            with contextlib.suppress(Exception):
-                sink(ToolProgress(text))
-
-    def update(value: ImageProgress) -> None:
-        nonlocal latest
-        latest = value
-
-    async def ticker() -> None:
-        while True:
-            send()
-            await asyncio.sleep(PROGRESS_TICK)
-
-    task = asyncio.create_task(ticker())
-    try:
-        return await generator.generate(request, out_dir, on_progress=update)
-    finally:
-        task.cancel()
-        await asyncio.gather(task, return_exceptions=True)
+    return await run_with_ticker(generator, request, out_dir, lambda text: sink(ToolProgress(text)))
 
 
 async def _run_mflux(

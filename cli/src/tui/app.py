@@ -56,6 +56,7 @@ from src.engine.guardrails.paths import (
 )
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.setup import Hooks, hook_failed
+from src.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
 from src.engine.instructions import fingerprint, levels
 from src.engine.loop import NOT_SUMMARIZED, close_recorder
 from src.engine.mcp.hub import HubEvent, McpHub
@@ -140,7 +141,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /help this help · /quit exit"
 )
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
@@ -189,8 +190,10 @@ class AgentApp(App[None]):
         window_cap: int,
         launch_notices: Sequence[str] = (),
         paste: PasteFolder | None = None,
+        images: ImagePuller | None = None,
     ) -> None:
         super().__init__()
+        self.images = images  # `/images`: the models' state and the background warm-up (None: no image tools in this run)
         self._on_close = on_close
         self.terminals = terminals
         self.mcp = mcp
@@ -1223,6 +1226,8 @@ class AgentApp(App[None]):
                 await self._diff_command(rest)
             case "/usage":
                 await self._usage_command(rest)
+            case "/images":
+                await self._images_command(rest)
             case "/model":
                 if not rest.strip():
                     if self._turn_active or self._switching:
@@ -1367,6 +1372,58 @@ class AgentApp(App[None]):
             estimated=status.estimated,
         )
         await self.push_screen(UsageScreen(data))
+
+    async def _images_command(self, rest: str) -> None:
+        """Status, pull and cancel. Allowed at any time: a pull is its own background job and touches no history."""
+        transcript = self.query_one(Transcript)
+        images = self.images
+        if images is None or not images.installed:
+            await transcript.add_notice("info", NOT_INSTALLED)
+            return
+        words = rest.split()
+        if not words:
+            await self._image_notice("info", format_status(images.status(), images.pulling))
+            return
+        if words[0] == "cancel" and len(words) == 1:
+            if not await images.cancel():
+                await transcript.add_notice("info", "no image pull is running")
+            return
+        choices: dict[str, tuple[Role, ...]] = {"": ROLES, "gen": ("generate",), "edit": ("edit",)}
+        roles = choices.get(words[1] if len(words) == 2 else "") if words[0] == "pull" and len(words) <= 2 else None
+        if roles is None:
+            await transcript.add_notice("warn", "usage: /images [pull [gen|edit] | cancel]")
+            return
+        if images.busy:
+            await transcript.add_notice("warn", "an image pull is already running")
+            return
+        images.reserve()
+        try:
+            self.run_worker(self._image_pull(images, roles), group="image-pull", exit_on_error=False)
+        except BaseException:
+            images.release()
+            raise
+
+    async def _image_notice(self, level: Level, text: str) -> None:
+        """A transcript notice with secrets out of it (fail closed); display only, never in the session."""
+        if self._shutting_down:
+            return
+        try:
+            shown = self.guard.redactor.redact(text)[0]
+        except Exception:
+            level, shown = "warn", "image pull failed: redaction failed"
+        await self.query_one(Transcript).add_notice(level, shown)
+
+    async def _image_pull(self, images: ImagePuller, roles: tuple[Role, ...]) -> None:
+        def progress(text: str) -> None:
+            if not self._shutting_down:
+                self.query_one(StatusBar).background = text
+
+        try:
+            await images.pull(roles, self._image_notice, progress)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            await self._image_notice("warn", f"image pull failed: {escape(str(exc)[:200])}")
 
     async def _diff_command(self, rest: str) -> None:
         transcript = self.query_one(Transcript)

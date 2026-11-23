@@ -353,7 +353,7 @@ def _collect(ctx: ToolContext, sink: Any) -> ToolContext:
 async def test_progress_lines_follow_the_phases(
     tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.02)
+    monkeypatch.setattr("src.engine.imagegen.PROGRESS_TICK", 0.02)
     monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
     monkeypatch.setenv("FAKE_MFLUX_DELAY", "0.1")
     events: list[Any] = []
@@ -401,7 +401,7 @@ async def test_no_sink_and_a_raising_sink_give_the_same_result(
 async def test_no_event_arrives_after_the_result(
     tool: GenerateImageTool, ctx: ToolContext, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.engine.tools.image.PROGRESS_TICK", 0.01)
+    monkeypatch.setattr("src.engine.imagegen.PROGRESS_TICK", 0.01)
     monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
     events: list[Any] = []
     await (await _prepared(tool, _collect(ctx, events.append), width=256, height=256)).execute()

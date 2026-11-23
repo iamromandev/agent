@@ -58,7 +58,7 @@ def _edit_tools(rt: Runtime) -> list[EditImageTool]:
 def _finder(generate: Path | None, edit: Path | str | None = "same"):
     """A `find_mflux` stand-in: one answer per command name."""
     answers = {COMMAND: generate, EDIT_COMMAND: generate if edit == "same" else edit}
-    return lambda command=COMMAND: answers[command]
+    return lambda command=COMMAND: answers.get(command)
 
 
 def test_the_main_agent_gets_the_tool_when_mflux_is_found(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,3 +119,52 @@ def test_the_task_child_never_gets_edit_image(ws: Path, tmp_path: Path, monkeypa
     agent = _build(ws, images=True).agent_factory(_NoApprover())
     task = next(t for t in agent.tools if t.name == "task")
     assert not any(isinstance(t, EditImageTool) for t in task._tools)  # ty: ignore[unresolved-attribute]
+
+
+def test_the_runtime_has_one_puller_shared_with_both_tools(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(fake_mflux(tmp_path)))
+    rt = _build(ws, images=True)
+    assert rt.images is not None and rt.images.installed
+    assert rt.images.hf is None  # the finder knows no `hf`
+    (generate,) = _image_tools(rt)
+    (edit,) = _edit_tools(rt)
+    assert generate.pull is rt.images and edit.pull is rt.images
+
+
+def test_the_runtime_has_no_puller_without_images(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(fake_mflux(tmp_path)))
+    assert _build(ws).images is None
+
+
+def test_close_cancels_a_running_pull_and_kill_all_reaches_the_puller(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(fake_mflux(tmp_path)))
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
+    monkeypatch.setenv("FAKE_MFLUX_MODE", "sleep")
+    monkeypatch.setenv("FAKE_MFLUX_PIDS", str(tmp_path / "pids"))
+    rt = build_runtime(ws, set(), terminals=False, provider=ScriptedProvider([]), catalog=FakeCatalog([]), images=True)
+    assert rt.images is not None
+    puller = rt.images
+    notes: list[tuple[str, str]] = []
+
+    async def emit(level: str, text: str) -> None:
+        notes.append((level, text))
+
+    async def scenario() -> None:
+        task = asyncio.create_task(puller.pull(("generate",), emit, lambda text: None))
+        for _ in range(100):
+            if (tmp_path / "pids").exists() and (tmp_path / "pids").read_text().count(" "):
+                break
+            await asyncio.sleep(0.05)
+        assert puller.busy
+        await rt.close()
+        assert not puller.busy
+        assert task.cancelled() or task.done()
+
+    asyncio.run(scenario())
+    assert notes[-1] == ("warn", "image pull cancelled")
+    called: list[bool] = []
+    monkeypatch.setattr(puller, "kill_all", lambda: called.append(True))
+    rt.kill_all()
+    assert called == [True]

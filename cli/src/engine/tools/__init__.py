@@ -14,6 +14,7 @@ from .web import WebFetch
 from .web_search import WebSearch
 
 if TYPE_CHECKING:
+    from src.engine.image_pull import ImagePuller
     from src.engine.imagegen import MfluxGenerator
     from src.engine.search_web import Searcher
     from src.engine.skills.loader import Skills
@@ -42,6 +43,7 @@ def default_tools(
     skills: Skills | None = None,
     imager: MfluxGenerator | None = None,
     editor: MfluxGenerator | None = None,
+    pull: ImagePuller | None = None,
 ) -> list[Tool]:
     """The built-in tools; the terminal, web and image tools only when there is a manager, fetcher or generator to use."""
     tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool(), WriteTool(), EditTool(), BashTool(), TodoTool()]
@@ -54,7 +56,7 @@ def default_tools(
     if skills is not None and skills.by_name:
         tools.append(SkillTool(skills))
     if imager is not None:
-        tools.append(GenerateImageTool(imager))
+        tools.append(GenerateImageTool(imager, pull))
     if editor is not None:
-        tools.append(EditImageTool(editor))
+        tools.append(EditImageTool(editor, pull))
     return tools
