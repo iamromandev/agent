@@ -50,6 +50,7 @@ from src.engine.imagegen import (
     ImageRequest,
     MfluxGenerator,
     _tail,
+    edit_upscale_scale,
     model_cached,
     png_size,
     run_helper,
@@ -212,7 +213,8 @@ class EditImageTool(Tool):
         f"into the user's message; clipboard:N refers only to the images pasted into the latest user message); `references` are up to {MAX_REFERENCES} more images the edit may use. "
         "To change only part of the image, give `region` (shapes in source pixel coordinates) or `mask` (a mask image: "
         "white edits, black keeps), optionally with `feather`; the output then keeps the source's exact size and every "
-        "pixel outside the selection is the source's own. "
+        "pixel outside the selection is the source's own. With a region or mask, `upscale` sharpens the edit with the "
+        "local upscaler (SeedVR2) before it is blended in; it needs a source larger than the edit and adds minutes. "
         "It takes minutes, replaces a file at the path (the source included), and every call needs user approval."
     )
     parameters: ClassVar[dict[str, Any]] = {
@@ -263,6 +265,10 @@ class EditImageTool(Tool):
                 "type": "integer",
                 "description": f"Edge softness of the region or mask in pixels, 0-{MAX_FEATHER}. Default {DEFAULT_FEATHER}.",
             },
+            "upscale": {
+                "type": "boolean",
+                "description": "With region or mask only: sharpen the edit with the local upscaler (SeedVR2) before blending it in; adds minutes.",
+            },
         },
         "required": ["prompt", "image", "path"],
     }
@@ -271,9 +277,12 @@ class EditImageTool(Tool):
     uncancellable: ClassVar[bool | None] = False  # Esc kills the process group
     grant_arg: ClassVar[str | None] = "prompt"
 
-    def __init__(self, generator: MfluxGenerator, pull: ImagePuller | None = None) -> None:
+    def __init__(
+        self, generator: MfluxGenerator, pull: ImagePuller | None = None, upscaler: MfluxGenerator | None = None
+    ) -> None:
         self.generator = generator
         self.pull = pull
+        self.upscaler = upscaler
 
     def label(self, args: dict[str, Any]) -> str:
         """The output file, not the prompt."""
@@ -285,6 +294,11 @@ class EditImageTool(Tool):
             return ToolResult(REFUSED, is_error=True, summary="refused")
         if (problem := check_args(self.parameters, args)) is not None:
             return _invalid(problem)
+        upscale = bool(args.get("upscale"))
+        if upscale and self.upscaler is None:
+            return _invalid("upscale model not available")
+        if upscale and "region" not in args and "mask" not in args:
+            return _invalid("upscale needs a region or mask")
         raw: str = args["path"]
         prompt = args["prompt"].strip()
         references = args.get("references", [])
@@ -341,6 +355,13 @@ class EditImageTool(Tool):
             default_width, default_height = default_size(source.width, source.height)
         width = args.get("width", default_width)
         height = args.get("height", default_height)
+        if upscale and composite is not None:
+            if max(composite.size) <= max(width, height):
+                return _invalid(f"upscale is only useful when the source is larger than the edit ({width}\u00d7{height})")
+            factor = edit_upscale_scale((width, height), composite.size)
+            if factor is None:
+                return _invalid(f"upscale is not possible for an edit of {width}\u00d7{height}")
+            composite = dataclasses.replace(composite, upscale=factor, upscaled_size=upscale_size(width, height, factor))
         seed = secrets.randbelow(SEED_LIMIT) if seed is None else seed
         request = ImageRequest(prompt, width, height, steps, seed)
         model = self.generator.model
@@ -357,17 +378,37 @@ class EditImageTool(Tool):
                 if composite is not None
                 else []
             ),
+            *(
+                [f"upscale: {composite.upscale}\u00d7 ({escape_display(self.upscaler.model)})"]
+                if composite is not None and composite.upscale is not None and self.upscaler is not None
+                else []
+            ),
             f"model: {escape_display(model)}",
         ]
         if path.exists():
             lines.append("[overwrites the existing file]")
         if not model_cached(model):
             lines.append(f"[model {escape_display(model)} is not downloaded; this call may download several GB]")
+        if (
+            composite is not None
+            and composite.upscale is not None
+            and self.upscaler is not None
+            and not model_cached(self.upscaler.model)
+        ):
+            lines.append(f"[model {escape_display(self.upscaler.model)} is not downloaded; this call may download several GB]")
         preview = Preview("content", f"edit image {escape_display(raw)}", "\n".join(lines))
 
         async def execute() -> ToolResult:
             return await _run_mflux(
-                self.generator, request, path, raw, ctx, "edited", lambda folder: stage(inputs, folder), composite
+                self.generator,
+                request,
+                path,
+                raw,
+                ctx,
+                "edited",
+                lambda folder: stage(inputs, folder),
+                composite,
+                self.upscaler,
             )
 
         return Prepared(preview, execute)
@@ -381,6 +422,8 @@ class Composite:
     mask: InputImage | None
     feather: int
     size: tuple[int, int]
+    upscale: int | None = None  # edit_image(upscale=true): the SeedVR2 factor applied to the edit before the blend
+    upscaled_size: tuple[int, int] | None = None  # what that step must write
 
 
 def _check_selection(args: dict[str, Any]) -> tuple[list[Shape] | None, str | None, int] | ToolResult:
@@ -607,6 +650,7 @@ async def _run_mflux(
     verb: str,
     stager: Callable[[Path], tuple[Path, ...]] | None = None,
     composite: Composite | None = None,
+    upscaler: MfluxGenerator | None = None,
 ) -> ToolResult:
     """Run mflux in a private folder, check the PNG it wrote and place it at `path`. `stager` (edit_image) copies the
     inputs into that folder first. With a `composite` (a region or mask), a helper process first builds the feathered
@@ -650,6 +694,11 @@ async def _run_mflux(
             return checked
         data, size = checked
         suffix = ""
+        if composite is not None and composite.upscale is not None and composite.upscaled_size is not None and upscaler is not None:
+            upscaled = await _upscale_edit(upscaler, generator, request, composite, data, out_dir, deadline, ctx)
+            if isinstance(upscaled, ToolResult):
+                return upscaled
+            generated = upscaled
         if composite is not None:
             if ctx.progress is not None:
                 from src.engine.events import ToolProgress  # not at module level: events imports the tools package
@@ -663,7 +712,7 @@ async def _run_mflux(
             if isinstance(checked, ToolResult):
                 return checked
             data, size = checked
-            suffix = ", masked"
+            suffix = ", masked" if composite.upscale is None else f", masked, upscaled {composite.upscale}\u00d7"
         try:
             refused = await _finish_placement(asyncio.to_thread(_place, path, data, ctx))
         except OSError as exc:
@@ -674,6 +723,58 @@ async def _run_mflux(
         return ToolResult(f"{verb} {raw} ({described}, seed {request.seed}{suffix})", summary=described)
     finally:
         shutil.rmtree(out_dir, ignore_errors=True)
+
+
+async def _upscale_edit(
+    upscaler: MfluxGenerator,
+    generator: MfluxGenerator,
+    request: ImageRequest,
+    composite: Composite,
+    data: bytes,
+    out_dir: Path,
+    deadline: float | None,
+    ctx: ToolContext,
+) -> Path | ToolResult:
+    """Upscale the checked edit (written as `edit.png` from `data`) on what is left of the one deadline; the path of
+    the checked upscaled PNG, or the error."""
+    assert composite.upscale is not None and composite.upscaled_size is not None
+    edit_file = out_dir / "edit.png"
+
+    def write() -> None:
+        fd = os.open(edit_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+
+    try:
+        await asyncio.to_thread(write)
+    except OSError as exc:
+        return ToolResult(f"Cannot stage the input images: {exc.strerror or exc}", is_error=True, summary="failed")
+    with contextlib.suppress(OSError):
+        (out_dir / "image.png").unlink()  # the edit's output; the upscaler writes its own
+    step = copy.copy(upscaler)
+    if deadline is None:
+        step.timeout = None
+    else:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return ToolResult(_timeout_message("timed out", generator), is_error=True, summary="timed out")
+        step.timeout = max(0.1, left)
+    if ctx.progress is not None:
+        from src.engine.events import ToolProgress  # not at module level: events imports the tools package
+
+        ctx.progress(ToolProgress("upscaling…"))
+    up_request = ImageRequest(
+        "", *composite.upscaled_size, 1, request.seed, inputs=(edit_file,), scale=composite.upscale
+    )
+    try:
+        result = await _generate(step, up_request, out_dir, ctx)
+    except ImageGenError as exc:
+        message = _timeout_message(str(exc), generator)
+        return ToolResult(message, is_error=True, summary="timed out" if message.startswith("timed out") else "failed")
+    checked = await _read_png(result, composite.upscaled_size, "mflux")
+    if isinstance(checked, ToolResult):
+        return checked
+    return result
 
 
 def _place(path: Path, data: bytes, ctx: ToolContext) -> ToolResult | None:

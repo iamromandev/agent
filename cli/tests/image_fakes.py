@@ -38,7 +38,7 @@ def png(w, h):
     def chunk(kind, data):
         body = kind + data
         return struct.pack(">I", len(data)) + body + struct.pack(">I", zlib.crc32(body))
-    color = os.environ.get("FAKE_MFLUX_COLOR")
+    color = os.environ.get("{prefix}_COLOR")
     if color:
         rgb = bytes(int(v) for v in color.split(","))
         row = b"\x00" + rgb * w
@@ -50,8 +50,8 @@ def png(w, h):
             + chunk(b"IDAT", zlib.compress(row * h)) + chunk(b"IEND", b""))
 
 
-mode = os.environ.get("FAKE_MFLUX_MODE", "ok")
-dump = os.environ.get("FAKE_MFLUX_DUMP")
+mode = os.environ.get("{prefix}_MODE", "ok")
+dump = os.environ.get("{prefix}_DUMP")
 inputs = []
 if "--image-paths" in args:
     for value in args[args.index("--image-paths") + 1:]:
@@ -91,7 +91,7 @@ elif mode == "text":
 elif mode == "nothing":
     pass
 elif mode == "fail":
-    for n in range(int(os.environ.get("FAKE_MFLUX_LINES", "3"))):
+    for n in range(int(os.environ.get("{prefix}_LINES", "3"))):
         print("error line %d \x1b[2J" % n, file=sys.stderr)
     sys.exit(1)
 elif mode == "token":
@@ -103,7 +103,7 @@ elif mode == "tqdm":
     sys.exit(1)
 elif mode in ("progress", "download", "badlines", "flood", "progressfail", "hugedigits"):
     total = int(opt("--steps")) if "--steps" in args else 1
-    delay = float(os.environ.get("FAKE_MFLUX_DELAY", "0"))
+    delay = float(os.environ.get("{prefix}_DELAY", "0"))
 
     def say(text):
         sys.stderr.write(text)
@@ -150,17 +150,17 @@ elif mode in ("sleep", "stubborn"):
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
     child = subprocess.Popen(["sleep", "60"])
-    with open(os.environ["FAKE_MFLUX_PIDS"], "w") as handle:
+    with open(os.environ["{prefix}_PIDS"], "w") as handle:
         handle.write("%d %d" % (os.getpid(), child.pid))
     open(out, "wb").write(b"partial")
     time.sleep(60)
 '''
 
 
-def fake_mflux(folder: Path, name: str = "mflux-generate-z-image-turbo") -> Path:
-    """Write the fake command `name` into `folder`; its behavior comes from `FAKE_MFLUX_MODE` (and friends) in the environment."""
+def fake_mflux(folder: Path, name: str = "mflux-generate-z-image-turbo", env_prefix: str = "FAKE_MFLUX") -> Path:
+    """Write the fake command `name` into `folder`; its behavior comes from `FAKE_MFLUX_MODE` (and friends) in the environment; `env_prefix` renames them (`<prefix>_MODE`, `_DUMP`, `_COLOR`, `_PIDS`...)."""
     path = folder / name
-    path.write_text(SCRIPT.format(python=sys.executable))
+    path.write_text(SCRIPT.format(python=sys.executable, prefix=env_prefix))
     path.chmod(0o755)
     return path
 

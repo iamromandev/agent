@@ -102,6 +102,23 @@ def upscale_size(width: int, height: int, scale: int) -> tuple[int, int]:
     return (int(width * factor) // 2) * 2, (int(height * factor) // 2) * 2
 
 
+def edit_upscale_scale(
+    edit: tuple[int, int], source: tuple[int, int], max_side: int = MAX_UPSCALE_SIDE
+) -> int | None:
+    """The upscale factor for an edit of size `edit` meant to cover `source`: the smallest in `UPSCALE_SCALES` whose
+    output reaches the source on both sides within `max_side`, else the largest that fits; None when none fits or the
+    output's shorter side would be under 16."""
+    fitting: list[tuple[int, tuple[int, int]]] = []
+    for scale in UPSCALE_SCALES:
+        size = upscale_size(*edit, scale)
+        if min(size) >= UPSCALE_STEP and max(size) <= max_side:
+            fitting.append((scale, size))
+    for scale, size in fitting:
+        if size[0] >= source[0] and size[1] >= source[1]:
+            return scale
+    return fitting[-1][0] if fitting else None
+
+
 class ImageGenError(Exception):
     """The one-line reason a generation failed, as the model sees it."""
 
