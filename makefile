@@ -12,7 +12,7 @@ UI_PORT := 3000
 .PHONY: check test setup down restart clean help \
 	api-check api-test api-run api-up api-down api-build api-build-prod api-push-prod api-restart api-ps api-logs \
 	api-migrate api-install api-export api-clean-all api-clean-volumes api-clean-host \
-	cli-sync cli-install cli-check cli-test cli-run cli-eval cli-uninstall cli-tool-install cli-tool-uninstall \
+	cli-sync cli-install cli-check cli-test cli-run cli-eval cli-image-eval cli-uninstall cli-tool-install cli-tool-uninstall \
 	ui-install ui-dev ui-down ui-restart ui-build ui-check ui-format
 
 ## both stacks
@@ -99,6 +99,9 @@ cli-run: # Run the CLI, e.g. make cli-run ARGS="health check"
 
 cli-eval: # Run the real-model smoke test (needs Ollama), e.g. make cli-eval EVAL_RUNS=1
 	$(MAKE) -C $(CLI) eval
+
+cli-image-eval: # Run the real image-model smoke test (Apple Silicon + image extra; IMAGE_EVAL_CASES, IMAGE_EVAL_DOWNLOAD, IMAGE_EVAL_KEEP)
+	$(MAKE) -C $(CLI) image-eval
 
 cli-tool-install: cli-install # Same as cli-install (older name)
 
