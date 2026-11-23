@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 from .base import Tool
 from .fs import EditTool, ReadTool, WriteTool
 from .image import EditImageTool, GenerateImageTool, UpscaleImageTool
-from .media import SpeakTool
+from .media import AssembleVideoTool, SpeakTool
 from .search import GlobTool, GrepTool
 from .shell import BashTool
 from .skill import SkillTool
@@ -47,9 +47,10 @@ def default_tools(
     upscaler: MfluxGenerator | None = None,
     pull: ImagePuller | None = None,
     speaker: SpeakTool | None = None,
+    video: AssembleVideoTool | None = None,
 ) -> list[Tool]:
-    """The built-in tools; the terminal, web, image and speech tools only when there is a manager, fetcher, generator or
-    speaker to use."""
+    """The built-in tools; the terminal, web, image, speech and video tools only when there is a manager, fetcher,
+    generator, speaker or video tool to use."""
     tools: list[Tool] = [ReadTool(), GlobTool(), GrepTool(), WriteTool(), EditTool(), BashTool(), TodoTool()]
     if terminals is not None:
         tools += [TermStart(terminals), TermRead(terminals), TermStop(terminals)]
@@ -67,4 +68,6 @@ def default_tools(
         tools.append(UpscaleImageTool(upscaler, pull))
     if speaker is not None:
         tools.append(speaker)
+    if video is not None:
+        tools.append(video)
     return tools

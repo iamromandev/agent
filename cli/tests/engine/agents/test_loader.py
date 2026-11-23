@@ -245,6 +245,15 @@ def test_upscale_image_is_not_allowed_in_an_agent_file(dirs, tmp_path: Path) -> 
     assert len(agents.warnings) == 1 and "tool 'upscale_image' is not allowed in an agent; ignored" in agents.warnings[0]
 
 
+def test_assemble_video_is_not_allowed_in_an_agent_file(dirs, tmp_path: Path) -> None:
+    glob, _, env = dirs
+    (glob / "a.md").write_text("---\ndescription: d\ntools: read, assemble_video\n---\nb")
+    agents = load_agents(tmp_path / "ws", env)
+    agent = agents.get("a")
+    assert agent is not None and agent.tools == ("read",)
+    assert len(agents.warnings) == 1 and "tool 'assemble_video' is not allowed in an agent; ignored" in agents.warnings[0]
+
+
 def test_speak_is_not_allowed_in_an_agent_file(dirs, tmp_path: Path) -> None:
     glob, _, env = dirs
     (glob / "a.md").write_text("---\ndescription: d\ntools: read, speak\n---\nb")

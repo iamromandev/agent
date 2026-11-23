@@ -232,3 +232,41 @@ def test_speak_is_absent_without_the_engine_without_images_and_for_the_task_chil
     agent = _build(ws, images=True).agent_factory(_NoApprover())
     task = next(t for t in agent.tools if t.name == "task")
     assert not any(t.name == "speak" for t in task._tools)  # ty: ignore[unresolved-attribute]
+
+
+def _video_tools(rt: Runtime) -> list:
+    from src.engine.tools.media import AssembleVideoTool
+
+    agent = rt.agent_factory(_NoApprover())
+    return [t for t in agent.tools if isinstance(t, AssembleVideoTool)]
+
+
+def test_the_main_agent_gets_assemble_video_with_the_settings_when_ffmpeg_and_the_helper_are_found(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = tmp_path / "media_helper.py"
+    helper.write_text("")
+    monkeypatch.setenv("AGENT_VIDEO_TIMEOUT", "321")
+    get_settings.cache_clear()
+    monkeypatch.setattr("src.engine.media.find_ffmpeg", lambda: tmp_path / "ffmpeg")
+    monkeypatch.setattr("src.engine.media.MEDIA_HELPER", helper)
+    (tool,) = _video_tools(_build(ws, images=True))
+    assert (tool.ffmpeg, tool.timeout) == (tmp_path / "ffmpeg", 321.0)
+
+
+def test_assemble_video_is_absent_without_ffmpeg_without_the_helper_without_images_and_for_the_task_child(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    helper = tmp_path / "media_helper.py"
+    helper.write_text("")
+    monkeypatch.setattr("src.engine.media.find_ffmpeg", lambda: None)
+    monkeypatch.setattr("src.engine.media.MEDIA_HELPER", helper)
+    assert _video_tools(_build(ws, images=True)) == []
+    monkeypatch.setattr("src.engine.media.find_ffmpeg", lambda: tmp_path / "ffmpeg")
+    monkeypatch.setattr("src.engine.media.MEDIA_HELPER", tmp_path / "gone.py")
+    assert _video_tools(_build(ws, images=True)) == []
+    monkeypatch.setattr("src.engine.media.MEDIA_HELPER", helper)
+    assert _video_tools(_build(ws)) == []
+    agent = _build(ws, images=True).agent_factory(_NoApprover())
+    task = next(t for t in agent.tools if t.name == "task")
+    assert not any(t.name == "assemble_video" for t in task._tools)  # ty: ignore[unresolved-attribute]

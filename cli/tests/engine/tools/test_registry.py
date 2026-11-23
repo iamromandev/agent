@@ -86,3 +86,14 @@ def test_speak_is_offered_only_with_a_speaker(tmp_path) -> None:
     assert "speak" not in plain
     assert [t.name for t in default_tools(speaker=speaker)] == [*plain, "speak"]
     assert "speak" not in [t.name for t in read_only_tools()]
+
+
+def test_assemble_video_is_offered_only_with_a_video_tool(tmp_path) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.tools.media import AssembleVideoTool
+
+    video = AssembleVideoTool(tmp_path / "ffmpeg", 5, Guardrails.off(tmp_path))
+    plain = [t.name for t in default_tools()]
+    assert "assemble_video" not in plain
+    assert [t.name for t in default_tools(video=video)] == [*plain, "assemble_video"]
+    assert "assemble_video" not in [t.name for t in read_only_tools()]
