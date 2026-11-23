@@ -53,20 +53,27 @@ NEW = StartChoice("new")
 
 
 def _image_generators(
-    commands: tuple[Path | None, Path | None], settings: Settings, guard: Guardrails
-) -> tuple[MfluxGenerator | None, MfluxGenerator | None]:
-    """The mflux generators (generate_image, edit_image) for the main agent; each is None when mflux was not asked for
-    or its own command was not found."""
-    from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator
+    commands: tuple[Path | None, Path | None, Path | None], settings: Settings, guard: Guardrails
+) -> tuple[MfluxGenerator | None, MfluxGenerator | None, MfluxGenerator | None]:
+    """The mflux generators (generate_image, edit_image, upscale_image) for the main agent; each is None when mflux
+    was not asked for or its own command was not found."""
+    from src.engine.imagegen import EDIT_EXTRA, UPSCALE_EXTRA, MfluxGenerator
 
-    generate, edit = commands
+    generate, edit, upscale = commands
     imager = None if generate is None else MfluxGenerator(generate, settings.image_model, settings.image_timeout, guard)
     editor = (
         None
         if edit is None
         else MfluxGenerator(edit, settings.image_edit_model, settings.image_timeout, guard, extra=EDIT_EXTRA)
     )
-    return imager, editor
+    upscaler = (
+        None
+        if upscale is None
+        else MfluxGenerator(
+            upscale, settings.image_upscale_model, settings.image_timeout, guard, extra=UPSCALE_EXTRA, kind="upscale"
+        )
+    )
+    return imager, editor, upscaler
 
 
 @dataclass
@@ -191,7 +198,7 @@ def build_runtime(
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import prepare as prepare_hooks
     from src.engine.image_pull import HF_COMMAND, ImagePuller
-    from src.engine.imagegen import EDIT_COMMAND, find_mflux
+    from src.engine.imagegen import EDIT_COMMAND, UPSCALE_COMMAND, find_mflux
     from src.engine.mcp.config import global_config_path
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
@@ -221,9 +228,13 @@ def build_runtime(
         # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
         skills = load_skills(root, builtin=builtin_skills_dir())  # read once, like the commands
         # None: no tool, no warning (not macOS arm64, or no extra); each command is found on its own
-        image_commands = (find_mflux(), find_mflux(command=EDIT_COMMAND)) if images else (None, None)
+        image_commands = (
+            (find_mflux(), find_mflux(command=EDIT_COMMAND), find_mflux(command=UPSCALE_COMMAND))
+            if images
+            else (None, None, None)
+        )
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
-        probe_imager, probe_editor = _image_generators(image_commands, settings, Guardrails.off(root))
+        probe_imager, probe_editor, probe_upscaler = _image_generators(image_commands, settings, Guardrails.off(root))
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
@@ -237,6 +248,7 @@ def build_runtime(
                     skills=skills,
                     imager=probe_imager,
                     editor=probe_editor,
+                    upscaler=probe_upscaler,
                 )
             ),
         )
@@ -312,17 +324,28 @@ def build_runtime(
 
         puller: ImagePuller | None = None
         if images:
-            pull_gen, pull_edit = _image_generators(image_commands, settings, guard)
-            puller = ImagePuller({"generate": pull_gen, "edit": pull_edit}, find_mflux(command=HF_COMMAND), guard)
+            pull_gen, pull_edit, pull_upscale = _image_generators(image_commands, settings, guard)
+            puller = ImagePuller(
+                {"generate": pull_gen, "edit": pull_edit, "upscale": pull_upscale}, find_mflux(command=HF_COMMAND), guard
+            )
 
         def recorder_factory() -> Recorder:
             return FileRecorder(workspace_dir(sessions, root), root)  # lazy: no file until the first message
 
         def agent_factory(approver: Approver) -> Agent:
-            imager, editor = _image_generators(image_commands, settings, guard)
+            imager, editor, upscaler = _image_generators(image_commands, settings, guard)
             return Agent(
                 run_provider,
-                default_tools(manager, fetcher=web, searcher=search, skills=skills, imager=imager, editor=editor, pull=puller),
+                default_tools(
+                    manager,
+                    fetcher=web,
+                    searcher=search,
+                    skills=skills,
+                    imager=imager,
+                    editor=editor,
+                    upscaler=upscaler,
+                    pull=puller,
+                ),
                 approver,
                 ctx,
                 settings.max_steps,

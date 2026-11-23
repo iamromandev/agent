@@ -23,12 +23,16 @@ from typing import TYPE_CHECKING, Literal
 
 from src.engine.env import child_environment
 from src.engine.imagegen import (
+    KNOWN_MODELS,
     ImageGenError,
     ImageRequest,
     MfluxGenerator,
     hub_cache,
+    is_alias,
     png_size,
+    resolve_model,
     run_with_ticker,
+    snapshot_files,
 )
 from src.engine.process import kill_group
 from src.engine.text import escape, escape_display
@@ -36,12 +40,13 @@ from src.engine.text import escape, escape_display
 if TYPE_CHECKING:
     from src.engine.guardrails.setup import Guardrails
 
-Role = Literal["generate", "edit"]
-ROLES: tuple[Role, ...] = ("generate", "edit")
+Role = Literal["generate", "edit", "upscale"]
+ROLES: tuple[Role, ...] = ("generate", "edit", "upscale")
 MARGIN = 2_000_000_000
 SIZE_TIMEOUT = 60.0
 WARMUP_SIDE, WARMUP_STEPS, WARMUP_SEED = 256, 1, 0
 WARMUP_PROMPT = "a plain grey square"
+UPSCALE_WARMUP_SIDE = 64  # the source of the upscale warm-up; at 2x the output is 128x128
 HF_COMMAND = "hf"
 NOT_INSTALLED = "image tools are not installed (uv sync --directory cli --extra image on Apple Silicon)"
 REFUSED = "a model warm-up is running (/images cancel stops it)"
@@ -74,15 +79,25 @@ def format_elapsed(seconds: float) -> str:
 
 
 def repo_folder(model: str, env: Mapping[str, str] = os.environ) -> Path:
-    return hub_cache(env) / f"models--{model.replace('/', '--')}"
+    repo = resolve_model(model)[0]  # an alias lives in its repo
+    return hub_cache(env) / f"models--{repo.replace('/', '--')}"
 
 
 def model_status(role: Role, model: str | None, env: Mapping[str, str] = os.environ) -> ModelStatus:
     """What is on disk for `model`: stat calls only, so a 15 GB cache answers at once."""
     if model is None:
         return ModelStatus(role, "", "unavailable", None)
-    if Path(model).is_dir():  # like mflux: a directory relative to the cwd wins over a repo id such as `org/name`
+    if not is_alias(model) and Path(model).is_dir():  # like mflux: a directory relative to the cwd wins over a repo id such as `org/name`
         return ModelStatus(role, model, "local folder", None)
+    repo, files = resolve_model(model)
+    if files is not None:  # a known alias: only the files mflux fetches count (the repo holds much more)
+        found, unfinished = snapshot_files(repo, files, env, KNOWN_MODELS[model.lower()].revision)
+        size = sum(found.values())
+        if len(found) == len(files) and not unfinished:
+            return ModelStatus(role, model, "cached", size)
+        if found or unfinished:
+            return ModelStatus(role, model, "partial", size)
+        return ModelStatus(role, model, "missing", None)
     folder = repo_folder(model, env)
     complete = False
     snapshot_seen = False
@@ -124,9 +139,10 @@ def format_status(rows: list[ModelStatus], pulling: str | None) -> str:
     return "\n".join(lines)
 
 
-def parse_dry_run(stdout: str) -> int:
+def parse_dry_run(stdout: str, files: tuple[str, ...] | None = None) -> int:
     """Bytes the download would fetch: the rows of `hf download --dry-run` inside a subfolder (the diffusers layout
-    mflux reads), without the cached ones (`-`). Root files such as example images are not read by mflux."""
+    mflux reads), without the cached ones (`-`). Root files such as example images are not read by mflux. With `files`
+    (a known model) the rows are exactly those paths instead, whatever the folder."""
     lines = stdout.splitlines()
     try:
         start = lines.index("file\tsize")
@@ -135,7 +151,9 @@ def parse_dry_run(stdout: str) -> int:
     total = 0.0
     for line in lines[start + 1 :]:
         name, tab, size = line.partition("\t")
-        if not tab or not size or not name or "/" not in name or size == "-":
+        if not tab or not size or not name or size == "-":
+            continue
+        if (name not in files) if files is not None else ("/" not in name):
             continue
         number, unit = size[:-1], size[-1]
         if unit.isdigit():
@@ -172,10 +190,12 @@ def grey_png(width: int, height: int) -> bytes:
 async def download_size(
     hf: Path, model: str, guard: Guardrails, on_start: Callable[[int], None] | None = None
 ) -> int:
-    """Bytes `hf download <model> --dry-run` says are still missing (see `parse_dry_run`)."""
+    """Bytes `hf download <repo> --dry-run` says are still missing (see `parse_dry_run`); a known alias is asked as
+    its repo id and counted by its files."""
+    repo, files = resolve_model(model)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *guard.sandbox.wrap([str(hf), "download", model, "--dry-run"]),
+            *guard.sandbox.wrap([str(hf), "download", repo, "--dry-run"]),
             stdin=DEVNULL,
             stdout=PIPE,
             stderr=DEVNULL,
@@ -205,7 +225,7 @@ async def download_size(
         raise
     if proc.returncode != 0:
         raise PullSizeError(f"hf exited {proc.returncode}")
-    return parse_dry_run(bytes(kept).decode("utf-8", errors="replace"))
+    return parse_dry_run(bytes(kept).decode("utf-8", errors="replace"), files)
 
 
 Level = Literal["info", "warn"]
@@ -324,14 +344,22 @@ class ImagePuller:
 
         try:
             inputs: tuple[Path, ...] = ()
-            if role == "edit":
+            if role in ("edit", "upscale"):
+                side = UPSCALE_WARMUP_SIDE if role == "upscale" else WARMUP_SIDE
                 source = out_dir / "in-0.png"
                 fd = os.open(source, os.O_CREAT | os.O_EXCL | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
                 with os.fdopen(fd, "wb") as handle:
-                    handle.write(grey_png(WARMUP_SIDE, WARMUP_SIDE))
+                    handle.write(grey_png(side, side))
                 inputs = (source,)
-            request = ImageRequest(WARMUP_PROMPT, WARMUP_SIDE, WARMUP_SIDE, WARMUP_STEPS, WARMUP_SEED, inputs)
-            warm = MfluxGenerator(generator.command, generator.model, None, generator.guard, extra=generator.extra)
+            if role == "upscale":
+                request = ImageRequest(
+                    "", 2 * UPSCALE_WARMUP_SIDE, 2 * UPSCALE_WARMUP_SIDE, WARMUP_STEPS, WARMUP_SEED, inputs, scale=2
+                )
+            else:
+                request = ImageRequest(WARMUP_PROMPT, WARMUP_SIDE, WARMUP_SIDE, WARMUP_STEPS, WARMUP_SEED, inputs)
+            warm = MfluxGenerator(
+                generator.command, generator.model, None, generator.guard, extra=generator.extra, kind=generator.kind
+            )
             output = await run_with_ticker(warm, request, out_dir, sink, on_start=self._started_pid)
             if png_size(output.read_bytes()) is None:
                 raise ImageGenError("mflux wrote no image")

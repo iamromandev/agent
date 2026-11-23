@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 from src.config.settings import get_settings
-from src.engine.imagegen import COMMAND, EDIT_COMMAND, MfluxGenerator
-from src.engine.tools.image import EditImageTool, GenerateImageTool
+from src.engine.imagegen import COMMAND, EDIT_COMMAND, UPSCALE_COMMAND, MfluxGenerator
+from src.engine.tools.image import EditImageTool, GenerateImageTool, UpscaleImageTool
 from src.runtime import Runtime, build_runtime
 
 from tests.fakes import FakeCatalog, ScriptedProvider
@@ -21,6 +21,7 @@ def _env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "cfg"))
     monkeypatch.setenv("AGENT_IMAGE_MODEL", "a/b")
     monkeypatch.setenv("AGENT_IMAGE_EDIT_MODEL", "e/m")
+    monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "u/m")
     monkeypatch.setenv("AGENT_IMAGE_TIMEOUT", "42")
     get_settings.cache_clear()
     yield
@@ -55,9 +56,14 @@ def _edit_tools(rt: Runtime) -> list[EditImageTool]:
     return [t for t in agent.tools if isinstance(t, EditImageTool)]
 
 
-def _finder(generate: Path | None, edit: Path | str | None = "same"):
+def _upscale_tools(rt: Runtime) -> list[UpscaleImageTool]:
+    agent = rt.agent_factory(_NoApprover())
+    return [t for t in agent.tools if isinstance(t, UpscaleImageTool)]
+
+
+def _finder(generate: Path | None, edit: Path | str | None = "same", upscale: Path | None = None):
     """A `find_mflux` stand-in: one answer per command name."""
-    answers = {COMMAND: generate, EDIT_COMMAND: generate if edit == "same" else edit}
+    answers = {COMMAND: generate, EDIT_COMMAND: generate if edit == "same" else edit, UPSCALE_COMMAND: upscale}
     return lambda command=COMMAND: answers.get(command)
 
 
@@ -168,3 +174,31 @@ def test_close_cancels_a_running_pull_and_kill_all_reaches_the_puller(
     monkeypatch.setattr(puller, "kill_all", lambda: called.append(True))
     rt.kill_all()
     assert called == [True]
+
+
+def test_the_main_agent_gets_upscale_image_with_its_own_model_and_arguments(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    command = fake_mflux(tmp_path, UPSCALE_COMMAND)
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(None, None, command))
+    rt = _build(ws, images=True)
+    assert _image_tools(rt) == [] and _edit_tools(rt) == []
+    (tool,) = _upscale_tools(rt)
+    generator: MfluxGenerator = tool.generator
+    assert (generator.command, generator.model, generator.timeout) == (command, "u/m", 42.0)
+    assert generator.extra == ("--low-ram", "--quantize", "8") and generator.kind == "upscale"
+    assert tool.pull is rt.images and rt.images is not None
+    assert [row.state for row in rt.images.status()][2] != "unavailable"
+
+
+def test_upscale_image_is_absent_without_its_command_without_images_and_for_the_task_child(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    command = fake_mflux(tmp_path)
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(command))
+    rt = _build(ws, images=True)
+    assert _upscale_tools(rt) == []
+    assert rt.images is not None and rt.images.status()[2].state == "unavailable"
+    monkeypatch.setattr("src.engine.imagegen.find_mflux", _finder(command, command, command))
+    assert _upscale_tools(_build(ws)) == []
+    agent = _build(ws, images=True).agent_factory(_NoApprover())
+    task = next(t for t in agent.tools if t.name == "task")
+    assert not any(isinstance(t, UpscaleImageTool) for t in task._tools)  # ty: ignore[unresolved-attribute]

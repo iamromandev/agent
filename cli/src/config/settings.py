@@ -65,6 +65,14 @@ class Settings(BaseSettings):
             description="mflux model (Hugging Face repo or folder) for edit_image",
         ),
     ]
+    image_upscale_model: Annotated[
+        str,
+        Field(
+            default="seedvr2-3b",
+            min_length=1,
+            description="mflux model (alias, Hugging Face repo or folder) for upscale_image",
+        ),
+    ]
     image_timeout: Annotated[
         float, Field(default=900.0, gt=0, description="Seconds before a generate_image or edit_image call is killed")
     ]
