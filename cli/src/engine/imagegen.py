@@ -450,6 +450,7 @@ async def run_helper(
     guard: Guardrails,
     timeout: float | None,
     on_start: Callable[[int], None] | None = None,
+    who: str = "the compositing helper",
 ) -> tuple[int, bytes]:
     """Run a helper process like mflux: sandbox wrap, filtered environment, its own process group, no stdin or
     stdout. Returns (exit code, the end of stderr); kills the group on timeout (`ImageGenError`) and on cancel."""
@@ -464,7 +465,7 @@ async def run_helper(
             env=guard.env.filter(child_environment()),
         )
     except OSError as exc:
-        raise ImageGenError(f"Could not start the compositing helper: {escape(str(exc))}") from exc
+        raise ImageGenError(f"Could not start {who}: {escape(str(exc))}") from exc
     if on_start is not None:
         with contextlib.suppress(Exception):
             on_start(proc.pid)

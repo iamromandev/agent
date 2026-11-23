@@ -75,3 +75,14 @@ def test_edit_image_gets_the_upscaler_when_there_is_one(tmp_path) -> None:
     without = next(t for t in default_tools(editor=editor) if isinstance(t, EditImageTool))
     assert with_up.upscaler is upscaler
     assert without.upscaler is None
+
+
+def test_speak_is_offered_only_with_a_speaker(tmp_path) -> None:
+    from src.engine.guardrails.setup import Guardrails
+    from src.engine.tools.media import SpeakTool
+
+    speaker = SpeakTool("x/y", 5, Guardrails.off(tmp_path))
+    plain = [t.name for t in default_tools()]
+    assert "speak" not in plain
+    assert [t.name for t in default_tools(speaker=speaker)] == [*plain, "speak"]
+    assert "speak" not in [t.name for t in read_only_tools()]

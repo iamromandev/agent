@@ -85,7 +85,7 @@ api-clean-host: # Prune all unused Docker data on the host
 cli-sync: # Install the CLI dependencies into cli/.venv
 	$(MAKE) -C $(CLI) sync
 
-cli-install: # Install the agent command on your PATH (with image generation on Apple Silicon)
+cli-install: # Install the agent command on your PATH (with the image and media extras on Apple Silicon)
 	$(MAKE) -C $(CLI) install
 
 cli-check: # Lint + typecheck the CLI

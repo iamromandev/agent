@@ -76,6 +76,20 @@ class Settings(BaseSettings):
     image_timeout: Annotated[
         float, Field(default=900.0, gt=0, description="Seconds before a generate_image or edit_image call is killed")
     ]
+    speech_model: Annotated[
+        str,
+        Field(
+            default="mlx-community/Kokoro-82M-bf16",
+            min_length=1,
+            description="mlx-audio model (Hugging Face repo or folder) for speak",
+        ),
+    ]
+    speech_timeout: Annotated[
+        float, Field(default=300.0, gt=0, description="Seconds before a speak call is killed")
+    ]
+    video_timeout: Annotated[
+        float, Field(default=900.0, gt=0, description="Seconds before an assemble_video call is killed")
+    ]
     mcp_timeout: Annotated[
         float, Field(default=60.0, gt=0, description="Seconds before an MCP tool call gives up")
     ]

@@ -20,6 +20,18 @@ image = [
     "pillow==13.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
     "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
+# Reel media tools (`speak`, later `assemble_video`): Apple Silicon Macs only. `uv sync --extra media`. Pulls torch and
+# spacy through misaki (about 1.2 GB). The spacy model is pinned by URL because misaki would pip-install it on first
+# use, which the sandbox blocks. That wheel is fetched from the GitHub release with no hash pin in the repo (`uv.lock`
+# is gitignored); it only affects this opt-in extra.
+media = [
+    "mlx-audio==0.6.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "misaki[en]==0.9.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "imageio-ffmpeg==0.8.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pillow==13.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [tool.uv]
 # The CLI is Unix-only (ptys). Without this, uv's universal lock fails on the `image` extra: mflux's other-platform
@@ -40,6 +52,10 @@ dev = [
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+# the media extra pins the spacy model by URL
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]
