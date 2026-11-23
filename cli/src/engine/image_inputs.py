@@ -16,7 +16,7 @@ from src.engine.guardrails.paths import fd_path
 from src.engine.guardrails.setup import guard_of
 from src.engine.imagegen import MAX_SIDE, MIN_SIDE, SIDE_STEP
 from src.engine.provider.base import ImageFormat
-from src.engine.provider.images import ImageError, read_image_fd
+from src.engine.provider.images import MAX_IMAGE_BYTES, ImageError, read_image_fd
 from src.engine.text import escape_display
 from src.engine.tools.base import ToolContext, ToolResult
 from src.engine.tools.paths import InvalidPath, inside_workspace, invalid_path_result, resolve_path
@@ -215,9 +215,10 @@ def _paste(ref: str, ctx: ToolContext) -> InputImage | ToolResult:
     return InputImage(f"{PASTE_PREFIX}{index}", image.format, image.data, size[0], size[1], ("clipboard", index))
 
 
-def resolve_input(ref: str, ctx: ToolContext) -> InputImage | ToolResult:
+def resolve_input(ref: str, ctx: ToolContext, max_bytes: int = MAX_IMAGE_BYTES) -> InputImage | ToolResult:
     """Check one input reference (a workspace path or `clipboard:N`) and read its bytes once. An error is a
-    `ToolResult`; a protected file is refused without a dialog, because its bytes go to another process."""
+    `ToolResult`; a protected file is refused without a dialog, because its bytes go to another process. A file
+    over `max_bytes` (5 MB unless the caller allows more) is refused."""
     if ref.startswith(PASTE_PREFIX):
         return _paste(ref, ctx)
     shown = escape_display(ref)
@@ -250,7 +251,7 @@ def resolve_input(ref: str, ctx: ToolContext) -> InputImage | ToolResult:
         if guard.paths.is_protected_fd(fd):
             return refuse_protected()
         try:
-            image = read_image_fd(fd, ref)
+            image = read_image_fd(fd, ref, max_bytes)
         except ImageError as exc:
             return _error(f"{shown}: {exc.reason}", "image too large")
         if image is None:

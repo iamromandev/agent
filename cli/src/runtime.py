@@ -39,7 +39,7 @@ if TYPE_CHECKING:
     from src.engine.session import Recorder, SessionStore
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
-    from src.engine.tools.media import SpeakTool
+    from src.engine.tools.media import AssembleVideoTool, SpeakTool
 
 
 @dataclass(frozen=True)
@@ -58,6 +58,17 @@ def _speaker(found: Path | None, settings: Settings, guard: Guardrails) -> Speak
     from src.engine.tools.media import SpeakTool
 
     return None if found is None else SpeakTool(settings.speech_model, settings.speech_timeout, guard)
+
+
+def _video(found: Path | None, settings: Settings, guard: Guardrails) -> AssembleVideoTool | None:
+    """The assemble_video tool for the main agent; None when ffmpeg or the media helper is not there."""
+    from src.engine import media
+    from src.engine.tools.media import AssembleVideoTool
+
+    helper = media.MEDIA_HELPER
+    if found is None or helper is None or not helper.is_file():
+        return None
+    return AssembleVideoTool(found, settings.video_timeout, guard)
 
 
 def _image_generators(
@@ -211,7 +222,7 @@ def build_runtime(
     from src.engine.mcp.hub import McpHub
     from src.engine.mcp.setup import prepare
     from src.engine.mcp.trust import TrustStore, trust_store_path
-    from src.engine.media import find_speech
+    from src.engine.media import find_ffmpeg, find_speech
     from src.engine.permissions import setup as permission_setup
     from src.engine.permissions.config import global_settings_path, project_settings_path
     from src.engine.provider.models import SHOW_TIMEOUT, SLOW_AFTER, CatalogError, launch_model, shown_name
@@ -243,6 +254,7 @@ def build_runtime(
             else (None, None, None)
         )
         speech_found = find_speech() if images else None  # same for the speak tool (the `media` extra)
+        ffmpeg_found = find_ffmpeg() if images else None  # and for assemble_video (the same extra)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
         probe_imager, probe_editor, probe_upscaler = _image_generators(image_commands, settings, Guardrails.off(root))
         permissions = permission_setup.prepare(
@@ -260,6 +272,7 @@ def build_runtime(
                     editor=probe_editor,
                     upscaler=probe_upscaler,
                     speaker=_speaker(speech_found, settings, Guardrails.off(root)),
+                    video=_video(ffmpeg_found, settings, Guardrails.off(root)),
                 )
             ),
         )
@@ -357,6 +370,7 @@ def build_runtime(
                     upscaler=upscaler,
                     pull=puller,
                     speaker=_speaker(speech_found, settings, guard),
+                    video=_video(ffmpeg_found, settings, guard),
                 ),
                 approver,
                 ctx,

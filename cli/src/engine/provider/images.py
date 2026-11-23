@@ -48,17 +48,18 @@ def describe(image: Image) -> str:
     return f"{image.format.upper()}, {size_text(len(image.data))}"
 
 
-def read_image_fd(fd: int, name: str) -> Image | None:
+def read_image_fd(fd: int, name: str, max_bytes: int = MAX_IMAGE_BYTES) -> Image | None:
     """The image in the open file `fd`, or None when its first bytes are no image (the caller goes on with text;
-    the offset of `fd` is not moved). Raises `ImageError` for one over `MAX_IMAGE_BYTES`. The bytes are read once,
-    by size. The caller opened `fd` and decided what it may be (links, protected paths)."""
+    the offset of `fd` is not moved). Raises `ImageError` for one over `max_bytes` (5 MB unless the caller allows
+    more). The bytes are read once, by size. The caller opened `fd` and decided what it may be (links, protected
+    paths)."""
     head = os.pread(fd, SNIFF, 0)
     fmt = sniff(head)
     if fmt is None:
         return None
     size = os.fstat(fd).st_size
-    if size > MAX_IMAGE_BYTES:
-        raise ImageError(f"image too large ({size_text(size)}; limit 5 MB)")
+    if size > max_bytes:
+        raise ImageError(f"image too large ({size_text(size)}; limit {max_bytes // (1024 * 1024)} MB)")
     chunks = [head[:size]]
     have = len(chunks[0])
     while have < size:
