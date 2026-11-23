@@ -14,7 +14,12 @@ dependencies = [
 
 [project.optional-dependencies]
 # Image generation (the `generate_image` tool): Apple Silicon Macs only. `uv sync --extra image`.
-image = ["mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+image = [
+    "mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # the masked edit_image compositing helper (a separate process, never imported by the agent)
+    "pillow==13.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 
 [tool.uv]
 # The CLI is Unix-only (ptys). Without this, uv's universal lock fails on the `image` extra: mflux's other-platform

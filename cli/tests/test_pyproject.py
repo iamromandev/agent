@@ -14,7 +14,9 @@ def _data() -> dict:
 
 def test_the_image_extra_pins_mflux_for_apple_silicon_only() -> None:
     extra = _data()["project"]["optional-dependencies"]["image"]
-    assert extra == ["mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'"]
+    marker = "; sys_platform == 'darwin' and platform_machine == 'arm64'"
+    # mflux, plus Pillow and numpy for the masked edit's compositing helper (a separate process)
+    assert extra == [f"mflux==0.24.0{marker}", f"pillow==13.0.0{marker}", f"numpy==2.5.5{marker}"]
 
 
 def test_mflux_is_not_a_default_dependency() -> None:
