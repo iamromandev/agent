@@ -113,6 +113,7 @@ class TaskTool(Tool):
             role="task",
             vision=parent.vision,  # one answer per model, shared: a pinned child's model is asked about by name
             rules=parent.rules,  # one set of rules for both: a deny on `read` stops the subagent too
+            watch=parent.watch,  # its bash and MCP calls are check points like the parent's
             # A custom child's tool calls run the parent's PreToolUse/PostToolUse hooks (its run_turn never runs the
             # others); the built-in child stays unhooked. The parent's `task` call is hooked either way.
             hooks=Hooks.empty() if defn is None else parent.hooks,

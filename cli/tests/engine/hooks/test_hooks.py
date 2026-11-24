@@ -23,6 +23,19 @@ def make(runner: FakeRunner, *entries: HookEntry, active: bool = True) -> Hooks:
     return Hooks(entries, [], runner, lambda: active, WORKSPACE)
 
 
+async def test_global_hooks_stop_running_when_the_global_gate_closes() -> None:
+    runner = FakeRunner([ok_run(), ok_run()])
+    gate = {"on": True}
+    hooks = Hooks((entry("g", source="global"), entry("p", source="project")), [], runner, lambda: True, WORKSPACE, global_active=lambda: gate["on"])
+
+    await hooks.run("PreToolUse", {}, tool="edit")
+    gate["on"] = False
+    assert hooks.has("PreToolUse", "edit")  # the project entry is still active
+    await hooks.run("PreToolUse", {}, tool="edit")
+
+    assert [c[0] for c in runner.calls] == ["g", "p", "p"]
+
+
 async def test_other_exit_codes_warn_and_do_not_block() -> None:
     decision = await make(FakeRunner([exit_run(1, "lint failed")]), entry()).run("PreToolUse", {}, tool="edit")
 

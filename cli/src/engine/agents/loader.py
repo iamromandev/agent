@@ -44,6 +44,7 @@ class Agents:
     by_name: Mapping[str, AgentDef]
     warnings: tuple[str, ...]  # already escaped and capped
     loader_warnings: tuple[str, ...] = ()  # the loader's own, escaped and not capped: `with_models` caps once
+    held: tuple[str, ...] = ()  # global agents not loaded: the config watch holds the global config until trusted
 
     def __post_init__(self) -> None:
         if not self.loader_warnings and self.warnings:  # built directly: what was given is all there is
@@ -99,7 +100,7 @@ class Agents:
                 extra.append(
                     escape(f"{agent.path}: model '{escape_display(agent.model)}' is not installed; using the session's model")
                 )
-        return Agents(found, _cap([*self.loader_warnings, *extra], escaped=True), self.loader_warnings)
+        return Agents(found, _cap([*self.loader_warnings, *extra], escaped=True), self.loader_warnings, self.held)
 
 
 def _cap(warnings: list[str], escaped: bool = False) -> tuple[str, ...]:
@@ -189,14 +190,16 @@ def _load_dir(directory: Path, source: Source, found: dict[str, AgentDef], warni
                 warnings.append(f"{path}: {reason}")
 
 
-def load_agents(workspace: Path, env: Mapping[str, str] = os.environ) -> Agents:
-    """Read both folders once. A project agent replaces a global one; problems become warnings."""
+def load_agents(workspace: Path, env: Mapping[str, str] = os.environ, *, hold_global: bool = False) -> Agents:
+    """Read both folders once. A project agent replaces a global one; problems become warnings. `hold_global` (the
+    config watch's marker): the global ones are read only to name them in `held`, and not loaded."""
     found: dict[str, AgentDef] = {}
     warnings: list[str] = []
-    _load_dir(global_agents_dir(env), "global", found, warnings)
+    held: dict[str, AgentDef] = {}
+    _load_dir(global_agents_dir(env), "global", held if hold_global else found, [] if hold_global else warnings)
     project = project_agents_dir(workspace)
     if project.parent.is_symlink() or project.is_symlink():
         warnings.append(f"{project}: a symlink is not followed in the project folder")
     else:
         _load_dir(project, "project", found, warnings)
-    return Agents(found, _cap(warnings), tuple(escape(w) for w in warnings))
+    return Agents(found, _cap(warnings), tuple(escape(w) for w in warnings), tuple(sorted(held)))

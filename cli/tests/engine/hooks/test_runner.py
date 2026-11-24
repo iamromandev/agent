@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 import pytest
+from src.engine.configwatch import Change, ConfigWatch, WatchedSet
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.runner import MAX_STREAM, ProcessRunner
 
@@ -96,3 +97,29 @@ async def test_a_hook_asked_for_after_kill_all_does_not_start(runner: ProcessRun
 
     assert run.exit_code is None and run.error is not None and "closed" in run.error
     assert not (workspace / "started").exists()
+
+
+def _watch(workspace: Path, tmp_path: Path) -> tuple[ConfigWatch, list[Change]]:
+    seen: list[Change] = []
+    xdg = {"XDG_CONFIG_HOME": str(tmp_path / "config"), "XDG_DATA_HOME": str(tmp_path / "data")}
+    return ConfigWatch(WatchedSet.for_run(workspace, xdg, tmp_path / "home"), seen.append), seen
+
+
+async def test_a_hook_that_rewrites_a_watched_file_is_reported_with_the_hook_event(workspace: Path, tmp_path: Path) -> None:
+    (workspace / ".agent").mkdir()
+    watch, seen = _watch(workspace, tmp_path)
+    runner = ProcessRunner(workspace, Guardrails.off(workspace), watch)
+
+    run = await runner.run("echo x > .agent/settings.json", b"", 10, {}, event="PreToolUse")
+
+    assert run.exit_code == 0
+    assert [c.cause.text for c in seen] == ["hook PreToolUse"]
+
+
+async def test_a_quiet_hook_is_not_reported(workspace: Path, tmp_path: Path) -> None:
+    watch, seen = _watch(workspace, tmp_path)
+    runner = ProcessRunner(workspace, Guardrails.off(workspace), watch)
+
+    await runner.run("true", b"", 10, {}, event="Stop")
+
+    assert seen == []

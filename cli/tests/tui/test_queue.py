@@ -379,7 +379,7 @@ class _SlowRunner(FakeRunner):
         super().__init__(answer)
         self.gate = gate
 
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]):
+    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""):
         await self.gate.wait()
         return await super().run(command, stdin, timeout, env_extra)
 

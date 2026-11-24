@@ -13,6 +13,8 @@ from src.engine.agents.loader import Agents
 from src.engine.approval import Approver
 from src.engine.checkpoints.store import CheckpointStore
 from src.engine.commands.loader import Commands
+from src.engine.configguard import ConfigGuard, HeldGlobal
+from src.engine.configwatch import Watch
 from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.setup import Hooks
 from src.engine.image_pull import ImagePuller
@@ -125,6 +127,9 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         run_index: RunIndex | None = None,
         timings: TimingStore | None = None,
         extra_tools: list[Tool] | None = None,
+        config_guard: ConfigGuard | None = None,
+        watch: Watch | None = None,
+        held: HeldGlobal | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -159,6 +164,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 rules=permissions,
                 hooks=hooks,
                 checkpoints=checkpoints,
+                watch=watch,
             )
 
         return AgentApp(
@@ -186,6 +192,8 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             workflows=workflows,
             run_index=run_index if run_index is not None else RunIndex(tmp_path.parent / f"{tmp_path.name}-runs.json"),
             timings=timings if timings is not None else TimingStore(None),  # never the real data folder
+            config_guard=config_guard,
+            held=held,
         )
 
     return build

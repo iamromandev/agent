@@ -129,7 +129,9 @@ def _make_git_link(workspace: Path) -> str:
     return "link/config"
 
 
-@pytest.mark.parametrize("path", [".agent/agents/x.md", ".AGENT/Agents/x.md"])
+@pytest.mark.parametrize(
+    "path", [".agent/agents/x.md", ".AGENT/Agents/x.md", ".agent/workflows/x.json", ".Agent/WORKFLOWS/x.json"]
+)
 async def test_the_agent_files_folder_asks_without_always_in_edits_mode(
     ctx: ToolContext, workspace: Path, path: str
 ) -> None:
@@ -210,7 +212,21 @@ def _asks_without_always(approver: RecordingApprover) -> None:
 MIXED_CASE_CONFIG = [".agent/MCP.json", ".AGENT/settings.json", ".Agent/Settings.JSON"]
 
 
-@pytest.mark.parametrize("path", ["dat/agent/mcp-trust.json"])
+async def test_a_workflow_file_asks_without_always_even_when_a_rule_allows_write(
+    ctx: ToolContext, workspace: Path, tmp_path: Path
+) -> None:
+    """`.agent/workflows` is guarded like `.agent/agents`: no allow rule, grant or mode approves a write there."""
+    rules = _allow(workspace, tmp_path, "write")
+    script = [_call("c1", "write", path=".agent/workflows/x.json", content="{}\n"), _done()]
+    agent, _, approver = _agent(ctx, script, [DENY], mode=Mode.BUILD, rules=rules)
+
+    await _run(agent)
+
+    _asks_without_always(approver)
+    assert not (workspace / ".agent" / "workflows" / "x.json").exists()
+
+
+@pytest.mark.parametrize("path", ["dat/agent/mcp-trust.json", "cfg/agent/workflows/x.json"])
 async def test_the_launch_guards_config_data_and_sessions_folders_ask(workspace: Path, path: str) -> None:
     env = {"XDG_CONFIG_HOME": str(workspace / "cfg"), "XDG_DATA_HOME": str(workspace / "dat")}
     guard = prepare_guardrails(workspace, None, None, env, home=workspace, sessions=workspace / "sess")

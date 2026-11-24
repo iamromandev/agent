@@ -16,7 +16,7 @@ from src.engine.mcp.names import tool_name
 from src.engine.mcp.tool import McpTool
 from src.engine.tools.base import Tool
 
-Status = Literal["starting", "ready", "failed", "exited", "untrusted"]
+Status = Literal["starting", "ready", "failed", "exited", "untrusted", "stopped"]
 HubEvent = tuple[Literal["ready", "failed", "exited", "warn"], str, str]  # (kind, server, text)
 
 
@@ -68,7 +68,13 @@ class McpHub:
         self._warned: set[tuple[str, str]] = set()
         self._listeners: list[Callable[[HubEvent], None]] = []
         self._backlog: list[HubEvent] = [("warn", "", w) for w in warnings]  # replayed to the first listener
+        self._withdrawn: dict[str, bool] = {}  # withdrawn, not yet cleaned up by `stop`: was it starting or running?
+        self._loop: asyncio.AbstractEventLoop | None = None  # the loop `start` ran on: it owns the connections
         self._closed = False
+
+    @property
+    def loop(self) -> asyncio.AbstractEventLoop | None:
+        return self._loop
 
     def listen(self, fn: Callable[[HubEvent], None]) -> None:
         """Hear every event from now on. The first listener also gets what happened before it came."""
@@ -95,10 +101,12 @@ class McpHub:
         is started only when it is given here (the user trusted it)."""
         if self._closed:
             return
+        with contextlib.suppress(RuntimeError):  # no loop: nothing can start either
+            self._loop = asyncio.get_running_loop()
         wanted = [n for n, s in self._states.items() if s.status != "untrusted"] if names is None else list(names)
         for name in wanted:
             state = self._states.get(name)
-            if state is not None and name not in self._tasks:
+            if state is not None and name not in self._tasks and state.status != "stopped":  # stopped stays stopped
                 if state.status == "untrusted":
                     state.status, state.reason = "starting", ""
                 self._tasks[name] = asyncio.create_task(self._run(name))
@@ -118,7 +126,7 @@ class McpHub:
             # must not stay "starting" forever. The connector stops a connect that is cancelled by it.
             async with asyncio.timeout(self._start_timeout) as deadline:
                 connection = await self._connector.connect(state.config, self._workspace)
-                if self._closed:  # closed while connecting, by a connector that did not stop in time
+                if self._closed or state.status == "stopped":  # closed or withdrawn while connecting
                     return await connection.aclose()
                 self._connections[name] = connection
                 connection.on_exit(lambda reason: self._exited(name, reason))
@@ -186,9 +194,12 @@ class McpHub:
                 offered.append(tool)
         return offered
 
-    def untrusted(self) -> list[ServerConfig]:
-        """The servers that wait for the user's trust, in config order."""
-        return [s.config for s in self._states.values() if s.status == "untrusted"]
+    def untrusted(self, source: str | None = None) -> list[ServerConfig]:
+        """The servers that wait for the user's trust, in config order; only those of `source` when given (the
+        project's wait for the project trust prompt, the global ones for the global marker's)."""
+        return [
+            s.config for s in self._states.values() if s.status == "untrusted" and source in (None, s.config.source)
+        ]
 
     def states(self) -> list[ServerState]:
         return list(self._states.values())
@@ -221,6 +232,51 @@ class McpHub:
             self._inflight.get(server, set()).discard(entry)
             if not runner.done():
                 runner.cancel()
+
+    def sources(self) -> dict[str, str]:
+        """`{server: "global" | "project"}` for every configured server."""
+        return {name: state.config.source for name, state in self._states.items()}
+
+    def withdraw(self, names: Sequence[str], reason: str) -> list[str]:
+        """The synchronous half of `stop` (safe from any thread: it only flips states): these servers become `stopped`,
+        so `tools()` stops offering them at once and `start` never starts them, also one that is still untrusted or
+        was never started. Returns the names that changed; `stop` then closes what runs."""
+        changed: list[str] = []
+        for name in names:
+            state = self._states.get(name)
+            if state is None or state.status not in ("starting", "ready", "untrusted"):
+                continue
+            self._withdrawn.setdefault(name, state.status != "untrusted")
+            state.status, state.reason = "stopped", reason
+            state.tools = []
+            changed.append(name)
+        return changed
+
+    async def stop(self, names: Sequence[str], reason: str) -> None:
+        """Stop these servers on purpose (their config changed): `withdraw`, then a start in progress is cancelled, a
+        running server is closed and calls in flight fail with `reason`. A stopped server is not started again by
+        `start`. Unknown or finished servers are left as they are."""
+        self.withdraw(names, reason)
+        stopping: list[McpConnection] = []
+        tasks: list[asyncio.Task[None]] = []
+        ended: list[str] = []
+        for name in names:
+            if name not in self._withdrawn:
+                continue
+            if self._withdrawn.pop(name):
+                ended.append(name)  # it was starting or running: say so once
+            self._fail_inflight(name, McpExited(reason))
+            if (task := self._tasks.get(name)) is not None and not task.done():
+                task.cancel()
+                tasks.append(task)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for name in names:  # after the starts ended: a connection made meanwhile is closed too
+            state = self._states.get(name)
+            if state is not None and state.status == "stopped" and (connection := self._connections.pop(name, None)):
+                stopping.append(connection)
+        for name in ended:
+            self._emit("exited", name, reason)
+        await asyncio.gather(*(c.aclose() for c in stopping), return_exceptions=True)
 
     async def close_all(self) -> None:
         """Stop every server and wait until they are gone. Safe to call twice."""

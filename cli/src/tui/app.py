@@ -8,6 +8,7 @@ import functools
 import os
 import re
 import signal
+import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import replace
@@ -46,6 +47,8 @@ from src.engine.approval import ApprovalRequest, Approver, Choice
 from src.engine.commands.builtins import BUILTINS
 from src.engine.commands.loader import Commands
 from src.engine.compaction import CHARS_PER_TOKEN, turn_starts
+from src.engine.configguard import NEXT_LAUNCH, ConfigGuard, HeldGlobal
+from src.engine.configwatch import Cause, TrustRevoked
 from src.engine.events import WorkflowLine, WorkflowProgress
 from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.engine.guardrails.paths import (
@@ -106,6 +109,7 @@ from src.tui.hints import MIN_ROWS, hint_text
 from src.tui.queue import MessageQueue, Queued, merge
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.diff import DiffScreen
+from src.tui.screens.global_trust import GlobalTrustScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.screens.models import ModelPicker
 from src.tui.screens.permission_trust import PermissionTrustScreen
@@ -122,7 +126,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, DiffScreen, UsageScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, GlobalTrustScreen, DiffScreen, UsageScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -208,8 +212,17 @@ class AgentApp(App[None]):
         workflows: Workflows | None = None,
         run_index: RunIndex | None = None,
         timings: TimingStore | None = None,
+        config_guard: ConfigGuard | None = None,
+        held: HeldGlobal | None = None,
     ) -> None:
         super().__init__()
+        # What the marker holds until the next launch besides the allow rules, hooks and servers (shown and asked about
+        # with them): the global keepEnv and the global commands, skills, agents and workflows.
+        self._held = held if held is not None else HeldGlobal()
+        # The config watch's reaction object: its warnings go to the transcript, `/guardrails` lists its changes, and
+        # its marker (an earlier run's change to the global config) opens the global trust dialog at launch.
+        self.config_guard = config_guard
+        self._loop_thread: int | None = None  # the thread the app's event loop runs on, once mounted
         self.workflows = workflows if workflows is not None else Workflows()
         self._run_index = run_index
         self._timings = timings  # None: the machine's own file, made on the first workflow command
@@ -290,6 +303,9 @@ class AgentApp(App[None]):
         self._apply_height(self.size.height)
         self._reindex()
         self._stop_on_signals()
+        self._loop_thread = threading.get_ident()
+        if self.config_guard is not None:  # a reaction on another thread tells its listeners on this loop
+            self.config_guard.attach_loop(asyncio.get_running_loop())
         self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
@@ -342,6 +358,7 @@ class AgentApp(App[None]):
                 await self._announce_instructions()
             finally:
                 self._start_mcp()  # after the session is drawn (a redraw would wipe the servers' notices), before the hook
+                self._listen_config()  # also after the draw: a change seen during the launch is shown now
                 self._start_trust()
             await self._session_started(source)
         finally:
@@ -354,9 +371,35 @@ class AgentApp(App[None]):
         self.mcp.listen(self._post_mcp_event)
         self.mcp.start()  # never the untrusted ones
 
+    def _listen_config(self) -> None:
+        if self.config_guard is not None:
+            self.config_guard.listen(self._config_changed)
+
+    def _config_changed(self, text: str) -> None:
+        """A config watch warning (already escaped) for the transcript; from any thread."""
+        if self._shutting_down:
+            raise RuntimeError("the app is closing")  # the guard keeps the text: it is printed after the app
+        if self._loop_thread is None or threading.get_ident() == self._loop_thread:
+            self.call_later(self._show_config_change, text)
+        else:
+            self.call_from_thread(self._show_config_change, text)  # raises when the app is not running: kept
+
+    async def _show_config_change(self, text: str) -> None:
+        with contextlib.suppress(NoMatches):  # gone when the app is shutting down
+            await self.query_one(Transcript).add_notice("warn", text)
+
+    def _global_waiting(self) -> bool:
+        """An earlier run saw the global config change (the marker), and its rules, hooks and servers wait for a yes."""
+        return (
+            self.config_guard is not None
+            and self.config_guard.marker_set
+            and not self.permissions.global_active
+            and not self.permissions.global_revoked
+        )
+
     def _start_trust(self) -> None:
-        """One worker for everything to show or ask at launch: the permission warnings, then the MCP prompt, then
-        the permission prompt. One after the other, so two prompts never overlap."""
+        """One worker for everything to show or ask at launch: the permission warnings, then the global config
+        prompt, then the MCP prompt, then the permission prompt. One after the other, so two prompts never overlap."""
         if (
             self._permission_warnings
             or self._launch_notices
@@ -364,7 +407,8 @@ class AgentApp(App[None]):
             or self.skills.warnings
             or self.permissions.untrusted_allow
             or self.hooks.untrusted()
-            or (self.mcp is not None and self.mcp.untrusted())
+            or (self.mcp is not None and self.mcp.untrusted("project"))
+            or self._global_waiting()
         ):
             self.run_worker(self._ask_trust(), group="trust")
 
@@ -374,9 +418,46 @@ class AgentApp(App[None]):
             await transcript.add_notice("warn", warning)
         for line in self._launch_notices:
             await transcript.add_notice("info", line)
-        if self.mcp is not None and self.mcp.untrusted():
+        if self._global_waiting():
+            await self._ask_global_trust()
+        if self.mcp is not None and self.mcp.untrusted("project"):
             await self._ask_mcp_trust()
         await self._ask_permission_trust()
+
+    async def _ask_global_trust(self) -> None:
+        """Ask once whether to use the global allow rules, hooks and MCP servers again; only a yes clears the marker
+        (the agent's own write) and turns them on. No, or Esc, keeps them off for this run and keeps the marker."""
+        guard = self.config_guard
+        if guard is None:
+            return
+        servers = self.mcp.untrusted("global") if self.mcp is not None else []
+        hooks = [entry for entry in self.hooks.entries if entry.source == "global"]
+        marker = await asyncio.to_thread(guard.marker_info)
+        transcript = self.query_one(Transcript)
+        for line in self._held.notices():  # one per kind, with its count (names come from files: counts only here)
+            await transcript.add_notice("warn", line)
+        self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
+        screen = GlobalTrustScreen(
+            self.permissions.global_allow, hooks, servers, marker, deny=self.permissions.global_deny, held=self._held
+        )
+        trusted = await self.push_screen_wait(screen)
+        if not trusted:
+            await transcript.add_notice(
+                "info", "global config not trusted: global allow rules, hooks and MCP servers are off for this run"
+            )
+            return
+        try:
+            await asyncio.to_thread(guard.trust_global)  # removes the marker: not on the event loop
+        except TrustRevoked as exc:  # a change seen in this run: everything stays off, the marker stays
+            await transcript.add_notice("warn", escape(f"global config: {exc}"))
+            return
+        except OSError as exc:  # the marker is still there: nothing was turned on
+            await transcript.add_notice("warn", escape(f"global config: {exc}"))
+            return
+        if self.mcp is not None and servers:
+            self.mcp.start([s.name for s in servers])
+        later = f"; {NEXT_LAUNCH}" if self._held.any else ""
+        await transcript.add_notice("info", f"global config trusted: global allow rules, hooks and MCP servers are on{later}")
 
     async def _ask_permission_trust(self) -> None:
         """Ask once whether to trust the project's allow rules and hooks (one decision for the file's bytes); only a
@@ -399,6 +480,8 @@ class AgentApp(App[None]):
             return
         try:
             await asyncio.to_thread(self.permissions.trust_project)  # writes the trust store: not on the event loop
+        except TrustRevoked as exc:  # the config watch revoked project trust meanwhile: nothing was trusted
+            await transcript.add_notice("warn", escape(f"permissions: {exc}"))
         except OSError as exc:  # the rules are on for this run; it will ask again next time
             await transcript.add_notice("warn", escape(f"permissions: could not remember the trust: {exc}"))
 
@@ -406,7 +489,7 @@ class AgentApp(App[None]):
         """Ask once whether to start the project's MCP servers; only a yes starts them."""
         if self.mcp is None:
             return
-        servers = self.mcp.untrusted()
+        servers = self.mcp.untrusted("project")  # the global ones held by the marker have their own prompt
         names = ", ".join(s.name for s in servers)
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
         trusted = await self.push_screen_wait(McpTrustScreen(servers))
@@ -417,6 +500,9 @@ class AgentApp(App[None]):
         if self._mcp_trust is not None:
             try:
                 self._mcp_trust()
+            except TrustRevoked as exc:  # the config watch revoked project trust meanwhile: nothing starts
+                await transcript.add_notice("warn", escape(f"mcp: {exc}"))
+                return
             except OSError as exc:  # the servers still start for this run; it will ask again next time
                 await transcript.add_notice("warn", f"mcp: could not remember the trust: {exc}")
         self.mcp.start([s.name for s in servers])
@@ -584,6 +670,8 @@ class AgentApp(App[None]):
         removed = ", ".join(escape(name) for name in guard.removed_env) or "none"
         lines.append(f"Removed from child environment: {removed}")
         lines.append(f"Redacted this run: {guard.redactions}")
+        if self.config_guard is not None:  # the changes the config watch saw (escaped there) and the global marker
+            lines.extend(self.config_guard.summary())
         return "\n".join(lines)
 
     def _mcp_summary(self) -> str:
@@ -808,7 +896,7 @@ class AgentApp(App[None]):
             and not event.is_forwarded
             and event.key != "ctrl+c"  # it interrupts: it never approves
             and time.monotonic() < self._keys_ignored_until
-            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen | McpTrustScreen | PermissionTrustScreen)  # empty on shutdown
+            and isinstance(next(iter(reversed(self.screen_stack)), None), ApprovalScreen | McpTrustScreen | PermissionTrustScreen | GlobalTrustScreen)  # empty on shutdown
         ):
             event.stop()
             return
@@ -845,6 +933,10 @@ class AgentApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
+        if self.config_guard is not None:  # the transcript is going away: what is said now is printed after the app
+            self.config_guard.unlisten(self._config_changed)
+        with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
+            self.agent.watch.check(Cause.background())  # first: the shell tab and background processes still run
         self.file_index.cancel()  # the build thread stops at its next check instead of walking on
         self.agent.close()
         self.paste.remove()

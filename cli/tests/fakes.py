@@ -381,7 +381,9 @@ class FakeRunner:
         self.script = script
         self.calls: list[tuple[str, dict[str, Any], dict[str, str]]] = []  # (command, stdin payload, env_extra)
 
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
+    async def run(
+        self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""
+    ) -> HookRun:
         payload = json.loads(stdin)
         self.calls.append((command, payload, dict(env_extra)))
         script = self.script

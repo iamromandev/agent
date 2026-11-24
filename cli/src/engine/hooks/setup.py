@@ -34,7 +34,7 @@ def hook_failed(event: str, exc: BaseException) -> Notice:
 
 
 class _NullRunner:
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Any) -> HookRun:
+    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Any, *, event: str = "") -> HookRun:
         raise AssertionError("an empty Hooks has nothing to run")
 
 
@@ -61,11 +61,15 @@ class Hooks:
         runner: Runner,
         project_active: Callable[[], bool],
         workspace: Path,
+        global_active: Callable[[], bool] = lambda: True,
+        global_inactive: Callable[[], str | None] = lambda: None,
     ) -> None:
         self.entries = tuple(entries)
         self.warnings = tuple(warnings)
         self._runner = runner
         self._project_active = project_active
+        self._global_active = global_active  # closed when the config watch saw the global config change
+        self._global_inactive = global_inactive  # why, as `/hooks` says it (`Rules.global_inactive`)
         self._workspace = workspace
 
     @classmethod
@@ -76,10 +80,11 @@ class Hooks:
         if not self.entries:
             return []
         project = self._project_active()
+        use_global = self._global_active()
         chosen = [
             e
             for e in self.entries
-            if e.event == event and (e.source == "global" or project) and (tool is None or e.matches(tool))
+            if e.event == event and (use_global if e.source == "global" else project) and (tool is None or e.matches(tool))
         ]
         return sorted(chosen, key=lambda e: e.source != "global")  # stable: global first, each in file order
 
@@ -103,7 +108,7 @@ class Hooks:
         reason = DEFAULT_REASON
         for entry in self._active(event, tool):
             try:
-                run = await self._runner.run(entry.command, stdin, entry.timeout, env)
+                run = await self._runner.run(entry.command, stdin, entry.timeout, env, event=event)
                 outcome = _interpret(entry, run, event)
             except asyncio.CancelledError:
                 raise
@@ -118,13 +123,17 @@ class Hooks:
         return HookDecision(blocked, reason, context, outcomes)
 
     def listing(self) -> list[str]:
-        """The lines `/hooks` shows: every entry as `<Event> [<matcher>] (<source>, <timeout>[, inactive: untrusted]) <command>`,
-        then the launch warnings; empty when there is nothing to show. Text from a file is escaped."""
+        """The lines `/hooks` shows: every entry as `<Event> [<matcher>] (<source>, <timeout>[, inactive: <why>]) <command>`
+        (`untrusted` project hooks; global ones while the config watch holds them), then the launch warnings; empty when
+        there is nothing to show. Text from a file is escaped."""
         waiting = set(self.untrusted())
-        lines = [
-            f"{escape(e.label)} ({e.source}, {e.timeout:g}s{', inactive: untrusted' if e in waiting else ''}) {escape(e.command)}"
-            for e in self.entries
-        ]
+        held = None if self._global_active() else (self._global_inactive() or "inactive: global config changed")
+
+        def state(e: HookEntry) -> str:
+            off = held if e.source == "global" else ("inactive: untrusted" if e in waiting else None)
+            return f", {off}" if off else ""
+
+        lines = [f"{escape(e.label)} ({e.source}, {e.timeout:g}s{state(e)}) {escape(e.command)}" for e in self.entries]
         return [*lines, *self.warnings]
 
     def notices(self, decision: HookDecision, redact: Callable[[str], str] | None = None) -> list[Notice]:
@@ -193,4 +202,6 @@ def prepare(setup: PermissionSetup, workspace: Path, runner: Runner) -> Hooks:
         runner,
         lambda: rules.project_trusted,
         workspace,
+        lambda: rules.global_active,
+        lambda: rules.global_inactive,
     )

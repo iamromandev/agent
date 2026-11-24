@@ -172,7 +172,7 @@ class HangingRunner:
         self.started = asyncio.Event()
         self.cancelled = False
 
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: object) -> HookRun:
+    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: object, *, event: str = "") -> HookRun:
         self.started.set()
         try:
             await asyncio.Event().wait()
