@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from src.engine.guardrails.config import GuardConfig, read_guardrails
 
 GLOBAL = Path("/cfg/settings.json")
@@ -14,58 +15,46 @@ def read(global_data: dict | None, project_data: dict | None) -> tuple[GuardConf
     return read_guardrails(global_data, project_data, global_path=GLOBAL, project_path=PROJECT)
 
 
+UNSUPPORTED = "guardrails.sandbox is no longer supported and is ignored"
+SANDBOX_SHAPES = [{"enabled": False, "network": False, "write": ["~/x"]}, "x", {"enabled": [1]}, 1, None, []]
+
+
 def test_the_global_file_sets_everything() -> None:
     config, warnings = read(
-        {
-            "guardrails": {
-                "sandbox": {"enabled": False, "network": False, "write": ["~/extra/cache"]},
-                "protected": ["~/secrets/**", "*.key"],
-                "keepEnv": ["npm_token", "Other"],
-            }
-        },
+        {"guardrails": {"protected": ["~/secrets/**", "*.key"], "keepEnv": ["npm_token", "Other"]}},
         None,
     )
 
     assert config == GuardConfig(
-        sandbox_enabled=False,
-        network=False,
-        extra_write=("~/extra/cache",),
         extra_protected=("~/secrets/**", "*.key"),
         keep_env=frozenset({"NPM_TOKEN", "OTHER"}),
     )
     assert warnings == []
 
 
-def test_the_project_file_may_add_protected_patterns_and_turn_the_network_off() -> None:
-    config, warnings = read(
-        {"guardrails": {"protected": ["a/**"]}},
-        {"guardrails": {"protected": ["b/**"], "sandbox": {"network": False}}},
-    )
+def test_the_project_file_may_add_protected_patterns() -> None:
+    config, warnings = read({"guardrails": {"protected": ["a/**"]}}, {"guardrails": {"protected": ["b/**"]}})
 
     assert config.extra_protected == ("a/**", "b/**")
-    assert config.network is False
     assert warnings == []
 
 
-def test_a_project_network_true_and_write_list_are_ignored_with_a_warning() -> None:
+@pytest.mark.parametrize("shape", SANDBOX_SHAPES)
+def test_a_sandbox_key_in_each_file_gives_one_warning_and_other_keys_still_apply(shape: object) -> None:
     config, warnings = read(
-        {"guardrails": {"sandbox": {"network": False}}},
-        {"guardrails": {"sandbox": {"network": True, "write": ["~/x"]}}},
+        {"guardrails": {"sandbox": shape, "protected": ["g/**"], "keepEnv": ["tok"]}},
+        {"guardrails": {"sandbox": shape, "protected": ["p/**"]}},
     )
 
-    assert config.network is False
-    assert config.extra_write == ()
-    assert warnings == [
-        f"{PROJECT}: guardrails.sandbox.network can only be set in the global settings; ignored",
-        f"{PROJECT}: guardrails.sandbox.write can only be set in the global settings; ignored",
-    ]
+    assert warnings == [f"{GLOBAL}: {UNSUPPORTED}", f"{PROJECT}: {UNSUPPORTED}"]
+    assert config == GuardConfig(extra_protected=("g/**", "p/**"), keep_env=frozenset({"TOK"}))
 
 
-def test_a_project_enabled_true_changes_nothing_and_says_nothing() -> None:
-    config, warnings = read(None, {"guardrails": {"sandbox": {"enabled": True}, "keepEnv": []}})
+def test_a_file_whose_only_guardrails_key_is_sandbox_gives_one_warning_and_nothing_else() -> None:
+    config, warnings = read({"guardrails": {"sandbox": {"enabled": True}}}, None)
 
     assert config == GuardConfig()
-    assert warnings == []
+    assert warnings == [f"{GLOBAL}: {UNSUPPORTED}"]
 
 
 def test_ac2_a_protected_value_that_is_not_a_list_warns_and_keeps_the_defaults() -> None:
@@ -83,22 +72,10 @@ def test_a_list_with_a_non_string_or_empty_entry_is_ignored_as_a_whole() -> None
     assert len(warnings) == 2
 
 
-def test_wrong_types_fall_back_to_the_default_per_key() -> None:
-    config, warnings = read(
-        {"guardrails": {"sandbox": {"enabled": "yes", "network": 0, "write": "x"}, "protected": ["p"]}}, None
-    )
-
-    assert config == GuardConfig(extra_protected=("p",))
-    assert len(warnings) == 3
-
-
-def test_guardrails_and_sandbox_must_be_objects() -> None:
+def test_guardrails_must_be_an_object() -> None:
     _, first = read({"guardrails": []}, None)
-    config, second = read({"guardrails": {"sandbox": 1, "protected": ["p"]}}, None)
 
     assert first == [f'{GLOBAL}: "guardrails" must be an object; ignored']
-    assert second == [f'{GLOBAL}: "guardrails.sandbox" must be an object; ignored']
-    assert config.extra_protected == ("p",)
 
 
 def test_a_bad_project_value_warns_with_the_project_path() -> None:

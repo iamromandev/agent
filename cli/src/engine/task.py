@@ -82,8 +82,8 @@ class TaskTool(Tool):
 
     def agent_pool(self, defn: AgentDef | None) -> list[Tool]:
         """The tools a child runs with. A custom agent's names are looked up first among the parent's own tool
-        instances that agents may use (so `write`, `edit` and `bash` are the very ones the parent's gates and sandbox
-        wrap), then among the read-only set; a name neither has is dropped silently."""
+        instances that agents may use (so `write`, `edit` and `bash` are the very ones the parent's gates and
+        checks), then among the read-only set; a name neither has is dropped silently."""
         if defn is None or defn.tools is None:
             return self._tools
         pool = {t.name: t for t in self._tools}

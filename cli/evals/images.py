@@ -3,7 +3,7 @@
 Opt-in (Apple Silicon, the `image` extra, the models in the Hugging Face cache); not part of `make test`, `make eval`
 or CI. The orchestrator (`main`) runs one worker process per case (`python -m evals.images --worker <case> ...`)
 in a shared temp workspace: a fresh worker means its `RUSAGE_CHILDREN` peak is exactly that case's mflux/helper
-processes. The workers build the real tools as the runtime does (real guardrails and sandbox, no user settings
+processes. The workers build the real tools as the runtime does (real guardrails, no user settings
 files). The pixel checks run in `pixel_compare.py` in their own processes, so no process of the eval imports Pillow.
 
 Cleanup: mflux and `hf` run in their own sessions, so killing the worker's group does not reach them. The worker
@@ -231,7 +231,7 @@ async def _run_case(name: str, workspace: Path, tools: Tools) -> str | None:
     from src.engine.tools.base import Prepared, ToolContext, ToolResult
     from src.engine.tools.image import EditImageTool, GenerateImageTool
 
-    guard = prepare(workspace, None, None, os.environ, platform.system())
+    guard = prepare(workspace, None, None, os.environ)
     ctx = ToolContext(workspace=workspace, bash_timeout=120.0, guard=guard)
     generator = (
         None if tools.generate is None else MfluxGenerator(Path(tools.generate), tools.generate_model, tools.timeout, guard)

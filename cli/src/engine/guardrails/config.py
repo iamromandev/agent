@@ -11,14 +11,12 @@ from src.engine.text import escape
 
 @dataclass(frozen=True)
 class GuardConfig:
-    sandbox_enabled: bool = True
-    network: bool = True
-    extra_write: tuple[str, ...] = ()  # global only
     extra_protected: tuple[str, ...] = ()  # global + project
     keep_env: frozenset[str] = frozenset()  # global only, upper-cased
 
 
 _ONLY_GLOBAL = "can only be set in the global settings; ignored"
+REMOVED_KEY_WARNING = "guardrails.sandbox is no longer supported and is ignored"  # the macOS sandbox was removed
 
 
 class _Reader:
@@ -41,14 +39,10 @@ class _Reader:
             return {}
         return value
 
-    def boolean(self, section: Mapping[str, object], key: str, label: str) -> bool | None:
-        value = section.get(key)
-        if value is None:
-            return None
-        if not isinstance(value, bool):
-            self.warn(f'"{label}" must be true or false; ignored')
-            return None
-        return value
+    def check_sandbox(self, section: Mapping[str, object]) -> None:
+        """One warning when the file still has the removed `sandbox` key; its value is never read."""
+        if "sandbox" in section:
+            self.warn(REMOVED_KEY_WARNING)
 
     def texts(self, section: Mapping[str, object], key: str, label: str) -> tuple[str, ...] | None:
         value = section.get(key)
@@ -93,41 +87,26 @@ def read_guardrails(
 ) -> tuple[GuardConfig, list[str]]:
     """The effective guardrails settings and the launch warnings (escaped).
 
-    The global file may set everything. The project file (a repository's own) may only tighten: add `protected`
-    patterns and set `sandbox.network` to false; the rest is ignored with a warning.
+    The global file may set everything. The project file (a repository's own) may only add `protected` patterns.
+    A `sandbox` key (the removed sandbox's settings) in either file is ignored with one warning, whatever its value.
     """
     warnings: list[str] = []
 
     glob = _Reader(escape(str(global_path)), warnings)
     g_guard = glob.section(global_data, "guardrails", "guardrails")
-    g_sandbox = glob.section(g_guard, "sandbox", "guardrails.sandbox")
-    enabled = glob.boolean(g_sandbox, "enabled", "guardrails.sandbox.enabled")
-    network = glob.boolean(g_sandbox, "network", "guardrails.sandbox.network")
-    write = glob.texts(g_sandbox, "write", "guardrails.sandbox.write")
+    glob.check_sandbox(g_guard)
     protected = glob.patterns(glob.texts(g_guard, "protected", "guardrails.protected"))
     keep = glob.texts(g_guard, "keepEnv", "guardrails.keepEnv")
 
     proj = _Reader(escape(str(project_path)), warnings)
     p_guard = proj.section(project_data, "guardrails", "guardrails")
-    p_sandbox = proj.section(p_guard, "sandbox", "guardrails.sandbox")
-    p_enabled = proj.boolean(p_sandbox, "enabled", "guardrails.sandbox.enabled")
-    p_network = proj.boolean(p_sandbox, "network", "guardrails.sandbox.network")
-    p_write = proj.texts(p_sandbox, "write", "guardrails.sandbox.write")
+    proj.check_sandbox(p_guard)
     p_protected = proj.patterns(proj.texts(p_guard, "protected", "guardrails.protected"))
     p_keep = proj.texts(p_guard, "keepEnv", "guardrails.keepEnv")
-    if p_enabled is False:
-        proj.warn(f"guardrails.sandbox.enabled {_ONLY_GLOBAL}")
-    if p_network is True:
-        proj.warn(f"guardrails.sandbox.network {_ONLY_GLOBAL}")
-    if p_write:
-        proj.warn(f"guardrails.sandbox.write {_ONLY_GLOBAL}")
     if p_keep:
         proj.warn(f"guardrails.keepEnv {_ONLY_GLOBAL}")
 
     config = GuardConfig(
-        sandbox_enabled=True if enabled is None else enabled,
-        network=False if p_network is False else (True if network is None else network),
-        extra_write=write or (),
         extra_protected=(protected or ()) + (p_protected or ()),
         keep_env=frozenset(name.upper() for name in keep or ()),
     )

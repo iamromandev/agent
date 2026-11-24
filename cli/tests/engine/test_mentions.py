@@ -182,7 +182,7 @@ def test_tilde_slash_still_means_the_home_folder(ws: Path, tmp_path: Path, monke
 
 
 def real_guard(ws: Path, home: Path) -> Guardrails:
-    return prepare(ws, None, None, {}, "Linux", home=home)
+    return prepare(ws, None, None, {}, home=home)
 
 
 def test_a_hard_link_to_a_protected_file_made_after_launch_is_refused(ws: Path, tmp_path: Path) -> None:

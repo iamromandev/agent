@@ -1,15 +1,13 @@
-"""ProcessRunner with real `/bin/sh` commands: stdin, environment, caps, timeout, cancellation, sandbox wrap."""
+"""ProcessRunner with real `/bin/sh` commands: stdin, environment, caps, timeout, cancellation."""
 
 from __future__ import annotations
 
 import asyncio
-import sys
 import time
 from pathlib import Path
 
 import pytest
-from src.engine.guardrails.sandbox import SANDBOX_EXEC
-from src.engine.guardrails.setup import Guardrails, prepare
+from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.runner import MAX_STREAM, ProcessRunner
 
 from tests.helpers import assert_all_gone, wait_for_pids
@@ -78,15 +76,6 @@ async def test_cancelling_the_run_kills_the_group(runner: ProcessRunner, workspa
         await task
 
     await assert_all_gone(*pids)
-
-
-needs_sandbox = pytest.mark.skipif(
-    sys.platform != "darwin" or not SANDBOX_EXEC.exists(), reason="needs macOS and /usr/bin/sandbox-exec"
-)
-
-
-def real_guard(workspace: Path, home: Path) -> Guardrails:
-    return prepare(workspace, None, None, {}, "Darwin", home=home, sessions=home / "sessions")
 
 
 async def test_kill_all_kills_the_process_group_of_a_running_hook(runner: ProcessRunner, workspace: Path) -> None:

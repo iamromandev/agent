@@ -167,22 +167,11 @@ async def _drain(proc: Process, capture: _Capture) -> None:
     await proc.wait()
 
 
-SANDBOX_NOTE = "[sandbox: a write or read outside the allowed paths was blocked]"
-
-
-def _with_note(text: str, plain: str, sandboxed: bool) -> str:
-    """`text` with the sandbox note after it when the sandbox is on and `plain` (what the model sees) shows a denial.
-    A command that fails with this message for another reason gets the note too (accepted, R12)."""
-    return f"{text}\n{SANDBOX_NOTE}" if sandboxed and "Operation not permitted" in plain else text
-
-
 async def _run(command: str, ctx: ToolContext) -> ToolResult:
     guard = guard_of(ctx)
-    argv = guard.sandbox.wrap(shell_argv(command))
-    sandboxed = guard.sandbox.profile is not None
     try:
         proc = await asyncio.create_subprocess_exec(
-            *argv,
+            *shell_argv(command),
             cwd=ctx.workspace,
             stdin=DEVNULL,  # a command that reads stdin gets EOF instead of hanging
             stdout=PIPE,
@@ -202,11 +191,7 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
         raw = capture.raw()
         display = (f"{raw}\n{message}" if raw else message) if raw != text else None
         output = f"{text}\n{message}" if text else message
-        if display is not None:
-            display = _with_note(display, text, sandboxed)
-        return ToolResult(
-            _with_note(output, text, sandboxed), is_error=True, summary="timed out", display=display
-        )
+        return ToolResult(output, is_error=True, summary="timed out", display=display)
     except BaseException:  # CancelledError (Esc) or anything unexpected: never leave a process behind
         await kill_group(proc)
         raise
@@ -215,7 +200,5 @@ async def _run(command: str, ctx: ToolContext) -> ToolResult:
     output = f"{text}\nexit {code}" if text else f"exit {code}"
     raw = capture.raw()
     display = (f"{raw}\nexit {code}" if raw else f"exit {code}") if raw != text else None
-    if display is not None:
-        display = _with_note(display, text, sandboxed)
-    return ToolResult(_with_note(output, text, sandboxed), summary=f"exit {code}", display=display)
+    return ToolResult(output, summary=f"exit {code}", display=display)
 

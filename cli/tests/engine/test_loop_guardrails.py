@@ -46,7 +46,7 @@ def home(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def gctx(workspace: Path, home: Path) -> ToolContext:
-    return ToolContext(workspace, 5.0, guard=prepare_guard(workspace, None, None, {}, "Linux", home=home))
+    return ToolContext(workspace, 5.0, guard=prepare_guard(workspace, None, None, {}, home=home))
 
 
 def _agent(
@@ -153,7 +153,7 @@ def _redacting_agent(
 
 
 def _guard(workspace: Path, home: Path, env: dict[str, str] | None = None) -> Guardrails:
-    return prepare_guard(workspace, None, None, env or {}, "Linux", home=home)
+    return prepare_guard(workspace, None, None, env or {}, home=home)
 
 
 async def test_nfr4_a_redactor_that_raises_withholds_the_output(

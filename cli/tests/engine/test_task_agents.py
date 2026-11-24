@@ -195,7 +195,7 @@ async def test_the_main_agents_own_request_names_no_subagent(ctx: ToolContext) -
 
 async def test_a_child_protected_read_names_the_subagent(workspace: Path, tmp_path: Path) -> None:
     (workspace / ".env").write_text("K=v\n")
-    guard = prepare_guardrails(workspace, None, None, {}, "Linux", home=tmp_path / "home")
+    guard = prepare_guardrails(workspace, None, None, {}, home=tmp_path / "home")
     ctx = ToolContext(workspace, 5.0, guard=guard)
     script = [_delegate(), _call("r1", "read", path=".env"), _say("r"), _say("done")]
     agent, _, approver = _make(ctx, script, [DENY])
@@ -415,7 +415,7 @@ async def test_the_default_child_runs_no_hooks(ctx: ToolContext, workspace: Path
 # Remaining gaps
 
 async def test_a_child_bash_output_is_redacted_and_its_environment_filtered(workspace: Path, tmp_path: Path) -> None:
-    guard = prepare_guardrails(workspace, None, None, {"MY_TOKEN": "supersecretvalue99"}, "Linux", home=tmp_path / "home")
+    guard = prepare_guardrails(workspace, None, None, {"MY_TOKEN": "supersecretvalue99"}, home=tmp_path / "home")
     ctx = ToolContext(workspace, 5.0, guard=guard)
     command = "echo ghp_" + "a" * 36 + "; echo token=${MY_TOKEN:-unset}"
     script = [_delegate(), _call("b1", "bash", command=command), _say("r"), _say("done")]

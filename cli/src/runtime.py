@@ -7,7 +7,6 @@ from __future__ import annotations
 import asyncio
 import builtins
 import os
-import platform
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Collection
@@ -317,16 +316,15 @@ def build_runtime(
         else:
             agents = agents.with_models(None)  # an injected provider: no catalog call
         run_provider = provider
-        # Guardrails come from the same two settings files, already parsed: protected paths, the child environment, the sandbox.
+        # Guardrails come from the same two settings files, already parsed: protected paths and the child environment.
         guard = prepare_guardrails(
             root,
             permissions.global_data,
             permissions.project_data,
             os.environ,
-            platform.system(),
             global_path=global_settings_path(),
             project_path=project_settings_path(root),
-            sessions=sessions,  # the sandbox never lets a command write it
+            sessions=sessions,  # accept-edits never writes it
         )
         # Hooks too: both files already parsed; project hooks stay off until the same trust as the allow rules.
         hook_runner = ProcessRunner(root, guard)

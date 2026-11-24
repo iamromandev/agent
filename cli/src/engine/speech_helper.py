@@ -2,7 +2,7 @@
 
     --model M --voice V --speed S --text-file text.txt --out speech.wav --skipped skipped.json
 
-It runs in its own process (sandboxed, filtered environment) because it loads mlx-audio (Kokoro), misaki, torch and
+It runs in its own process (filtered environment) because it loads mlx-audio (Kokoro), misaki, torch and
 spacy, which the agent never imports, and reads the text only from a file. It never runs pip and imports nothing from
 the agent.
 

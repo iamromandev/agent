@@ -21,8 +21,9 @@ image = [
     "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
 ]
 # Reel media tools (`speak`, later `assemble_video`): Apple Silicon Macs only. `uv sync --extra media`. Pulls torch and
-# spacy through misaki (about 1.2 GB). The spacy model is pinned by URL because misaki would pip-install it on first
-# use, which the sandbox blocks. That wheel is fetched from the GitHub release with no hash pin in the repo (`uv.lock`
+# spacy through misaki (about 1.2 GB). The spacy model is pinned by URL because misaki would pip-install it into the venv
+# on first use; pinning it up front keeps the install reproducible and stops a tool call from modifying the
+# environment. That wheel is fetched from the GitHub release with no hash pin in the repo (`uv.lock`
 # is gitignored); it only affects this opt-in extra.
 media = [
     "mlx-audio==0.6.7; sys_platform == 'darwin' and platform_machine == 'arm64'",

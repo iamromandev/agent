@@ -1,4 +1,4 @@
-"""Image generation with mflux: find its command, check its output and run it as a sandboxed subprocess.
+"""Image generation with mflux: find its command, check its output and run it as a subprocess.
 
 mflux is never imported: it is an optional extra, and its console script runs in its own process group.
 UI-free: no `textual`, no `httpx`.
@@ -354,34 +354,30 @@ class MfluxGenerator:
     def argv(self, request: ImageRequest, out_dir: Path) -> list[str]:
         """Every value its own item: the prompt never goes through a shell."""
         if self.kind == "upscale":
-            return self.guard.sandbox.wrap(
-                [
-                    str(self.command),
-                    "--model", self.model,
-                    "--image-path", str(request.inputs[0]),
-                    "--resolution", f"{request.scale}x",
-                    "--seed", str(request.seed),
-                    "--softness", f"{request.softness:g}",
-                    *self.extra,
-                    "--output", str(out_dir / OUTPUT_NAME),
-                    "--no-exif",
-                ]
-            )  # fmt: skip
-        return self.guard.sandbox.wrap(
-            [
+            return [
                 str(self.command),
                 "--model", self.model,
-                f"--prompt={request.prompt}",
-                *(("--image-paths", *map(str, request.inputs)) if request.inputs else ()),
-                "--width", str(request.width),
-                "--height", str(request.height),
-                "--steps", str(request.steps),
+                "--image-path", str(request.inputs[0]),
+                "--resolution", f"{request.scale}x",
                 "--seed", str(request.seed),
+                "--softness", f"{request.softness:g}",
                 *self.extra,
                 "--output", str(out_dir / OUTPUT_NAME),
                 "--no-exif",
-            ]
-        )  # fmt: skip
+            ]  # fmt: skip
+        return [
+            str(self.command),
+            "--model", self.model,
+            f"--prompt={request.prompt}",
+            *(("--image-paths", *map(str, request.inputs)) if request.inputs else ()),
+            "--width", str(request.width),
+            "--height", str(request.height),
+            "--steps", str(request.steps),
+            "--seed", str(request.seed),
+            *self.extra,
+            "--output", str(out_dir / OUTPUT_NAME),
+            "--no-exif",
+        ]  # fmt: skip
 
     async def generate(
         self,
@@ -452,11 +448,11 @@ async def run_helper(
     on_start: Callable[[int], None] | None = None,
     who: str = "the compositing helper",
 ) -> tuple[int, bytes]:
-    """Run a helper process like mflux: sandbox wrap, filtered environment, its own process group, no stdin or
+    """Run a helper process like mflux: filtered environment, its own process group, no stdin or
     stdout. Returns (exit code, the end of stderr); kills the group on timeout (`ImageGenError`) and on cancel."""
     try:
         proc = await asyncio.create_subprocess_exec(
-            *guard.sandbox.wrap(argv),
+            *argv,
             cwd=cwd,
             stdin=DEVNULL,
             stdout=DEVNULL,

@@ -1,7 +1,7 @@
 """`/images`: the state of the two image models in the Hugging Face cache, and a background warm-up that downloads them.
 
 A warm-up is one tiny mflux job per model (256x256, 1 step, no timeout) through the same `MfluxGenerator` as the tools,
-so the sandbox, the filtered environment and the process group are the same. UI-free: no `textual`, no `httpx`.
+so the filtered environment and the process group are the same. UI-free: no `textual`, no `httpx`.
 """
 
 from __future__ import annotations
@@ -195,7 +195,7 @@ async def download_size(
     repo, files = resolve_model(model)
     try:
         proc = await asyncio.create_subprocess_exec(
-            *guard.sandbox.wrap([str(hf), "download", repo, "--dry-run"]),
+            str(hf), "download", repo, "--dry-run",
             stdin=DEVNULL,
             stdout=PIPE,
             stderr=DEVNULL,

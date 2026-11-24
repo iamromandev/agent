@@ -160,7 +160,7 @@ def run_headless(
         waiting = () if opts.trust_project else _untrusted_warnings(rt)
         for warning in (*rt.warnings, *warnings, *waiting, *rt.commands.warnings, *rt.skills.warnings):
             sink(Notice("warn", warning))
-        for note in (*rt.model_notices, *rt.guard.info):
+        for note in rt.model_notices:
             sink(Notice("info", note))
         for mention in mention_notes:
             sink(Notice("info" if mention.attached else "warn", note_text(mention)))

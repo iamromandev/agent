@@ -217,7 +217,7 @@ def _guard(workspace: Path, tmp_path: Path) -> Guardrails:
 
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    return prepare(workspace, None, None, {}, "Linux", home=home)
+    return prepare(workspace, None, None, {}, home=home)
 
 
 async def test_a_directory_target_and_a_symlinked_parent_are_refused(tool: AssembleVideoTool, ctx: ToolContext, workspace: Path, tmp_path: Path) -> None:

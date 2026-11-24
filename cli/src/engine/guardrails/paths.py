@@ -114,7 +114,7 @@ class ProtectedPaths:
             homes.extend([folder] if folder.resolve() == folder else [folder.resolve(), folder])
         self._homes = [_canonical(str(h)) for h in homes]
         self._path_patterns: list[str] = []
-        self.builtin_name_patterns = [name.lower() for name in BUILTIN_NAMES]  # lower case, for the sandbox profile
+        self.builtin_name_patterns = [name.lower() for name in BUILTIN_NAMES]  # lower case, matched against the lower-cased name
         self.extra_name_patterns: list[str] = []
         self.exempt_names = frozenset(name.lower() for name in NAME_EXCEPTIONS)
         for pattern in (*BUILTIN_HOME, *self._extra):
@@ -277,24 +277,12 @@ class ProtectedPaths:
         """Every pattern as written (built-in first), for `/guardrails`."""
         return [*BUILTIN_HOME, *BUILTIN_NAMES, *self._extra]
 
-    def glob_patterns(self) -> list[str]:
-        """The path patterns `home_roots` cannot express (a wildcard before the end, or a relative one that applies
-        under any folder: `**/secrets/**`), as absolute or `**/`-led globs, for the sandbox's regex rules."""
-        found: list[str] = []
-        for pattern in self._path_patterns:
-            base = pattern.removesuffix("/**")
-            if pattern.startswith("/") and base and not _WILDCARDS.intersection(base):
-                continue
-            if pattern not in found:
-                found.append(pattern)
-        return found
-
     def home_roots(self) -> list[Path]:
-        """The absolute folders and files the path patterns name (a trailing `/**` removed), for the sandbox.
+        """The absolute folders and files the path patterns name (a trailing `/**` removed).
         A pattern with other wildcards is left to the name rules."""
         roots: list[Path] = []
         for pattern in self._path_patterns:
-            if not pattern.startswith("/"):  # `secrets/**` has no folder: the sandbox profile must translate it
+            if not pattern.startswith("/"):  # `secrets/**` has no folder: it is matched by pattern, not by root
                 continue
             base = pattern.removesuffix("/**")
             if base and not _WILDCARDS.intersection(base):

@@ -1,4 +1,4 @@
-"""Run one hook command: sandbox-wrapped like `bash`, filtered environment, bounded output, killed on timeout."""
+"""Run one hook command: started like `bash`, filtered environment, bounded output, killed on timeout."""
 
 from __future__ import annotations
 
@@ -76,7 +76,7 @@ class ProcessRunner:
         if self._closed:
             return HookRun(None, "", "", False, "could not start: hooks are closed")
         guard = self._guard
-        argv = guard.sandbox.wrap(shell_argv(command))
+        argv = shell_argv(command)
         # The parent's environment as it is (no colour forcing: a hook's text is read by a person and a model).
         env = guard.env.filter(os.environ) | dict(env_extra)
         try:

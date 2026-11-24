@@ -1,4 +1,4 @@
-"""MfluxGenerator against a fake mflux: argv, sandbox, environment, failures, timeout and cancel (AC10, AC12, AC14)."""
+"""MfluxGenerator against a fake mflux: argv, environment, failures, timeout and cancel (AC10, AC12, AC14)."""
 
 from __future__ import annotations
 
@@ -12,7 +12,6 @@ import pytest
 from src.engine.guardrails.setup import Guardrails
 from src.engine.imagegen import ImageGenError, ImageProgress, ImageRequest, MfluxGenerator, png_size
 
-from tests.fakes import recording_sandbox
 from tests.image_fakes import fake_mflux
 
 REQUEST = ImageRequest("a red --flag; $(touch x) 'q'", 512, 256, 7, 1234)
@@ -82,14 +81,6 @@ async def test_inputs_and_extra_arguments_go_into_the_argv(tmp_path: Path, out_d
         "--output", str(out_dir / "image.png"),
         "--no-exif",
     ]  # fmt: skip
-
-
-async def test_the_command_runs_behind_the_sandbox_when_it_is_on(
-    tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
-    await _generator(tmp_path, guard).generate(REQUEST, out_dir)
-    assert log.read_text().strip() == "(version 1) (fake profile)"
 
 
 async def test_secret_looking_variables_are_not_passed(tmp_path: Path, out_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
