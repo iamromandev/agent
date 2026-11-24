@@ -103,3 +103,14 @@ def test_file_sha256_refuses_missing_symlink_and_folder(tmp_path: Path) -> None:
     assert file_sha256(tmp_path / "link") is None
     assert file_sha256(tmp_path / "dir") is None
     assert file_sha256(real) == hashlib.sha256(b"x").hexdigest()
+
+
+def test_a_failed_call_may_carry_an_error_string() -> None:
+    from src.engine.workflows.manifest import shape_ok
+
+    m = new_manifest(workflow(), "r", "f", "t", {}, [call()])
+    assert shape_ok(m)
+    m["calls"][0].update(state="failed", error="scene 2 is 0.8 s")
+    assert shape_ok(m)
+    m["calls"][0]["error"] = 5
+    assert not shape_ok(m)

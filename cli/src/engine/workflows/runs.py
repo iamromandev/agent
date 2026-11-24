@@ -68,6 +68,10 @@ class RunIndex:
         """The newest run that is not done and that `usable` accepts (a run whose folder was undone is skipped)."""
         return next((e for e in reversed(self._read()) if e.state != "done" and usable(e)), None)
 
+    def latest(self, usable: Callable[[RunEntry], bool] = lambda entry: True) -> RunEntry | None:
+        """The newest run of any state that `usable` accepts."""
+        return next((e for e in reversed(self._read()) if usable(e)), None)
+
     def find(self, run: str) -> RunEntry | None:
         """The run with this id (the newest when several workflows share it), or the only one whose id starts with it."""
         entries = self._read()

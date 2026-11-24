@@ -51,6 +51,9 @@ class PlanSummary:
     calls: tuple[PlannedCall, ...]
     counts: dict[str, int]  # calls per tool
     estimate_s: int
+    estimate_source: str = "a rough guess"  # "learned from N calls", "partly learned (k of n calls)" or the default
+    notes: tuple[str, ...] = ()  # lines for the dialog, e.g. which model step was asked again and why
+    reused: int = 0  # calls of the saved run kept as they are
 
 
 @dataclass(frozen=True)

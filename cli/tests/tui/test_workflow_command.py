@@ -228,6 +228,67 @@ async def test_the_usage_line_names_the_input_as_optional() -> None:
     from src.tui.app import WORKFLOW_USAGE
 
     assert "run <name> [input]" in WORKFLOW_USAGE
+    assert "resume [id] [--redo <step>]" in WORKFLOW_USAGE
+
+
+@pytest.mark.parametrize("command", ["resume --redo", "resume a b", "resume --redo story --redo x", "resume --bogus"])
+async def test_resume_usage_errors(make_app: AppFactory, tmp_path: Path, command: str) -> None:
+    app, _ = _make(make_app, tmp_path, [])
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, f"/workflow {command}")
+        await until(pilot, lambda: any("usage: /workflow" in n for n in _notices(app)))
+        assert not app._workflow_active
+
+
+async def _finish_reel(pilot, app) -> None:
+    await type_and_send(pilot, "/workflow run reel cats")
+    await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+    await choose(pilot, "once")
+    await until(pilot, lambda: any("finished" in n for n in _notices(app)))
+
+
+async def test_redo_shows_the_note_the_reused_calls_and_the_estimate_source_and_undo_reverts_it(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    from tests.engine.workflows.test_runner_retry import scenes_with
+
+    app, _ = _make(make_app, tmp_path, [answer(scenes(2)), answer(scenes_with(["n1", "different"]))])
+    async with app.run_test() as pilot:
+        await _finish_reel(pilot, app)
+        run_id = next(tmp_path.glob(RUN_GLOB)).name
+        await type_and_send(pilot, f"/workflow resume {run_id} --redo story")
+        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        preview = _plan_screen(app).request.preview
+        assert preview is not None
+        lines = preview.body.splitlines()
+        assert lines[0] == "1 calls: 1 speak"
+        assert "reused 4 calls" in lines
+        assert "re-asked story: asked by the user" in lines
+        assert any(line == "about 1 min (learned from 2 calls)" for line in lines)  # the first run's two speak calls
+        await choose(pilot, "once")
+        await until(pilot, lambda: not app._workflow_active)
+        await type_and_send(pilot, "/undo")
+        await until(pilot, lambda: any("Undid the last turn" in n for n in _notices(app)))
+        assert (next(tmp_path.glob(RUN_GLOB)) / "v2.wav").read_text() == "n2"  # the first run's narration is back
+        assert app.query_one(ChatInput).text == f"/workflow resume {run_id} --redo story"
+
+
+async def test_redo_flag_may_come_before_the_id(make_app: AppFactory, tmp_path: Path) -> None:
+    app, _ = _make(make_app, tmp_path, [answer(scenes(1)), answer(scenes(1))])
+    async with app.run_test() as pilot:
+        await _finish_reel(pilot, app)
+        run_id = next(tmp_path.glob(RUN_GLOB)).name
+        await type_and_send(pilot, f"/workflow resume --redo story {run_id}")
+        await until(pilot, lambda: any("nothing changed" in n for n in _notices(app)))
+
+
+async def test_redo_of_a_non_model_step_names_the_model_steps(make_app: AppFactory, tmp_path: Path) -> None:
+    app, _ = _make(make_app, tmp_path, [answer(scenes(1))])
+    async with app.run_test() as pilot:
+        await _finish_reel(pilot, app)
+        run_id = next(tmp_path.glob(RUN_GLOB)).name
+        await type_and_send(pilot, f"/workflow resume {run_id} --redo pic")
+        await until(pilot, lambda: any("no model step 'pic'" in n and "model steps: story" in n for n in _notices(app)))
 
 
 async def test_workflow_list_is_the_same_as_bare_workflow(make_app: AppFactory, tmp_path: Path) -> None:

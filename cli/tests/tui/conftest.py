@@ -35,6 +35,7 @@ from src.engine.tools.base import Tool, ToolContext
 from src.engine.web import Fetcher
 from src.engine.workflows.loader import Workflows
 from src.engine.workflows.runs import RunIndex
+from src.engine.workflows.timings import TimingStore
 from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
@@ -122,6 +123,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         images: ImagePuller | None = None,
         workflows: Workflows | None = None,
         run_index: RunIndex | None = None,
+        timings: TimingStore | None = None,
         extra_tools: list[Tool] | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
@@ -183,6 +185,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             images=images,
             workflows=workflows,
             run_index=run_index if run_index is not None else RunIndex(tmp_path.parent / f"{tmp_path.name}-runs.json"),
+            timings=timings if timings is not None else TimingStore(None),  # never the real data folder
         )
 
     return build

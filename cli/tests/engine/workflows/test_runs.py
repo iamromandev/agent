@@ -71,6 +71,27 @@ def test_latest_unfinished_is_none_when_all_done(tmp_path: Path) -> None:
     assert runs.latest_unfinished() is None
 
 
+def test_latest_is_the_newest_run_of_any_state(tmp_path: Path) -> None:
+    runs = index(tmp_path)
+    assert runs.latest() is None
+    runs.record("r1", "reel", "f1", "failed")
+    runs.record("r2", "reel", "f2", "done")
+
+    latest = runs.latest()
+    assert latest is not None and latest.run == "r2"
+
+
+def test_latest_skips_entries_the_caller_cannot_use(tmp_path: Path) -> None:
+    runs = index(tmp_path)
+    runs.record("r1", "reel", "f1", "done")
+    runs.record("r2", "reel", "f2", "done")
+
+    latest = runs.latest(lambda entry: entry.run != "r2")
+
+    assert latest is not None and latest.run == "r1"
+    assert runs.latest(lambda entry: False) is None
+
+
 def test_updating_an_old_run_makes_it_the_newest(tmp_path: Path) -> None:
     runs = index(tmp_path)
     runs.record("r1", "reel", "f1", "failed")
