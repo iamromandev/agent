@@ -551,3 +551,11 @@ def test_images_on_a_tool_message_survive_a_save_and_a_resume(root: Path, worksp
     loaded = record_and_load(root, workspace, messages)
     assert loaded.history[2].images == (image,)
     assert loaded.skipped_lines == 0
+
+
+def test_workflow_usage_records_are_summed_and_old_records_load(store: SessionStore, root: Path, workspace: Path) -> None:
+    workflow = UsageRecord("m", 30, 5, 100, False, STAMP, workflow=True).to_obj()
+    loaded = load_records(store, root, workspace, [user("q"), usage_obj(), workflow])
+    assert loaded.skipped_lines == 0
+    assert loaded.usage.calls == 2
+    assert (loaded.usage.total.workflow_calls, loaded.usage.total.workflow_tokens) == (1, 35)

@@ -21,5 +21,6 @@ BUILTINS: dict[str, str] = {
     "diff": "show what the last turn changed",
     "usage": "show the session's token totals",
     "images": "image models: status, pull, cancel",
+    "workflow": "run a workflow: list, run, resume, cancel",
     "quit": "exit",
 }

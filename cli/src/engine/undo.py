@@ -140,6 +140,11 @@ class UndoLog:
         self._current = None
         self._fresh = None
 
+    def discard(self) -> None:
+        """Drop the record that `begin` opened, leaving nothing on the stack."""
+        self._current = None
+        self._fresh = None
+
     def clear(self) -> None:
         self._stack.clear()
         self._current = None

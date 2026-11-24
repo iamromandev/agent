@@ -38,6 +38,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             commands=rt.commands,
             skills=rt.skills,
             agents=rt.agents,
+            workflows=rt.workflows,
             guard=rt.guard,
             hooks=rt.hooks,
             paste=rt.paste,

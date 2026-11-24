@@ -81,6 +81,21 @@ class ToolProgress:
     text: str
 
 
+@dataclass(frozen=True)
+class WorkflowProgress:
+    """The live status line of a workflow run (display only: never recorded). The text is escaped and redacted."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class WorkflowLine:
+    """One finished call, or a notice, of a workflow run. The text is escaped and redacted."""
+
+    level: Literal["info", "warn"]
+    text: str
+
+
 PhaseKind = Literal["waiting", "writing", "approval", "running", "hook"]
 
 
@@ -106,5 +121,7 @@ AgentEvent = (
     | TodosChanged
     | ToolProgress
     | Phase
+    | WorkflowProgress
+    | WorkflowLine
 )
 EventSink = Callable[[AgentEvent], None]

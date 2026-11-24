@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from src.engine.skills.loader import Skills
     from src.engine.terminal.manager import TerminalManager
     from src.engine.tools.media import AssembleVideoTool, SpeakTool
+    from src.engine.workflows.loader import Workflows
 
 
 @dataclass(frozen=True)
@@ -121,6 +122,7 @@ class Runtime:
     commands: Commands
     skills: Skills
     agents: Agents
+    workflows: Workflows
     catalog: ModelCatalog
     vision: VisionCheck  # shared by the app, headless mode and the agents: one answer per model
     model_notices: list[str]
@@ -233,6 +235,7 @@ def build_runtime(
     from src.engine.terminal.manager import TerminalManager
     from src.engine.tools import default_tools, read_only_tools
     from src.engine.tools.base import ToolContext
+    from src.engine.workflows.loader import load_workflows
 
     settings = get_settings()
     root = workspace.resolve()
@@ -256,6 +259,7 @@ def build_runtime(
         speech_found = find_speech() if images else None  # same for the speak tool (the `media` extra)
         ffmpeg_found = find_ffmpeg() if images else None  # and for assemble_video (the same extra)
         agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
+        workflows = load_workflows(root)  # same: read once (the app's `/workflow`; headless never uses them)
         probe_imager, probe_editor, probe_upscaler = _image_generators(image_commands, settings, Guardrails.off(root))
         permissions = permission_setup.prepare(
             root,
@@ -436,10 +440,11 @@ def build_runtime(
             commands=commands,
             skills=skills,
             agents=agents,
+            workflows=workflows,
             catalog=run_catalog,
             vision=vision,
             model_notices=model_notices,
-            warnings=(*permissions.warnings, *agents.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
+            warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,
             paste=paste,
             images=puller,

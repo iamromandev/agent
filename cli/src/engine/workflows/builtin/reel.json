@@ -1,0 +1,66 @@
+{
+  "description": "Make a short vertical video: a story, one picture and narration per scene, assembled into an MP4",
+  "input": {"description": "the topic of the reel, in a few words"},
+  "folder": "reels/{run}",
+  "steps": [
+    {
+      "id": "story",
+      "kind": "model",
+      "prompt": "Write a short story for a vertical video (9:16) about: {input}\n\nGive it a title of at most 60 characters and between 3 and 8 scenes. For each scene give:\n- narration: 1 to 3 sentences spoken aloud, at least 30 characters and at most 300 characters, plain words with no digits or abbreviations;\n- caption: a short on-screen line of at most 60 characters, with no very long words;\n- image_prompt: a vivid, concrete description of one portrait (9:16) picture for the scene, at most 500 characters. Repeat the look of the characters and the setting in every image_prompt so the pictures stay consistent;\n- motion: one of zoom-in, zoom-out, pan-left, pan-right, none.",
+      "schema": {
+        "type": "object",
+        "required": ["title", "scenes"],
+        "properties": {
+          "title": {"type": "string", "maxLength": 60},
+          "scenes": {
+            "type": "array",
+            "minItems": 3,
+            "maxItems": 8,
+            "items": {
+              "type": "object",
+              "required": ["narration", "caption", "image_prompt", "motion"],
+              "properties": {
+                "narration": {"type": "string", "minLength": 30, "maxLength": 300},
+                "caption": {"type": "string", "maxLength": 60},
+                "image_prompt": {"type": "string", "minLength": 1, "maxLength": 500},
+                "motion": {"type": "string", "enum": ["zoom-in", "zoom-out", "pan-left", "pan-right", "none"]}
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "images",
+      "kind": "each",
+      "over": "story.scenes",
+      "tool": "generate_image",
+      "args": {"prompt": "{item.image_prompt}", "path": "{folder}/scene-{index}.png", "width": 576, "height": 1024}
+    },
+    {
+      "id": "voice",
+      "kind": "each",
+      "over": "story.scenes",
+      "tool": "speak",
+      "args": {"text": "{item.narration}", "path": "{folder}/scene-{index}.wav"}
+    },
+    {
+      "id": "video",
+      "kind": "tool",
+      "tool": "assemble_video",
+      "args": {
+        "path": "{folder}/reel.mp4",
+        "crossfade": 0.5,
+        "scenes": {
+          "$map": "story.scenes",
+          "to": {
+            "image": "{folder}/scene-{index}.png",
+            "audio": "{folder}/scene-{index}.wav",
+            "motion": "{item.motion}",
+            "text": "{item.caption}"
+          }
+        }
+      }
+    }
+  ]
+}
