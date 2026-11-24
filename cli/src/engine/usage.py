@@ -23,9 +23,10 @@ class UsageRecord:
     duration_ms: int
     compaction: bool
     at: str  # ISO 8601 UTC
+    workflow: bool = False  # a model step of a workflow run (written only when true)
 
     def to_obj(self) -> dict[str, object]:
-        return {
+        obj: dict[str, object] = {
             "type": "usage",
             "model": self.model,
             "input_tokens": self.input_tokens,
@@ -34,6 +35,9 @@ class UsageRecord:
             "compaction": self.compaction,
             "at": self.at,
         }
+        if self.workflow:
+            obj["workflow"] = True
+        return obj
 
 
 @dataclass(frozen=True)
@@ -47,6 +51,8 @@ class ModelUsage:
     compactions: int = 0
     compaction_tokens: int = 0  # input + output of compaction calls
     all_duration_ms: int = 0  # every call (model time)
+    workflow_calls: int = 0  # model steps of workflow runs (also counted in `calls`)
+    workflow_tokens: int = 0  # their input + output
 
     def add(self, record: UsageRecord) -> ModelUsage:
         compaction = record.compaction
@@ -61,6 +67,8 @@ class ModelUsage:
             compactions=self.compactions + (1 if compaction else 0),
             compaction_tokens=self.compaction_tokens + (record.input_tokens + record.output_tokens if compaction else 0),
             all_duration_ms=self.all_duration_ms + record.duration_ms,
+            workflow_calls=self.workflow_calls + (1 if record.workflow else 0),
+            workflow_tokens=self.workflow_tokens + (record.input_tokens + record.output_tokens if record.workflow else 0),
         )
 
     def merged(self, other: ModelUsage) -> ModelUsage:
@@ -104,11 +112,14 @@ class _Sums:
         "out_for_rate",
         "output_tokens",
         "rate_ms",
+        "workflow_calls",
+        "workflow_tokens",
     )
 
     def __init__(self) -> None:
         self.calls = self.input_tokens = self.output_tokens = self.duration_ms = 0
         self.out_for_rate = self.rate_ms = self.compactions = self.compaction_tokens = self.all_duration_ms = 0
+        self.workflow_calls = self.workflow_tokens = 0
 
 
 class UsageAccumulator:
@@ -126,6 +137,9 @@ class UsageAccumulator:
         sums.input_tokens += record.input_tokens
         sums.output_tokens += record.output_tokens
         sums.all_duration_ms += record.duration_ms
+        if record.workflow:
+            sums.workflow_calls += 1
+            sums.workflow_tokens += tokens
         if record.compaction:
             sums.compactions += 1
             sums.compaction_tokens += tokens
@@ -157,8 +171,17 @@ def usage_from_obj(obj: Mapping[str, object]) -> UsageRecord:
         raise RecordError("bad usage record: compaction")
     if not isinstance(at, str):
         raise RecordError("bad usage record: at")
+    workflow = obj.get("workflow", False)  # absent in files from before workflows
+    if not isinstance(workflow, bool):
+        raise RecordError("bad usage record: workflow")
     return UsageRecord(
-        model, _count(obj, "input_tokens"), _count(obj, "output_tokens"), _count(obj, "duration_ms"), compaction, at
+        model,
+        _count(obj, "input_tokens"),
+        _count(obj, "output_tokens"),
+        _count(obj, "duration_ms"),
+        compaction,
+        at,
+        workflow,
     )
 
 
@@ -215,9 +238,15 @@ def summary(
     if total.compactions:
         word = "compaction" if total.compactions == 1 else "compactions"
         calls += f" ({total.compactions} {word}: {total.compaction_tokens:,} tokens)"
+    workflow = (
+        [("Workflow calls", f"{total.workflow_calls:,} ({total.workflow_tokens:,} tokens)")]
+        if total.workflow_calls
+        else []
+    )
     rate = f"{total.out_for_rate * 1000 // total.rate_ms:,}" if total.rate_ms > 0 else "—"
     lines += [
         ("Model calls", calls),
+        *workflow,
         ("Turns in context", f"{turns:,}"),
         ("Model time", format_duration(total.all_duration_ms)),
         ("Tokens/s (replies)", rate),

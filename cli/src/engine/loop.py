@@ -8,7 +8,7 @@ import dataclasses
 import os
 import platform
 import time
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
 from typing import Literal
@@ -119,6 +119,11 @@ HOOK_CONTEXT_CUT = "\n[hook context cut]"
 SUMMARY_BUDGET = 0.6  # of the window: how much older conversation one summary request may carry
 
 
+@dataclasses.dataclass
+class Operation:
+    keep: bool = True  # False: drop the undo unit when the operation ends (nothing was changed)
+
+
 class AgentBusy(RuntimeError):
     """A turn is running; wait for it (or cancel it) before starting another or resetting."""
 
@@ -212,8 +217,12 @@ class Agent:
         undo: UndoLog | None = None,
         mode_source: Callable[[], Mode] | None = None,
         vision: VisionCheck | None = None,
+        preapproved: Callable[[ToolCall], bool] | None = None,
     ) -> None:
         self.provider = provider
+        # A child that runs the calls of an approved workflow plan: the approval dialog is skipped for a call this
+        # says yes to (never for a protected-path ask or a guarded settings write).
+        self.preapproved = preapproved
         self.vision = vision  # whether the model has vision; None: never (the callers ask it before they send images)
         self.subagent = subagent  # the custom agent this child runs, "" otherwise
         self.role_prompt = role_prompt  # a custom child's own system prompt, in place of the research role
@@ -454,7 +463,9 @@ class Agent:
         else:
             self._save_failing = False
 
-    def _record_usage(self, prompt_tokens: int, completion_tokens: int, started: float, *, compaction: bool) -> None:
+    def _record_usage(
+        self, prompt_tokens: int, completion_tokens: int, started: float, *, compaction: bool, workflow: bool = False
+    ) -> None:
         """One finished model call of the main agent: add it to the totals, then save it (a failed save is a notice)."""
         if self.role != "main":
             return
@@ -465,6 +476,7 @@ class Agent:
             duration_ms=max(int((time.monotonic() - started) * 1000), 0),
             compaction=compaction,
             at=datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            workflow=workflow,
         )
         self.usage = self.usage.add(record)
         self._save(lambda: self._recorder.usage(record))
@@ -689,6 +701,63 @@ class Agent:
                 self._busy = False
                 self._inflight = None
                 self._pasted = ()
+
+    async def run_call(self, call: ToolCall, emit: EventSink) -> ToolResult:
+        """Run one tool call through every check of a model's call (deny rules, mode, arguments, hooks, protected-path
+        and approval dialogs, redaction, limits), in the current mode, and return its result. The call and the result
+        are recorded in this agent's own history; a cancel is let through after they were."""
+        finished: list[ToolResult] = []
+
+        def tap(event: AgentEvent) -> None:
+            if isinstance(event, ToolFinished) and event.call_id == call.id:
+                finished.append(event.result)
+            emit(event)
+
+        await self._run_tool_call(call, self.mode, tap)
+        return finished[-1] if finished else ToolResult(f"{call.name} gave no result", True, "failed")
+
+    @contextlib.asynccontextmanager
+    async def operation(self, prompt: str, emit: EventSink) -> AsyncGenerator[Operation]:
+        """A stretch of work that is one undo unit with its checkpoints but no model turn: `/undo` gives back `prompt`.
+        Raises `AgentBusy` while a turn or another operation runs; the agent is busy inside. The body sets
+        `keep = False` when it changed nothing, so no empty unit is left for `/undo`."""
+        if self._busy:
+            raise AgentBusy("a turn is already running")
+        self._busy = True
+        op = Operation()
+        try:
+            self._undo.begin(len(self.history), prompt)
+            await self._checkpoint(emit, end=False)
+            yield op
+        finally:
+            try:
+                await self._checkpoint(emit, end=True)
+            finally:
+                if op.keep:
+                    self._undo.finish()
+                else:
+                    self._undo.discard()
+                self._busy = False
+                self._inflight = None
+
+    async def ask_json(self, messages: list[Message]) -> str | ProviderError:
+        """One model request outside the history, no tools: the reply text, or the provider's error. Not a step of a
+        turn: its `Done` is only recorded as usage (a workflow call). A provider that breaks its contract is an error."""
+        parts: list[str] = []
+        started = time.monotonic()
+        try:
+            async with contextlib.aclosing(self.provider.stream(list(messages), [])) as events:
+                async for event in events:
+                    match event:
+                        case TextDelta(text):
+                            parts.append(text)
+                        case Done(prompt_tokens, completion_tokens):
+                            self._record_usage(prompt_tokens, completion_tokens, started, compaction=False, workflow=True)
+                        case ProviderError():
+                            return event
+        except Exception as exc:
+            return ProviderError(f"{type(exc).__name__}: {exc}")
+        return "".join(parts)
 
     async def _checkpoint(self, emit: EventSink, *, end: bool) -> None:
         """Snapshot the workspace into the turn's undo record (`end`: when the turn is over, never raising: a cancel or
@@ -1368,6 +1437,7 @@ class Agent:
                 (mode is not Mode.PLAN and self.rules.allow(call.name, call.arguments, tool.grant_arg))
                 or self.grants.covers(call.name, call.arguments, mode, tool.grant_arg)
                 or self._accepts_edit(tool, prepared, mode)
+                or (mode is not Mode.PLAN and self.preapproved is not None and self.preapproved(call))
             )
         ):
             allow_always = mode is not Mode.PLAN and not guarded

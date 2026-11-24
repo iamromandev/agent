@@ -16,6 +16,7 @@ from src.engine.text import escape_display
 
 WARN_AT = 0.8
 PHASE_TICK = 0.25  # seconds between timer redraws
+WORKFLOW_SHOWN = 100  # characters of a workflow's live line
 MAX_ACTIVITY = 80  # characters of the activity part
 RATE_AFTER = 0.5  # seconds of streaming before a tokens-per-second rate is shown
 
@@ -86,6 +87,8 @@ class StatusBar(Static):
     progress: reactive[str] = reactive("")  # a running tool's live line (generate_image); cleared when it ends
     background: reactive[str] = reactive("")  # the `/images pull` live line: not tied to a turn, so `busy` never clears it
 
+    workflow: reactive[str] = reactive("")  # the live line of a `/workflow` run; cleared when it ends
+
     line: str = ""
 
     def __init__(self) -> None:
@@ -96,6 +99,8 @@ class StatusBar(Static):
         self._first_text_at = 0.0
         self._chars = 0
         self._tokens: int | None = None
+        self._workflow_since = 0.0
+        self._workflow_on = False
 
     def on_mount(self) -> None:
         self._redraw()
@@ -124,8 +129,19 @@ class StatusBar(Static):
         self._phase, self._chars, self._tokens = None, 0, None
 
     def _tick(self) -> None:
-        if self._phase is not None and self._build_line() != self.line:
+        if (self._phase is not None or self.workflow) and self._build_line() != self.line:
             self._redraw()
+
+    def _workflow_clock(self) -> str:
+        seconds = max(0, int(self.clock() - self._workflow_since))
+        return f"{seconds // 60}:{seconds % 60:02d}"
+
+    def watch_workflow(self, text: str) -> None:
+        """The run's clock starts with its first line and stops with the last."""
+        if text and not self._workflow_on:
+            self._workflow_since = self.clock()
+        self._workflow_on = bool(text)
+        self._redraw()
 
     def _phase_text(self, phase: Phase) -> str:
         now = self.clock()
@@ -151,6 +167,8 @@ class StatusBar(Static):
             parts.append(self._phase_text(self._phase))
         elif self.busy:
             parts.append("● working")
+        if self.workflow:
+            parts.append(f"◐ {self.workflow[:WORKFLOW_SHOWN]} · {self._workflow_clock()}")
         if self.background:
             parts.append(f"◐ images: {self.background[:80]}")
         if self.error:

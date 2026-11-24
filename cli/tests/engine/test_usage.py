@@ -56,3 +56,37 @@ def test_unknown_counts_when_all_zero():
 )
 def test_format_duration(ms, text):
     assert format_duration(ms) == text
+
+
+# --- workflow calls ---------------------------------------------------------------------------
+
+
+def wf_rec(i=40, o=10) -> UsageRecord:
+    return UsageRecord("m", i, o, 500, False, "2026-11-18T10:00:00Z", workflow=True)
+
+
+def test_workflow_flag_is_written_only_when_true():
+    assert "workflow" not in rec().to_obj()
+    assert wf_rec().to_obj()["workflow"] is True
+
+
+def test_workflow_flag_round_trips_and_defaults_to_false():
+    assert usage_from_obj(wf_rec().to_obj()).workflow is True
+    assert usage_from_obj(rec().to_obj()).workflow is False
+
+
+def test_workflow_flag_must_be_a_bool():
+    with pytest.raises(RecordError):
+        usage_from_obj({**rec().to_obj(), "workflow": 1})
+
+
+def test_totals_count_workflow_calls_and_tokens():
+    totals = UsageTotals().add(rec()).add(wf_rec()).add(wf_rec(i=1, o=1))
+    assert totals.total.workflow_calls == 2
+    assert totals.total.workflow_tokens == 52
+    assert totals.calls == 3
+
+
+def test_summary_has_a_workflow_row_only_with_workflow_calls():
+    assert "Workflow calls" not in rows(make(rec()))
+    assert rows(make(rec(), wf_rec()))["Workflow calls"] == "1 (50 tokens)"

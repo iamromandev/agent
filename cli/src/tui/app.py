@@ -42,10 +42,11 @@ from src.engine import (
     UsageUpdate,
 )
 from src.engine.agents.loader import READ_ONLY_TOOLS, Agents
-from src.engine.approval import Approver
+from src.engine.approval import ApprovalRequest, Approver, Choice
 from src.engine.commands.builtins import BUILTINS
 from src.engine.commands.loader import Commands
 from src.engine.compaction import CHARS_PER_TOKEN, turn_starts
+from src.engine.events import WorkflowLine, WorkflowProgress
 from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
 from src.engine.guardrails.paths import (
     BUILTIN_HOME,
@@ -90,9 +91,14 @@ from src.engine.session import (
 from src.engine.session.records import model_notice
 from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalError, TerminalManager
-from src.engine.text import escape, escape_display
+from src.engine.text import escape, escape_display, one_line
+from src.engine.tools.base import Preview
 from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
 from src.engine.usage import summary
+from src.engine.workflows.loader import Workflows
+from src.engine.workflows.model import PlanSummary, RunResult
+from src.engine.workflows.runner import WorkflowRunner
+from src.engine.workflows.runs import RunIndex
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.hints import MIN_ROWS, hint_text
@@ -141,8 +147,14 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /help this help · /quit exit"
+    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
+
+WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
+WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] | cancel]"
+PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
+FAILED_SHOWN = 200
+PLAN_LINES = 40 # calls listed in the plan dialog; the counts above them cover the rest
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
 
@@ -191,8 +203,13 @@ class AgentApp(App[None]):
         launch_notices: Sequence[str] = (),
         paste: PasteFolder | None = None,
         images: ImagePuller | None = None,
+        workflows: Workflows | None = None,
+        run_index: RunIndex | None = None,
     ) -> None:
         super().__init__()
+        self.workflows = workflows if workflows is not None else Workflows()
+        self._run_index = run_index
+        self._workflow_active = False  # a `/workflow` run (or resume) is going: it holds the turn claim
         self.images = images  # `/images`: the models' state and the background warm-up (None: no image tools in this run)
         self._on_close = on_close
         self.terminals = terminals
@@ -1062,7 +1079,7 @@ class AgentApp(App[None]):
 
     def _queueing(self) -> bool:
         """A message sent now waits for the running turn, `/init` or `/compact` (not for an undo or a session load)."""
-        return self._turn_active and not self._undoing and not self._switching
+        return self._turn_active and not self._undoing and not self._switching and not self._workflow_active
 
     def _show_queue(self) -> None:
         with contextlib.suppress(NoMatches):  # gone when the app is shutting down
@@ -1071,6 +1088,10 @@ class AgentApp(App[None]):
     def _end_turn(self) -> None:
         """Every turn and compaction ends here: a `done` end sends the queue as one turn, any other puts it back."""
         self._turn_active = False
+        if self._workflow_active:
+            self._workflow_active = False
+            with contextlib.suppress(NoMatches):
+                self.query_one(StatusBar).workflow = ""
         self._refresh_hints()
         done = self._job_status == "done" and not self._interrupted
         self._job_status = None
@@ -1112,6 +1133,9 @@ class AgentApp(App[None]):
         if not (self._turn_active or self._switching):
             return False
         self._restore_draft(text)  # not accepted: the message stays in the box
+        if self._workflow_active:
+            await self.query_one(Transcript).add_notice("warn", WORKFLOW_RUNNING)
+            return True
         hint = "press Esc to interrupt" if self._turn_active else "a session is loading"
         await self.query_one(Transcript).add_notice("warn", f"busy — {hint}")
         return True
@@ -1228,6 +1252,8 @@ class AgentApp(App[None]):
                 await self._usage_command(rest)
             case "/images":
                 await self._images_command(rest)
+            case "/workflow":
+                await self._workflow_command(rest)
             case "/model":
                 if not rest.strip():
                     if self._turn_active or self._switching:
@@ -1354,6 +1380,144 @@ class AgentApp(App[None]):
         ]
         return f"{HELP}\nCustom commands:\n" + "\n".join(lines)
 
+    # workflows
+
+    def _workflow_runner(self) -> WorkflowRunner:
+        if self._run_index is None:
+            self._run_index = RunIndex.for_workspace(self.workspace)
+        return WorkflowRunner(self.agent, self.agent.all_tools, self.agent.ctx, self.agent.rules, self._run_index)
+
+    def _workflow_listing(self) -> str:
+        lines = [
+            f"{escape(w.name)} ({w.source}): {escape_display(' '.join(w.description.split()))}"
+            + (f" — input: {escape_display(' '.join(w.input_help.split()))}" if w.input_help else "")
+            for _, w in sorted(self.workflows.items.items())
+        ]
+        lines.extend(self.workflows.warnings)
+        return "\n".join(lines) if lines else "No workflows."
+
+    async def _workflow_command(self, rest: str) -> None:
+        """`/workflow` lists; `run <name> <input>`, `resume [id]` start a worker in the turn group; `cancel` stops it."""
+        transcript = self.query_one(Transcript)
+        words = rest.split(maxsplit=2)
+        sub = words[0] if words else ""
+        if not words or (sub == "list" and len(words) == 1):
+            await transcript.add_notice("info", self._workflow_listing())
+            return
+        if sub == "cancel" and len(words) == 1:
+            if self._workflow_active:
+                self.interrupt_turn()
+            else:
+                await transcript.add_notice("info", "no workflow is running")
+            return
+        valid = (sub == "run" and len(words) in (2, 3)) or (sub == "resume" and len(words) <= 2)
+        if not valid:
+            await transcript.add_notice("warn", WORKFLOW_USAGE)
+            return
+        if self._workflow_active:
+            await transcript.add_notice("warn", WORKFLOW_RUNNING)
+            return
+        if self._turn_active or self._switching:
+            await transcript.add_notice("warn", self._busy_text("/workflow"))
+            return
+        if self.agent.mode is Mode.PLAN:
+            await transcript.add_notice("warn", "workflows need build or edits mode — press Tab to switch")
+            return
+        if self.images is not None and self.images.busy:
+            await transcript.add_notice("warn", "an image pull is running (/images cancel stops it)")
+            return
+        runner = self._workflow_runner()
+        if sub == "run":
+            wf = self.workflows.items.get(words[1])
+            if wf is None:
+                await transcript.add_notice("warn", f"no workflow named '{escape_display(words[1])}' (/workflow lists them)")
+                return
+            text = words[2] if len(words) == 3 else ""
+
+            def action(emit: EventSink) -> Awaitable[RunResult]:
+                return runner.run(wf, text, emit, self._approve_plan)
+        else:
+            run_id = words[1] if len(words) == 2 else None
+
+            def action(emit: EventSink) -> Awaitable[RunResult]:
+                return runner.resume(self.workflows.items.get, run_id, emit, self._approve_plan)
+
+        self._turn_active = True
+        self._workflow_active = True
+        self._job_status = None
+        self._interrupted = False
+        self._cancel_diff()
+        self._turn_entered = False
+        self.query_one(StatusBar).busy = True
+        self._refresh_hints()
+        self.run_worker(functools.partial(self._workflow, action, runner), group="turn", exit_on_error=False)
+
+    async def _workflow(self, action: Callable[[EventSink], Awaitable[RunResult]], runner: WorkflowRunner) -> None:
+        """The worker of a run: events reach the widgets in order, the outcome is one last line."""
+        self._turn_entered = True
+        try:
+
+            async def work(emit: EventSink) -> None:
+                try:
+                    result = await action(emit)
+                except asyncio.CancelledError:
+                    if runner.saved:
+                        emit(WorkflowLine("warn", "workflow interrupted (/workflow resume continues a saved run)"))
+                    else:
+                        emit(WorkflowLine("warn", "workflow cancelled; nothing was saved"))
+                    raise
+                except Exception as exc:
+                    try:
+                        text = self.guard.redactor.redact(str(exc))[0]
+                    except Exception:
+                        text = ""
+                    emit(Notice("error", f"workflow failed: {one_line(text, FAILED_SHOWN)}"))
+                    return
+                emit(WorkflowLine("info" if result.ok else "warn", result.line))
+
+            await self._run_with_events(work)
+        finally:
+            self._end_turn()
+
+    async def _approve_plan(self, plan: PlanSummary) -> bool:
+        """The one approval of a run: the plan as a content preview; Allow once or Deny, never Always."""
+        body = self._plan_text(plan)
+        title = self._plan_title(plan.workflow, plan.folder)
+        request = ApprovalRequest("workflow", title, Preview("content", title, body), allow_always=False)
+        decision = await self.agent.approver.ask(request)
+        return decision.choice is Choice.ONCE
+
+    @staticmethod
+    def _plan_title(workflow: str, folder: str) -> str:
+        return f"workflow {escape_display(workflow)} → {escape_display(folder)}"
+
+    def _plan_text(self, plan: PlanSummary) -> str:
+        counts = ", ".join(f"{n} {escape_display(tool)}" for tool, n in plan.counts.items())
+        minutes = max(1, round(plan.estimate_s / 60))
+        lines = [f"{len(plan.calls)} calls: {counts}", f"about {minutes} min", f"files go to {escape_display(plan.folder)}", ""]
+        grant = {tool.name: tool.grant_arg for tool in self.agent.all_tools()}
+        for call in plan.calls[:PLAN_LINES]:
+            path = call.args.get("path")
+            key = next(
+                (
+                    call.args[name]
+                    for name in (grant.get(call.tool), "prompt", "text")
+                    if name and name != "path" and isinstance(call.args.get(name), str)
+                ),
+                None,
+            )
+            line = f"{escape_display(call.key)}  {escape_display(call.tool)}  {escape_display(str(path)) if path else ''}"
+            if key is not None:
+                line += f"  {one_line(key, PLAN_ARG_SHOWN)}"
+            lines.append(line)
+        if len(plan.calls) > PLAN_LINES:
+            lines.append(f"and {len(plan.calls) - PLAN_LINES} more calls")
+        text = "\n".join(lines)
+        try:
+            return self.guard.redactor.redact(text)[0]
+        except Exception:
+            return "the plan could not be shown (redaction failed)"
+
     async def _usage_command(self, rest: str) -> None:
         """Open the totals now: they are in memory, so there is nothing to wait for and a running turn is no obstacle."""
         if rest.strip():
@@ -1397,6 +1561,9 @@ class AgentApp(App[None]):
         roles = choices.get(words[1] if len(words) == 2 else "") if words[0] == "pull" and len(words) <= 2 else None
         if roles is None:
             await transcript.add_notice("warn", "usage: /images [pull [gen|edit|upscale] | cancel]")
+            return
+        if self._workflow_active:
+            await transcript.add_notice("warn", "a workflow is running: /images pull waits until it ends (/images and /images cancel still work)")
             return
         if images.busy:
             await transcript.add_notice("warn", "an image pull is already running")
@@ -1684,6 +1851,10 @@ class AgentApp(App[None]):
                 if (entry := transcript.tool(call_id)) is not None:
                     await entry.finish(result, preview, applied)
             case Notice(level, text):
+                await transcript.add_notice(level, text)
+            case WorkflowProgress(text):
+                status.workflow = text
+            case WorkflowLine(level, text):
                 await transcript.add_notice(level, text)
             case TaskProgress(call_id, inner):
                 # The child's usage and compaction are not the parent's: the status bar keeps the parent's context.

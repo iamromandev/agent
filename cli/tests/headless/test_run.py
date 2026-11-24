@@ -449,6 +449,16 @@ def test_a_builtin_command_prompt_such_as_agents_is_exit_2(ws: Path, capsys: pyt
     assert provider.requests == []
 
 
+def test_workflow_prompt_is_exit_2_like_other_builtins(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    provider = ScriptedProvider([say("x")])
+
+    code = go(ws, provider, prompt="/workflow")
+
+    assert code == EXIT_USAGE
+    assert "/workflow" in capsys.readouterr().err
+    assert provider.requests == []
+
+
 def test_images_prompt_is_exit_2_like_other_builtins(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
     provider = ScriptedProvider([say("x")])
 

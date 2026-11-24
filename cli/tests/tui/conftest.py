@@ -31,8 +31,10 @@ from src.engine.session import (
 from src.engine.skills.loader import Skills
 from src.engine.terminal.manager import TerminalManager
 from src.engine.tools import default_tools, read_only_tools
-from src.engine.tools.base import ToolContext
+from src.engine.tools.base import Tool, ToolContext
 from src.engine.web import Fetcher
+from src.engine.workflows.loader import Workflows
+from src.engine.workflows.runs import RunIndex
 from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
@@ -118,6 +120,9 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         imager: MfluxGenerator | None = None,
         editor: MfluxGenerator | None = None,
         images: ImagePuller | None = None,
+        workflows: Workflows | None = None,
+        run_index: RunIndex | None = None,
+        extra_tools: list[Tool] | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -144,7 +149,9 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 recorder=new_recorder(),
                 compact_at=compact_at,
                 compact_keep_turns=compact_keep_turns,
-                extra_tools=mcp.tools if mcp is not None else None,
+                extra_tools=(lambda: [*(mcp.tools() if mcp is not None else []), *(extra_tools or [])])
+                if mcp is not None or extra_tools
+                else None,
                 task_tools=read_only_tools(task_fetcher) if task else None,
                 agents=agents,
                 rules=permissions,
@@ -174,6 +181,8 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             window_cap=window_cap,
             launch_notices=launch_notices,
             images=images,
+            workflows=workflows,
+            run_index=run_index if run_index is not None else RunIndex(tmp_path.parent / f"{tmp_path.name}-runs.json"),
         )
 
     return build
