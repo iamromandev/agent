@@ -10,7 +10,6 @@ from src.engine import image_pull
 from src.engine.guardrails.setup import Guardrails
 from src.engine.image_pull import PullSizeError, download_size, free_space, parse_dry_run
 
-from tests.fakes import recording_sandbox
 from tests.image_fakes import dry_run, fake_hf
 
 SAMPLE_A = dry_run(
@@ -96,15 +95,12 @@ async def test_download_size_runs_hf_with_its_arguments(tmp_path: Path, monkeypa
     assert json.loads(dump.read_text())["argv"] == ["download", "org/name", "--dry-run"]
 
 
-async def test_download_size_goes_through_the_sandbox_and_drops_tokens(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
+async def test_download_size_drops_tokens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard = Guardrails.off(tmp_path)
     dump = tmp_path / "dump.json"
     monkeypatch.setenv("FAKE_HF_DUMP", str(dump))
     monkeypatch.setenv("HF_TOKEN", "hf_secret_value")
     await download_size(fake_hf(tmp_path, SAMPLE_A), "a/b", guard)
-    assert log.read_text().strip()
     assert "HF_TOKEN" not in json.loads(dump.read_text())["env"]
 
 

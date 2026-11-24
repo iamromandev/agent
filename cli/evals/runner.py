@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import os
-import platform
 import shutil
 import subprocess
 import sys
@@ -121,7 +120,6 @@ def _build_agent(task: Task, provider: Provider, settings: Settings, workspace: 
         permissions.global_data,
         permissions.project_data,
         os.environ,
-        platform.system(),
         home=Path(env["HOME"]),
         global_path=global_settings_path(env),
         project_path=project_settings_path(workspace),

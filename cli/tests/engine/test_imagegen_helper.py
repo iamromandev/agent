@@ -1,4 +1,4 @@
-"""run_helper: the compositing subprocess's wrap, environment, exit code, stderr, timeout and cancel (AC11, AC12)."""
+"""run_helper: the compositing subprocess's environment, exit code, stderr, timeout and cancel (AC11, AC12)."""
 
 from __future__ import annotations
 
@@ -12,8 +12,6 @@ from pathlib import Path
 import pytest
 from src.engine.guardrails.setup import Guardrails
 from src.engine.imagegen import ImageGenError, run_helper
-
-from tests.fakes import recording_sandbox
 
 
 def _gone(pid: int) -> bool:
@@ -43,17 +41,14 @@ async def test_stderr_is_capped(tmp_path: Path) -> None:
     assert len(stderr) <= 64 * 1024
 
 
-async def test_it_runs_behind_the_sandbox_with_a_filtered_environment_in_its_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
+async def test_it_runs_with_a_filtered_environment_in_its_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard = Guardrails.off(tmp_path)
     monkeypatch.setenv("HF_TOKEN", "hf_secretsecretsecret")
     dump = tmp_path / "dump.json"
     argv = _script(
         tmp_path, f"import json, os\njson.dump({{'env': dict(os.environ), 'cwd': os.getcwd()}}, open({str(dump)!r}, 'w'))\n"
     )
     await run_helper(argv, tmp_path, guard, 20)
-    assert log.read_text().strip()
     seen = json.loads(dump.read_text())
     assert "HF_TOKEN" not in seen["env"]
     assert Path(seen["cwd"]).resolve() == tmp_path.resolve()

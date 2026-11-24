@@ -5,22 +5,21 @@ from __future__ import annotations
 import dataclasses
 import functools
 import os
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from src.engine.guardrails.config import GuardConfig, read_guardrails
 from src.engine.guardrails.env import EnvFilter
+from src.engine.guardrails.folders import agent_folders
 from src.engine.guardrails.paths import ProtectedPaths, login_home
 from src.engine.guardrails.redact import Redactor, drop_partial_tail
-from src.engine.guardrails.sandbox import Sandbox, agent_folders, default_probe, make_sandbox
 
 if TYPE_CHECKING:
     from src.engine.tools.base import Preview, ToolContext, ToolResult
 
 REDACTION_FAILED = "[redaction failed: output withheld]"
-NO_SANDBOX_REASON = "off: not configured"  # `Guardrails.off`: tests and a context without a guard
 PREVIEW_WINDOW = 100_000  # what redaction reads of a diff preview: the dialog cannot show more, and the cost is bounded
 
 
@@ -28,10 +27,8 @@ PREVIEW_WINDOW = 100_000  # what redaction reads of a diff preview: the dialog c
 class Guardrails:
     paths: ProtectedPaths
     env: EnvFilter
-    sandbox: Sandbox
     redactor: Redactor
     warnings: tuple[str, ...] = ()
-    info: tuple[str, ...] = ()  # launch lines that are not warnings (the sandbox switched off in the settings)
     removed_env: tuple[str, ...] = ()  # names only, never values
     redactions: int = 0  # how many secrets were replaced in this run, for /guardrails
     own_folders: tuple[Path, ...] = ()  # the agent's config, data and sessions folders (`agent_folders`), unresolved
@@ -78,7 +75,7 @@ class Guardrails:
 
     @classmethod
     def off(cls, workspace: Path) -> Guardrails:
-        """For tests and a `ToolContext` without a guard: built-in protected paths, the filter on, no sandbox, no
+        """For tests and a `ToolContext` without a guard: built-in protected paths, the filter on, no
         scan of the workspace. Built once per home folder and process (the scan of the protected folders is not free,
         and every tool call without a guard asks for one); each caller gets its own redaction counter. The agent's
         own folders come from this process's environment at each call (cheap: no file system access)."""
@@ -97,26 +94,14 @@ def _build(
     warnings: tuple[str, ...] = (),
     workspace: Path | None = None,
     also_home: Path | None = None,
-    sandbox_for: Callable[[ProtectedPaths], tuple[Sandbox, str | None]] | None = None,
 ) -> Guardrails:
     env_filter = EnvFilter(config.keep_env)
     paths = ProtectedPaths(home, config.extra_protected, workspace, also_home=also_home)
-    info: tuple[str, ...] = ()
-    if sandbox_for is None:
-        sandbox = Sandbox(None, NO_SANDBOX_REASON, config.network, ())
-    else:
-        sandbox, warning = sandbox_for(paths)
-        if warning is not None:
-            warnings = (*warnings, *warning.split("\n"))
-        if not config.sandbox_enabled:
-            info = (f"sandbox: {sandbox.reason}",)
     return Guardrails(
         paths,
         env_filter,
-        sandbox,
         Redactor(env_filter.secret_values(env)),
         warnings,
-        info,
         tuple(env_filter.removed(env)),
     )
 
@@ -126,8 +111,6 @@ def prepare(
     global_data: Mapping[str, object] | None,
     project_data: Mapping[str, object] | None,
     env: Mapping[str, str],
-    system: str,
-    probe: Callable[[list[str]], bool] | None = None,
     *,
     home: Path | None = None,
     global_path: Path | str = "global settings",
@@ -136,20 +119,13 @@ def prepare(
 ) -> Guardrails:
     """Build the launch's `Guardrails` from both settings files' parsed data and the agent's own environment.
 
-    `system` (`platform.system()`) and `probe` (runs the sandboxed trivial command; the real one by default) decide
-    whether the sandbox is on; `sessions` is the sessions folder, which the sandbox never lets a command write."""
+    `sessions` is the sessions folder, one of the agent's own folders that accept-edits never writes into."""
     config, warnings = read_guardrails(global_data, project_data, global_path=global_path, project_path=project_path)
     # A `home` given by the caller is used as it is; otherwise both `Path.home()` (from `$HOME`) and the account's
     # recorded home count, because `$HOME` can name any folder.
     home_folder = home if home is not None else Path.home()
-
-    def sandbox_for(paths: ProtectedPaths) -> tuple[Sandbox, str | None]:
-        return make_sandbox(
-            config, workspace, home_folder, env, system, probe or default_probe, sessions=sessions, protected=paths
-        )
-
-    guard = _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None, sandbox_for)
-    guard.own_folders = agent_folders(env, home_folder, sessions)  # the same folders the sandbox denies writes to
+    guard = _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None)
+    guard.own_folders = agent_folders(env, home_folder, sessions)
     return guard
 
 

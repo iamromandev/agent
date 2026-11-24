@@ -1,4 +1,4 @@
-"""Reading an image from the macOS clipboard into a private folder (runs outside the sandbox: it is the app's own call)."""
+"""Reading an image from the macOS clipboard into a private folder (the app's own call, not the model's)."""
 
 from __future__ import annotations
 

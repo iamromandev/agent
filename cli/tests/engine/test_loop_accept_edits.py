@@ -213,7 +213,7 @@ MIXED_CASE_CONFIG = [".agent/MCP.json", ".AGENT/settings.json", ".Agent/Settings
 @pytest.mark.parametrize("path", ["dat/agent/mcp-trust.json"])
 async def test_the_launch_guards_config_data_and_sessions_folders_ask(workspace: Path, path: str) -> None:
     env = {"XDG_CONFIG_HOME": str(workspace / "cfg"), "XDG_DATA_HOME": str(workspace / "dat")}
-    guard = prepare_guardrails(workspace, None, None, env, "Linux", home=workspace, sessions=workspace / "sess")
+    guard = prepare_guardrails(workspace, None, None, env, home=workspace, sessions=workspace / "sess")
     ctx = ToolContext(workspace, 5.0, guard=guard)
     agent, _, approver = _agent(ctx, [_call("c1", "write", path=path, content="x\n"), _done()], [DENY])
 
@@ -288,7 +288,7 @@ FIRMLINK = "/System/Volumes/Data"
 # Review: a hard link in the workspace is the same file as its other names, which may be in an asking folder.
 def _data_guard_ctx(workspace: Path, tmp_path: Path) -> tuple[ToolContext, Path]:
     env = {"XDG_CONFIG_HOME": str(tmp_path / "cfg"), "XDG_DATA_HOME": str(tmp_path / "dat")}
-    guard = prepare_guardrails(workspace, None, None, env, "Linux", home=tmp_path / "home")
+    guard = prepare_guardrails(workspace, None, None, env, home=tmp_path / "home")
     trust = tmp_path / "dat" / "agent" / "permission-trust.json"
     trust.parent.mkdir(parents=True)
     trust.write_text("{}\n")

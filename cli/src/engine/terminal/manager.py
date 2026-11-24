@@ -264,7 +264,7 @@ class TerminalManager:
             raise TerminalError(f"workspace {self._workspace} is not a folder")
         loop = asyncio.get_running_loop()  # before the spawn: without a loop no child or pty may be left behind
         shell = _shell()
-        argv = self._guard.sandbox.wrap([shell, "-i"] if command is None else [shell, "-c", command])
+        argv = [shell, "-i"] if command is None else [shell, "-c", command]
         env = {k: v for k, v in self._guard.env.filter(child_environment()).items() if k not in ("COLUMNS", "LINES")}
         env["TERM"] = "xterm-256color"
         try:

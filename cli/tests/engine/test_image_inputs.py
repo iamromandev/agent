@@ -224,7 +224,7 @@ def _guarded(workspace: Path, tmp_path: Path) -> ToolContext:
     """A context with a real guard, built after the files exist so the workspace scan records their identity."""
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    guard = prepare(workspace, None, None, {}, "Linux", home=home)
+    guard = prepare(workspace, None, None, {}, home=home)
     return ToolContext(workspace=workspace, bash_timeout=5.0, guard=guard)
 
 

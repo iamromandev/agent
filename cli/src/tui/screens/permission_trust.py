@@ -75,7 +75,7 @@ class PermissionTrustScreen(ModalScreen[bool]):
             if self.rules:
                 yield Label(Text("Matching calls will run without asking you. Tab scrolls the list."))
             if self.hooks:
-                yield Label(Text("Hooks run in this folder with the sandbox of bash, and can refuse your tool calls. Tab scrolls the list."))
+                yield Label(Text("Hooks run in this folder like bash, and can refuse your tool calls. Tab scrolls the list."))
             # "Don't trust" comes first and is highlighted from the start: a stray Enter must never allow a call.
             what = " and ".join(name for name, items in (("rules", self.rules), ("hooks", self.hooks)) if items)
             choices = OptionList(Option("Don't trust (keep them off)", id="decline"), Option(f"Trust these {what}", id="trust"))

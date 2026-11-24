@@ -13,7 +13,14 @@ from src.engine.tools.base import Preview, ToolResult
 def make(tmp_path: Path, global_data: dict | None = None, project_data: dict | None = None, env: dict | None = None) -> Guardrails:
     home = tmp_path / "home"
     home.mkdir(exist_ok=True)
-    return prepare(tmp_path / "ws", global_data, project_data, env or {}, "Linux", home=home)  # no sandbox: one platform
+    return prepare(tmp_path / "ws", global_data, project_data, env or {}, home=home)
+
+
+def test_prepare_has_no_sandbox_and_only_the_removed_key_warning(tmp_path: Path) -> None:
+    guard = make(tmp_path, {"guardrails": {"sandbox": {"enabled": True}}})
+
+    assert guard.warnings == ("global settings: guardrails.sandbox is no longer supported and is ignored",)
+    assert not hasattr(guard, "sandbox") and not hasattr(guard, "info")
 
 
 def test_redact_result_replaces_the_output_drops_the_colour_copy_and_counts_the_output_only(tmp_path: Path) -> None:

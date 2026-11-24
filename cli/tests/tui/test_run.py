@@ -183,7 +183,7 @@ def test_run_builds_one_guard_from_both_settings_files_and_shares_it(
     assert "KEPT_TOKEN" not in guard.removed_env
     assert guard.paths.extra_count == 2
     (warning,) = [w for w in app._permission_warnings if "guardrails" in w]
-    assert "guardrails.sandbox.enabled can only be set in the global settings" in warning
+    assert "guardrails.sandbox is no longer supported and is ignored" in warning
     assert "ghp_agentsecret1234" not in " ".join(app._permission_warnings)
 
 

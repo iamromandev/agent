@@ -287,7 +287,7 @@ class SdkConnector:
                 os.killpg(pid, signal.SIGKILL)
 
     async def connect(self, config: ServerConfig, cwd: Path) -> McpConnection:
-        argv = self._guard.sandbox.wrap([config.command, *config.args])
+        argv = [config.command, *config.args]
         params = StdioServerParameters(
             command=argv[0],
             args=argv[1:],

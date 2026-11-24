@@ -1,6 +1,6 @@
 """Frame and caption helper for assemble_video. A script, run as `python -I media_helper.py ...`; never imported.
 
-It runs in its own process (sandboxed, filtered environment) because it decodes untrusted images with Pillow, which the
+It runs in its own process (filtered environment) because it decodes untrusted images with Pillow, which the
 agent never imports, and it is the only place caption text is drawn: ffmpeg reads only the PNGs written here, so no
 text ever reaches a filter string. Two steps:
 

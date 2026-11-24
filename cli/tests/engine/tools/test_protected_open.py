@@ -24,7 +24,7 @@ def home(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def gctx(workspace: Path, home: Path) -> ToolContext:
-    return ToolContext(workspace, 5.0, guard=prepare(workspace, None, None, {}, "Linux", home=home))
+    return ToolContext(workspace, 5.0, guard=prepare(workspace, None, None, {}, home=home))
 
 
 @pytest.fixture

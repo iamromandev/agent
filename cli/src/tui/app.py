@@ -148,7 +148,7 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails sandbox, protected paths and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
+    "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
 
 WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
@@ -360,7 +360,6 @@ class AgentApp(App[None]):
         if (
             self._permission_warnings
             or self._launch_notices
-            or self.guard.info
             or self.commands.warnings
             or self.skills.warnings
             or self.permissions.untrusted_allow
@@ -375,8 +374,6 @@ class AgentApp(App[None]):
             await transcript.add_notice("warn", warning)
         for line in self._launch_notices:
             await transcript.add_notice("info", line)
-        for line in self.guard.info:
-            await transcript.add_notice("info", escape(line))
         if self.mcp is not None and self.mcp.untrusted():
             await self._ask_mcp_trust()
         await self._ask_permission_trust()
@@ -569,10 +566,7 @@ class AgentApp(App[None]):
     def _guardrails_summary(self) -> str:
         """What the guardrails do in this run. Names and paths only, never a value; all of it escaped."""
         guard = self.guard
-        sandbox = guard.sandbox
-        lines = [f"Sandbox: {escape(sandbox.reason)}" + (f", network {'allowed' if sandbox.network else 'off'}" if sandbox.profile else "")]
-        if sandbox.profile:
-            lines.append("Writable: " + ", ".join(escape(str(path)) for path in sandbox.writable))
+        lines: list[str] = []
         # `.env` and `.env.*` are shown as one `.env*` (matching is unchanged: the template files stay unprotected)
         names = [".env*" if name == ".env" else name for name in BUILTIN_NAMES if name != ".env.*"]
         builtin = [pattern.removesuffix("/**") for pattern in BUILTIN_HOME] + names

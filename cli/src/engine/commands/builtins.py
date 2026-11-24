@@ -10,7 +10,7 @@ BUILTINS: dict[str, str] = {
     "sessions": "switch session",
     "mcp": "MCP servers and their tools",
     "permissions": "saved permission rules",
-    "guardrails": "sandbox, protected paths and redaction",
+    "guardrails": "protected paths, environment filter and redaction",
     "hooks": "configured hooks",
     "skills": "loaded skills",
     "agents": "loaded subagents",

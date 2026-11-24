@@ -3,20 +3,14 @@ from __future__ import annotations
 import asyncio
 import builtins
 import contextlib
-import dataclasses
 import json
-import stat
 from collections.abc import AsyncGenerator, Callable, Mapping, Sequence
 from copy import copy
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import pytest
 from src.engine.approval import ApprovalRequest, Choice, Decision
-from src.engine.guardrails import sandbox as sandbox_module
-from src.engine.guardrails.sandbox import Sandbox
-from src.engine.guardrails.setup import Guardrails
 from src.engine.hooks.runner import HookRun
 from src.engine.mcp.config import ServerConfig
 from src.engine.mcp.contract import CallResult, ToolInfo
@@ -376,22 +370,6 @@ class FakeConnector:
         if (failure := self.failures.get(config.name)) is not None:
             raise failure
         return self.connections.setdefault(config.name, FakeConnection())
-
-
-FAKE_PROFILE = "(version 1) (fake profile)"
-
-
-def recording_sandbox(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workspace: Path | None = None) -> tuple[Guardrails, Path]:
-    """A guard whose sandbox starts every command behind a script that appends the profile it was given to a log and
-    then runs the command: the wrap is checked at a spawn site on every platform, without a real sandbox.
-    Returns the guard and the log (one profile per started command)."""
-    log = tmp_path / "sandbox.log"
-    script = tmp_path / "fake-sandbox-exec"
-    script.write_text(f'#!/bin/sh\n[ "$1" = "-p" ] || exit 97\nprintf \'%s\\n\' "$2" >> "{log}"\nshift 2\nexec "$@"\n')
-    script.chmod(script.stat().st_mode | stat.S_IXUSR)
-    monkeypatch.setattr(sandbox_module, "SANDBOX_EXEC", script)
-    guard = Guardrails.off(workspace or tmp_path)
-    return dataclasses.replace(guard, sandbox=Sandbox(FAKE_PROFILE, "on (fake)", True, ())), log
 
 
 class FakeRunner:

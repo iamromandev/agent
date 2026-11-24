@@ -59,7 +59,7 @@ def workspace(tmp_path: Path) -> Path:
 
 @pytest.fixture
 def ctx(workspace: Path, home: Path) -> ToolContext:
-    return ToolContext(workspace, 5.0, guard=prepare_guard(workspace, None, None, {}, "Linux", home=home))
+    return ToolContext(workspace, 5.0, guard=prepare_guard(workspace, None, None, {}, home=home))
 
 
 def entry(event: Event, command: str = "x", matcher: str | None = None, source: Source = "global") -> HookEntry:

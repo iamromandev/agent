@@ -1,25 +1,10 @@
-"""NFR3: what the guardrails add per command. The sandbox start-up test needs macOS."""
+"""NFR3: what redaction adds per command."""
 
 from __future__ import annotations
 
-import statistics
-import subprocess
 import time
 
 from src.engine.guardrails.redact import Redactor
-
-SANDBOX_START_LIMIT_MS = 50.0  # NFR3: added per bash command, median
-RUNS = 25
-
-
-def _median_ms(argv: list[str]) -> float:
-    samples = []
-    for _ in range(RUNS):
-        start = time.perf_counter()
-        subprocess.run(argv, stdin=subprocess.DEVNULL, capture_output=True, check=True)
-        samples.append((time.perf_counter() - start) * 1000)
-    return statistics.median(samples)
-
 
 REDACT_LIMIT_MS = 5.0  # NFR3: per 100 KB of output
 REDACT_RUNS = 7

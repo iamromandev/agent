@@ -1,6 +1,6 @@
 """Compositing helper for a masked edit_image. A script, run as `python -I composite_helper.py ...`; never imported.
 
-It runs in its own process (sandboxed, filtered environment) because it decodes untrusted images with Pillow, which the
+It runs in its own process (filtered environment) because it decodes untrusted images with Pillow, which the
 agent never imports. Two steps:
 
     prepare --source S --expect W H --feather F (--region JSON | --mask M) --out-mask mask.png

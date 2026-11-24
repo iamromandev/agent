@@ -13,7 +13,6 @@ from src.engine.guardrails.setup import Guardrails
 from src.engine.image_pull import ImagePuller, Role, free_space
 from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator
 
-from tests.fakes import recording_sandbox
 from tests.image_fakes import dry_run, fake_hf, fake_mflux
 
 HUB = "hub"
@@ -66,19 +65,17 @@ async def _pull(puller: ImagePuller, roles: tuple[Role, ...], notes: Notes) -> N
 
 
 async def test_generate_runs_the_warmup_with_the_models_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
     dump = tmp_path / "dump.json"
     monkeypatch.setenv("FAKE_MFLUX_DUMP", str(dump))
     _cache(tmp_path, "org/gen")
     notes = Notes()
-    await _pull(_puller(tmp_path, guard), ("generate",), notes)
+    await _pull(_puller(tmp_path), ("generate",), notes)
     data = json.loads(dump.read_text())
     argv = data["argv"]
     assert argv[argv.index("--model") + 1] == "org/gen"
     assert argv[argv.index("--width") + 1] == "256"
     assert argv[argv.index("--height") + 1] == "256"
     assert argv[argv.index("--steps") + 1] == "1"
-    assert log.read_text().strip()
     assert not Path(data["cwd"]).exists()
 
 
@@ -162,14 +159,14 @@ async def test_an_unexpected_size_error_pulls_anyway(tmp_path: Path, monkeypatch
     assert any("generate model ready" in t for t in notes.texts())
 
 
-async def test_the_hf_call_is_sandboxed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch)
+async def test_the_hf_dry_run_happens_before_the_warmup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     hf = fake_hf(tmp_path, dry_run([("transformer/a", "1.0G")]))
     monkeypatch.setenv("FAKE_HF_DUMP", str(tmp_path / "h.json"))
-    puller = _puller(tmp_path, guard, hf=hf, disk=lambda f: (50_000_000_000, f))
-    await _pull(puller, ("generate",), Notes())
+    puller = _puller(tmp_path, hf=hf, disk=lambda f: (50_000_000_000, f))
+    notes = Notes()
+    await _pull(puller, ("generate",), notes)
     assert (tmp_path / "h.json").exists()
-    assert len(log.read_text().strip().splitlines()) == 2  # hf and mflux
+    assert any("generate model ready" in t for t in notes.texts())
 
 
 async def test_cancel_during_the_dry_run_leaves_no_hf(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

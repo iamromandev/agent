@@ -18,7 +18,6 @@ from src.engine.tools.base import Prepared, ToolContext, ToolResult
 from src.engine.tools.image import EditImageTool
 
 from tests.engine.test_image_orientation import exif_jpeg
-from tests.fakes import recording_sandbox
 from tests.image_fakes import fake_composite, fake_mflux, png
 
 REGION = [{"shape": "rect", "x": 0, "y": 0, "w": 32, "h": 48}]
@@ -244,10 +243,10 @@ async def test_a_mask_is_staged_as_its_own_copy_and_passed_by_private_path(
     assert argv[argv.index("--feather") + 1] == "8"
 
 
-async def test_the_helper_runs_isolated_behind_the_sandbox_without_secrets(
+async def test_the_helper_runs_isolated_without_secrets(
     env: dict[str, Path], ctx: ToolContext, workspace: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    guard, log = recording_sandbox(tmp_path, monkeypatch, workspace)
+    guard = Guardrails.off(workspace)
     monkeypatch.setenv("HF_TOKEN", "hf_secretsecretsecret")
     result = await (await _prepared(_tool(env, workspace, guard), ctx, region=REGION)).execute()
     assert not result.is_error, result.output
@@ -256,7 +255,6 @@ async def test_the_helper_runs_isolated_behind_the_sandbox_without_secrets(
     for step in steps:
         assert step["flags"] == 1 and "HF_TOKEN" not in step["env"]
         assert os.path.samefile(step["exe"], sys.executable) or step["exe"].startswith(sys.prefix)
-    assert len(log.read_text().strip().splitlines()) == 3  # two helper runs and mflux, each wrapped
 
 
 @pytest.mark.parametrize(
