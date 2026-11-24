@@ -99,6 +99,7 @@ from src.engine.workflows.loader import Workflows
 from src.engine.workflows.model import PlanSummary, RunResult
 from src.engine.workflows.runner import WorkflowRunner
 from src.engine.workflows.runs import RunIndex
+from src.engine.workflows.timings import TimingStore
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.hints import MIN_ROWS, hint_text
@@ -151,9 +152,10 @@ HELP = (
 )
 
 WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
-WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] | cancel]"
+WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] [--redo <step>] | cancel]"
 PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
 FAILED_SHOWN = 200
+PLAN_NOTE_SHOWN = 200
 PLAN_LINES = 40 # calls listed in the plan dialog; the counts above them cover the rest
 
 _COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
@@ -205,10 +207,12 @@ class AgentApp(App[None]):
         images: ImagePuller | None = None,
         workflows: Workflows | None = None,
         run_index: RunIndex | None = None,
+        timings: TimingStore | None = None,
     ) -> None:
         super().__init__()
         self.workflows = workflows if workflows is not None else Workflows()
         self._run_index = run_index
+        self._timings = timings  # None: the machine's own file, made on the first workflow command
         self._workflow_active = False  # a `/workflow` run (or resume) is going: it holds the turn claim
         self.images = images  # `/images`: the models' state and the background warm-up (None: no image tools in this run)
         self._on_close = on_close
@@ -1385,7 +1389,11 @@ class AgentApp(App[None]):
     def _workflow_runner(self) -> WorkflowRunner:
         if self._run_index is None:
             self._run_index = RunIndex.for_workspace(self.workspace)
-        return WorkflowRunner(self.agent, self.agent.all_tools, self.agent.ctx, self.agent.rules, self._run_index)
+        if self._timings is None:
+            self._timings = TimingStore.default()
+        return WorkflowRunner(
+            self.agent, self.agent.all_tools, self.agent.ctx, self.agent.rules, self._run_index, timings=self._timings
+        )
 
     def _workflow_listing(self) -> str:
         lines = [
@@ -1410,7 +1418,8 @@ class AgentApp(App[None]):
             else:
                 await transcript.add_notice("info", "no workflow is running")
             return
-        valid = (sub == "run" and len(words) in (2, 3)) or (sub == "resume" and len(words) <= 2)
+        resume = _parse_resume(rest.split()[1:]) if sub == "resume" else None
+        valid = (sub == "run" and len(words) in (2, 3)) or resume is not None
         if not valid:
             await transcript.add_notice("warn", WORKFLOW_USAGE)
             return
@@ -1437,10 +1446,11 @@ class AgentApp(App[None]):
             def action(emit: EventSink) -> Awaitable[RunResult]:
                 return runner.run(wf, text, emit, self._approve_plan)
         else:
-            run_id = words[1] if len(words) == 2 else None
+            assert resume is not None
+            run_id, redo = resume
 
             def action(emit: EventSink) -> Awaitable[RunResult]:
-                return runner.resume(self.workflows.items.get, run_id, emit, self._approve_plan)
+                return runner.resume(self.workflows.items.get, run_id, emit, self._approve_plan, redo)
 
         self._turn_active = True
         self._workflow_active = True
@@ -1494,7 +1504,15 @@ class AgentApp(App[None]):
     def _plan_text(self, plan: PlanSummary) -> str:
         counts = ", ".join(f"{n} {escape_display(tool)}" for tool, n in plan.counts.items())
         minutes = max(1, round(plan.estimate_s / 60))
-        lines = [f"{len(plan.calls)} calls: {counts}", f"about {minutes} min", f"files go to {escape_display(plan.folder)}", ""]
+        lines = [f"{len(plan.calls)} calls: {counts}"]
+        if plan.reused:
+            lines.append(f"reused {plan.reused} calls")
+        lines.extend(one_line(note, PLAN_NOTE_SHOWN) for note in plan.notes)
+        lines += [
+            f"about {minutes} min ({escape_display(plan.estimate_source)})",
+            f"files go to {escape_display(plan.folder)}",
+            "",
+        ]
         grant = {tool.name: tool.grant_arg for tool in self.agent.all_tools()}
         for call in plan.calls[:PLAN_LINES]:
             path = call.args.get("path")
@@ -1887,6 +1905,26 @@ class AgentApp(App[None]):
                 await transcript.close_open_tools(turn_status.replace("_", " "))
                 if turn_status == "interrupted":
                     await transcript.add_notice("info", "interrupted", icon="⏹")
+
+
+def _parse_resume(args: list[str]) -> tuple[str | None, str | None] | None:
+    """`(run id, redo step)` of `resume [id] [--redo <step>]` (the flag before or after the id), None when malformed."""
+    run_id: str | None = None
+    redo: str | None = None
+    i = 0
+    while i < len(args):
+        word = args[i]
+        if word == "--redo":
+            if redo is not None or i + 1 >= len(args) or args[i + 1].startswith("--"):
+                return None
+            redo = args[i + 1]
+            i += 2
+        elif word.startswith("--") or run_id is not None:
+            return None
+        else:
+            run_id = word
+            i += 1
+    return run_id, redo
 
 
 def _chip_label(path: Path) -> str:

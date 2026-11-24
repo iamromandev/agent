@@ -107,6 +107,8 @@ def file_sha256(path: Path) -> str | None:
 
 
 CALL_STATES = frozenset({"pending", "done", "failed"})
+RETRYABLE = "invalid"  # the summary the tools give a refused argument: the only failure a re-ask can fix
+FALLBACK_ERROR = "the tool refused the call"  # for a manifest saved before the error was kept
 
 
 def _call_shape_ok(call: object) -> bool:
@@ -116,6 +118,7 @@ def _call_shape_ok(call: object) -> bool:
         and isinstance(call.get("args"), dict)
         and call.get("state") in CALL_STATES
         and (call.get("output_sha256") is None or isinstance(call.get("output_sha256"), str))
+        and isinstance(call.get("error", ""), str)
     )
 
 

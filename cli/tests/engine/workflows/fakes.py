@@ -33,6 +33,8 @@ class WriteFileTool(Tool):
     def __init__(self) -> None:
         self.calls: list[dict[str, Any]] = []
         self.fail_on: set[str] = set()  # paths whose call fails
+        self.invalid_on: dict[str, str] = {}  # path -> error text of an `invalid` refusal
+        self.timeout_on: set[str] = set()  # paths whose call fails with a timeout
         self.log: list[str] | None = None  # shared by several tools: "<tool>:<file name>" per call, in call order
 
     async def prepare(self, args: dict[str, Any], ctx: ToolContext) -> Prepared | ToolResult:
@@ -42,6 +44,10 @@ class WriteFileTool(Tool):
                 self.log.append(f"{self.name}:{Path(args['path']).name}")
             if ctx.progress is not None:
                 ctx.progress(ToolProgress("halfway"))
+            if args["path"] in self.invalid_on:
+                return ToolResult(self.invalid_on[args["path"]], True, "invalid")
+            if args["path"] in self.timeout_on:
+                return ToolResult("timed out after 900 s", True, "failed")
             if args.get("fail") or args["path"] in self.fail_on:
                 return ToolResult("it broke", True, "failed")
             path = resolve_path(ctx, args["path"])

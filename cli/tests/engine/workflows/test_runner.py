@@ -20,6 +20,7 @@ from src.engine.workflows.manifest import file_sha256, load, save
 from src.engine.workflows.model import PlanSummary, RunResult, Workflow
 from src.engine.workflows.runner import WorkflowRunner
 from src.engine.workflows.runs import RunIndex
+from src.engine.workflows.timings import TimingStore
 
 from tests.engine.workflows.fakes import AssembleVideo, GenerateImage, SlowTool, Speak
 from tests.fakes import Gate, MemoryRecorder, RecordingApprover, ScriptedProvider
@@ -140,6 +141,7 @@ def build(
     rules: Rules | None = None,
     extra: list[Tool] | None = None,
     skip: tuple[type[Tool], ...] = (),
+    timings: TimingStore | None = None,
 ) -> Env:
     workspace = (tmp_path / "ws").resolve()
     workspace.mkdir(exist_ok=True)
@@ -152,7 +154,7 @@ def build(
     img, voice, video = GenerateImage(), Speak(), AssembleVideo()
     tools: list[Tool] = [t for t in (img, voice, video) if not isinstance(t, skip)] + (extra or [])
     index = RunIndex(tmp_path / "data" / "runs.json")
-    runner = WorkflowRunner(agent, lambda: tools, ctx, the_rules, index, now=lambda: NOW)
+    runner = WorkflowRunner(agent, lambda: tools, ctx, the_rules, index, now=lambda: NOW, timings=timings)
     return Env(workspace, agent, provider, approver, recorder, runner, index, img, voice, video)
 
 
@@ -282,7 +284,8 @@ async def test_five_scenes_plan_eleven_calls_with_counts(tmp_path: Path) -> None
     assert (plan.workflow, plan.run, plan.folder) == ("reel", RUN, FOLDER)
     assert len(plan.calls) == 11
     assert plan.counts == {"generate_image": 5, "speak": 5, "assemble_video": 1}
-    assert plan.estimate_s == 5 * round(1024 * 1024 * 9 * 4e-7) + 5 * 10 + 60
+    assert plan.estimate_s == round(5 * 1024 * 1024 * 9 * 4.24e-5 + 5 * 4.0 + 5 * 6.5)
+    assert plan.estimate_source == "a rough guess"
 
 
 async def test_a_path_built_from_model_text_is_refused_before_the_approval(tmp_path: Path) -> None:
