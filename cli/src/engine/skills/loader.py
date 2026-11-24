@@ -37,6 +37,7 @@ class Skill:
 class Skills:
     by_name: Mapping[str, Skill]
     warnings: tuple[str, ...]  # already escaped and capped
+    held: tuple[str, ...] = ()  # global skills not loaded: the config watch holds the global config until trusted
 
     def get(self, name: str) -> Skill | None:
         return self.by_name.get(name)
@@ -135,13 +136,17 @@ def _load_dir(directory: Path, source: SkillSource, found: dict[str, Skill], war
                 warnings.append(f"{path / FILE}: {reason}")
 
 
-def load_skills(workspace: Path, env: Mapping[str, str] = os.environ, builtin: Path | None = None) -> Skills:
-    """Read the folders once. Later sources replace earlier ones by name: builtin, global, project. Problems become warnings."""
+def load_skills(
+    workspace: Path, env: Mapping[str, str] = os.environ, builtin: Path | None = None, *, hold_global: bool = False
+) -> Skills:
+    """Read the folders once. Later sources replace earlier ones by name: builtin, global, project. Problems become warnings.
+    `hold_global` (the config watch's marker): the global ones are read only to name them in `held`, and not loaded."""
     found: dict[str, Skill] = {}
     warnings: list[str] = []
+    held: dict[str, Skill] = {}
     if builtin is not None:
         _load_dir(builtin, "builtin", found, warnings)
-    _load_dir(global_skills_dir(env), "global", found, warnings)
+    _load_dir(global_skills_dir(env), "global", held if hold_global else found, [] if hold_global else warnings)
     project = project_skills_dir(workspace)
     if project.parent.is_symlink() or project.is_symlink():
         warnings.append(f"{project}: a symlink is not followed in the project folder")
@@ -150,4 +155,4 @@ def load_skills(workspace: Path, env: Mapping[str, str] = os.environ, builtin: P
     shown = [escape(w) for w in warnings]
     if len(shown) > MAX_WARNINGS:
         shown = [*shown[:MAX_WARNINGS], f"and {len(shown) - MAX_WARNINGS} more warnings"]
-    return Skills(found, tuple(shown))
+    return Skills(found, tuple(shown), tuple(sorted(held)))

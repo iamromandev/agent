@@ -31,6 +31,7 @@ from src.engine.compaction import (
     prune,
     summary_input,
 )
+from src.engine.configwatch import Cause, NullWatch, Watch
 from src.engine.events import (
     AgentEvent,
     AssistantText,
@@ -103,8 +104,10 @@ ACCEPTED_EDIT_TOOLS: frozenset[str] = frozenset({"write", "edit"})  # approved w
 # Workspace-relative names, case-folded: the config files no rule, grant or mode may approve, and the folders loaded
 # at launch without a trust prompt, which accept-edits mode leaves to the dialog too.
 AGENT_CONFIG_PARTS: frozenset[tuple[str, ...]] = frozenset({(".agent", "settings.json"), (".agent", "mcp.json")})
-AGENT_ASKING_PARTS: frozenset[tuple[str, ...]] = AGENT_CONFIG_PARTS | {
-    (".agent", "agents"),
+# Folders whose files are guarded like the config files (a dialog in every mode, no Always): agents and workflows
+# both name tools and run without a trust prompt.
+AGENT_GUARDED_FOLDERS: frozenset[tuple[str, ...]] = frozenset({(".agent", "agents"), (".agent", "workflows")})
+AGENT_ASKING_PARTS: frozenset[tuple[str, ...]] = AGENT_CONFIG_PARTS | AGENT_GUARDED_FOLDERS | {
     (".agent", "commands"),
     (".agent", "skills"),
 }
@@ -218,8 +221,11 @@ class Agent:
         mode_source: Callable[[], Mode] | None = None,
         vision: VisionCheck | None = None,
         preapproved: Callable[[ToolCall], bool] | None = None,
+        watch: Watch | None = None,
     ) -> None:
         self.provider = provider
+        # The config watch: checked around every tool call and at the end of a turn; a child shares its parent's.
+        self.watch: Watch = watch if watch is not None else NullWatch()
         # A child that runs the calls of an approved workflow plan: the approval dialog is skipped for a call this
         # says yes to (never for a protected-path ask or a guarded settings write).
         self.preapproved = preapproved
@@ -693,6 +699,8 @@ class Agent:
                 with contextlib.suppress(Exception):
                     emit(TurnEnded("error"))
         finally:
+            if self.role == "main":
+                self.watch.check(Cause.background())  # a process a command left behind, also after Esc or an error
             try:
                 await self._checkpoint(emit, end=True)
             finally:
@@ -730,6 +738,7 @@ class Agent:
             await self._checkpoint(emit, end=False)
             yield op
         finally:
+            self.watch.check(Cause.background())
             try:
                 await self._checkpoint(emit, end=True)
             finally:
@@ -849,6 +858,8 @@ class Agent:
                     break
             error = task.exception()
             result, from_checkpoints = (None, False) if error is not None else task.result()
+            if result is not None:
+                self._accept_undone(turn, result)
             del self.history[turn.start :]
             kept = {m.tool_call_id for m in self.history if m.tool_call_id}
             for call_id in cut_ids - kept:
@@ -874,6 +885,25 @@ class Agent:
         finally:
             self._busy = False
         return turn.prompt
+
+    def _accept_undone(self, turn: UndoTurn, result: UndoResult) -> None:
+        """The restore is the agent's own write: the watched files it put back or deleted (only those of the undone
+        turn's file log or checkpoint, which is all a restore touches) and the folders that went with them become the
+        watch's baseline. Any other change to a watched file is still reported."""
+        workspace = self.ctx.workspace.resolve()
+        paths: list[Path] = []
+        for kind, relative, _ in result.entries:
+            if kind not in ("restored", "deleted"):
+                continue
+            path = workspace / relative
+            paths.append(path)
+            if kind == "deleted":  # folders the restore removed above it (made by the turn)
+                paths.extend(p for p in path.parents if p.is_relative_to(workspace) and p != workspace and not os.path.lexists(p))
+        for change in turn.changes.values():
+            paths.extend(p for p in change.created_dirs if not os.path.lexists(p))
+        if watched := [p for p in paths if self.watch.watches(p)]:
+            with contextlib.suppress(Exception):
+                self.watch.accept(watched)
 
     async def _restore(self, turn: UndoTurn, emit: EventSink) -> tuple[UndoResult, bool]:
         """Restore the turn from its two checkpoints: `(result, True)`. Without a complete pair, when git fails before
@@ -1295,8 +1325,9 @@ class Agent:
             emit(Notice("warn", escape(f"could not save rule to .agent/settings.json: {exc}; allowed for this run only")))
 
     def _edits_agent_config(self, tool: Tool, call: ToolCall, target: Path | None = None) -> bool:
-        """Does a write or edit target `.agent/settings.json` or `.agent/mcp.json` of the workspace? Those files
-        grant the agent its own permissions and processes: no rule, grant or "Always" may approve a change to them.
+        """Does a write or edit target `.agent/settings.json`, `.agent/mcp.json` or a file under `.agent/agents` or
+        `.agent/workflows` of the workspace? Those files grant the agent its own permissions, processes and tools: no
+        rule, grant or "Always" may approve a change to them.
         `target` is the path the tool resolved and checked; without one the argument is resolved here. Names are
         compared case-insensitively (APFS: `.AGENT/MCP.json` is the same file), and by identity when both exist."""
         if tool.name not in ("write", "edit"):
@@ -1310,7 +1341,7 @@ class Agent:
             except InvalidPath:
                 return False
         relative = _relative_parts(target, self.ctx.workspace.resolve())
-        if relative in AGENT_CONFIG_PARTS or (relative is not None and relative[:2] == (".agent", "agents")):
+        if relative in AGENT_CONFIG_PARTS or (relative is not None and relative[:2] in AGENT_GUARDED_FOLDERS):
             return True
         if self._links_to_agent_file(target):
             return True
@@ -1321,32 +1352,38 @@ class Agent:
 
     def _links_to_agent_file(self, target: Path) -> bool:
         """Is `target` an existing file with other hard links that is the same file as one directly under
-        `.agent/agents`? Then a write to it is a write to the agent file. Bounded: that folder's own entries only,
-        links not followed."""
+        `.agent/agents` or `.agent/workflows`? Then a write to it is a write to that file. Bounded: those folders' own
+        entries only, links not followed."""
         try:
             if target.stat().st_nlink <= 1:
                 return False
-            folder = self.ctx.workspace.resolve() / ".agent" / "agents"
-            if folder.is_symlink():
-                return False
-            with os.scandir(folder) as entries:
-                for count, entry in enumerate(entries):
-                    if count >= AGENT_FILE_SCAN_LIMIT:
-                        return True  # too many to check: ask
-                    if entry.is_file(follow_symlinks=False) and target.samefile(entry.path):
-                        return True
         except FileNotFoundError:
             return False
         except OSError:
             return True  # cannot tell: ask
+        for parts in sorted(AGENT_GUARDED_FOLDERS):
+            try:
+                folder = self.ctx.workspace.resolve().joinpath(*parts)
+                if folder.is_symlink():
+                    continue
+                with os.scandir(folder) as entries:
+                    for count, entry in enumerate(entries):
+                        if count >= AGENT_FILE_SCAN_LIMIT:
+                            return True  # too many to check: ask
+                        if entry.is_file(follow_symlinks=False) and target.samefile(entry.path):
+                            return True
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return True  # cannot tell: ask
         return False
 
     def _accepts_edit(self, tool: Tool, prepared: Prepared, mode: Mode) -> bool:
         """Accept-edits mode approves a write or edit without the dialog when the path the tool resolved and checked
         (`Prepared.target`; none: ask) is in the workspace and is not under a `.git` segment, the agent config files,
-        `.agent/commands`, `.agent/skills` or the agent's own config, data and sessions folders (a workspace that holds
-        the home folder). Names are compared case-insensitively (APFS) and without a macOS `/System/Volumes/Data`
-        prefix; an existing file with more than one hard link (or one that cannot be checked) always asks. Never asked
+        `.agent/commands`, `.agent/skills`, `.agent/agents`, `.agent/workflows` or the agent's own config, data and
+        sessions folders (a workspace that holds the home folder). Names are compared case-insensitively (APFS) and
+        without a macOS `/System/Volumes/Data` prefix; an existing file with more than one hard link (or one that cannot be checked) always asks. Never asked
         for a guarded call."""
         target = prepared.target
         if mode is not Mode.EDITS or tool.name not in ACCEPTED_EDIT_TOOLS or target is None:
@@ -1359,6 +1396,7 @@ class Agent:
             workspace / ".agent" / "agents",
             workspace / ".agent" / "commands",
             workspace / ".agent" / "skills",
+            workspace / ".agent" / "workflows",
             *guard_of(self.ctx).own_folders,
         )
         for folder in folders:
@@ -1431,6 +1469,7 @@ class Agent:
         # `write`/`edit`, then the dialog. Neither rules, grants nor accept-edits mode approve anything in plan
         # mode (the last never applies there), nor a change to the agent's own settings files.
         guarded = tool.needs_approval and self._edits_agent_config(tool, call, prepared.target)
+        asked = False  # the user approved this very call in the dialog (not a rule, a grant or accept-edits)
         if tool.needs_approval and (
             guarded
             or not (
@@ -1455,6 +1494,7 @@ class Agent:
             if decision.choice not in (Choice.ONCE, Choice.ALWAYS, Choice.PROJECT):  # anything but a clear yes is a no
                 note = f" Note: {decision.note}" if decision.note else ""
                 return ToolResult(f"User denied this call.{note}", True, "denied"), False, False
+            asked = True
             self._phase(emit, "running", call.name)
             if decision.choice in (Choice.ALWAYS, Choice.PROJECT) and allow_always:
                 self.grants.add(call.name, call.arguments, tool.grant_arg)  # for this run, even if saving fails
@@ -1464,8 +1504,14 @@ class Agent:
                     await self._save_rule(tool, call, emit)
         if tool.name in UNDO_UNTRACKED:
             self._undo.note_bash()
+        self.watch.check(Cause.background())  # whatever changed while the dialog was open is not this call's
+        approved = prepared.target if asked else None  # the file a dialog-approved write/edit may change
         if not tool.runs_to_completion():
-            result = await prepared.execute()  # cancellable at once; bash kills its process group
+            result: ToolResult | None = None
+            try:
+                result = await prepared.execute()  # cancellable at once; bash kills its process group
+            finally:
+                self._watch_after(tool, call, result, approved)  # also after Esc: it may have written before it died
             return result, not result.is_error, True
         # A write or edit runs in a thread that a cancel cannot stop. Let it finish so history
         # and the UI report what happened to the file, then hand the cancel on.
@@ -1483,6 +1529,25 @@ class Agent:
         except Exception as exc:  # NFR4
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
         applied = not result.is_error
+        self._watch_after(tool, call, result, approved)
         if cancel is not None:
             raise _Landed(result, applied, cancel)
         return result, applied, True
+
+    def _watch_after(self, tool: Tool, call: ToolCall, result: ToolResult | None, approved: Path | None) -> None:
+        """The check after a call. A `write` or `edit` that worked, on a watched file the user approved in the dialog
+        for this call (`approved`, the target the tool resolved), is the agent's own write: only that file's new
+        state is accepted, and any other change is still reported (as background). Anything else (another tool, or a
+        write approved by a rule, a grant or accept-edits) is checked, and a change is blamed on the call."""
+        if (
+            call.name in ACCEPTED_EDIT_TOOLS
+            and approved is not None
+            and result is not None
+            and not result.is_error
+            and self.watch.watches(approved)
+        ):
+            self.watch.accept([approved])
+            return
+        key = resolve_key(call.name, tool.grant_arg)
+        value = call.arguments.get(key) if key else None
+        self.watch.check(Cause.tool(call.name, value if isinstance(value, str) else None))

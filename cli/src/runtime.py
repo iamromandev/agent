@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import builtins
+import contextlib
 import os
 import sys
 import tempfile
@@ -23,6 +24,8 @@ if TYPE_CHECKING:
     from src.engine.approval import Approver
     from src.engine.checkpoints.store import CheckpointStore
     from src.engine.commands.loader import Commands
+    from src.engine.configguard import ConfigGuard, HeldGlobal
+    from src.engine.configwatch import ConfigWatch
     from src.engine.guardrails.setup import Guardrails
     from src.engine.hooks.runner import ProcessRunner
     from src.engine.hooks.setup import Hooks
@@ -51,6 +54,15 @@ class StartChoice:
 
 
 NEW = StartChoice("new")
+
+
+def _last_check(watch: ConfigWatch) -> None:
+    """A check with the background cause that never raises: the end of the build, and the quit checks after every
+    child process group was stopped."""
+    from src.engine.configwatch import Cause
+
+    with contextlib.suppress(Exception):
+        watch.check(Cause.background())
 
 
 def _speaker(found: Path | None, settings: Settings, guard: Guardrails) -> SpeakTool | None:
@@ -124,6 +136,10 @@ class Runtime:
     workflows: Workflows
     catalog: ModelCatalog
     vision: VisionCheck  # shared by the app, headless mode and the agents: one answer per model
+    config_watch: ConfigWatch  # the agent's own config and trust files, checked around every command
+    config_guard: ConfigGuard  # what happens on a change; its `listeners` hear the warning text
+    global_held: bool  # the global marker was set at launch: global allow rules, hooks and servers wait for trust
+    held: HeldGlobal  # and what else it holds until the next launch: global keepEnv, commands, skills, agents, workflows
     model_notices: list[str]
     warnings: tuple[str, ...]
     close: Callable[[], Awaitable[None]]
@@ -141,6 +157,7 @@ class Runtime:
         self.mcp.kill_all()  # a server still running means `close` never ran, and its loop is gone
         if self.terminals is not None and self.terminals.names():  # none when `close` ran
             self.terminals.kill_all()
+        _last_check(self.config_watch)  # what they wrote before they died
 
     def abort(self) -> None:
         """Close the web and search clients of a launch that failed before it could be closed (no loop is running)."""
@@ -213,6 +230,8 @@ def build_runtime(
     from src.engine.agents.loader import load_agents
     from src.engine.checkpoints.setup import prepare_checkpoints
     from src.engine.commands.loader import load_commands
+    from src.engine.configguard import ConfigGuard, GlobalMarker, HeldGlobal, marker_path
+    from src.engine.configwatch import Cause, ConfigWatch, WatchedSet
     from src.engine.guardrails.setup import Guardrails
     from src.engine.guardrails.setup import prepare as prepare_guardrails
     from src.engine.hooks.runner import ProcessRunner
@@ -236,8 +255,11 @@ def build_runtime(
     from src.engine.tools.base import ToolContext
     from src.engine.workflows.loader import load_workflows
 
-    settings = get_settings()
     root = workspace.resolve()
+    # The config watch's baseline comes first, before any loader reads a config file: a change between this and the
+    # end of the build is reported by the first check. Its reaction object is bound once the rules and the hub exist.
+    config_watch = ConfigWatch(WatchedSet.for_run(root, os.environ, Path.home()))
+    settings = get_settings()
     client = OllamaClient(settings.ollama_url)
     sessions = sessions_root(settings.sessions_dir)
     store = SessionStore(sessions, root)
@@ -245,10 +267,15 @@ def build_runtime(
     search: SearxClient | None = None
     try:
         search = SearxClient(settings.search_url, settings.fetch_timeout) if settings.search_url else None
-        # Both config files are read once, here; the project's servers stay untrusted until the user says yes.
-        setup = prepare(root, global_config_path(), TrustStore(trust_store_path()))
-        # Same for the permission rules: global ones are active; the project's allow rules wait for the user's trust.
-        skills = load_skills(root, builtin=builtin_skills_dir())  # read once, like the commands
+        mcp_store = TrustStore(trust_store_path())
+        permission_store = TrustStore(trust_store_path(name="permission-trust.json"))
+        # An earlier run saw a command change the global config (the marker): until the user trusts it, its allow
+        # rules, hooks and MCP servers are off, its keepEnv is ignored and its commands, skills, agents and workflows
+        # are not loaded (the app asks; headless mode only warns). Read before any loader. Deny rules always apply.
+        marker = GlobalMarker(marker_path())
+        global_held = marker.active
+
+        skills = load_skills(root, builtin=builtin_skills_dir(), hold_global=global_held)  # read once, like the commands
         # None: no tool, no warning (not macOS arm64, or no extra); each command is found on its own
         image_commands = (
             (find_mflux(), find_mflux(command=EDIT_COMMAND), find_mflux(command=UPSCALE_COMMAND))
@@ -257,13 +284,15 @@ def build_runtime(
         )
         speech_found = find_speech() if images else None  # same for the speak tool (the `media` extra)
         ffmpeg_found = find_ffmpeg() if images else None  # and for assemble_video (the same extra)
-        agents = load_agents(root)  # same; `model:` names are checked at launch in Phase 3
-        workflows = load_workflows(root)  # same: read once (the app's `/workflow`; headless never uses them)
+        agents = load_agents(root, hold_global=global_held)  # same; `model:` names are checked at launch in Phase 3
+        workflows = load_workflows(root, hold_global=global_held)  # same: read once (the app's `/workflow` only)
         probe_imager, probe_editor, probe_upscaler = _image_generators(image_commands, settings, Guardrails.off(root))
+        # The permission rules: global ones are active; the project's allow rules wait for the user's trust. "Always
+        # here" and the trust writes are the agent's own (`own_write`).
         permissions = permission_setup.prepare(
             root,
             global_settings_path(),
-            TrustStore(trust_store_path(name="permission-trust.json")),
+            permission_store,
             # to warn about rules that never apply; the manager is only asked for its tools' names, it starts nothing
             permission_setup.tool_keys(
                 default_tools(
@@ -278,7 +307,12 @@ def build_runtime(
                     video=_video(ffmpeg_found, settings, Guardrails.off(root)),
                 )
             ),
+            own_write=config_watch.own_write,
         )
+        rules = permissions.rules
+        # Both MCP files are read once, here; the project's servers stay untrusted until the user says yes, and the
+        # trust write is refused once the rules were revoked.
+        setup = prepare(root, global_config_path(), mcp_store, config_watch.own_write, revoked=lambda: rules.revoked)
         # The model: --model, then AGENT_MODEL, then the project's `model` key (read without trust: it only picks an
         # installed model), then the default. A throwaway client, because this loop is closed before the app's starts.
         model_notices: list[str] = []
@@ -325,9 +359,12 @@ def build_runtime(
             global_path=global_settings_path(),
             project_path=project_settings_path(root),
             sessions=sessions,  # accept-edits never writes it
+            hold_keep_env=global_held,
         )
+        if global_held:
+            permissions.rules.disable_global(until_trusted=True)
         # Hooks too: both files already parsed; project hooks stay off until the same trust as the allow rules.
-        hook_runner = ProcessRunner(root, guard)
+        hook_runner = ProcessRunner(root, guard, config_watch)
         hooks = prepare_hooks(permissions, root, hook_runner)
         shadow, shadow_warnings = prepare_checkpoints(
             root, guard, guard.env.filter(os.environ), enabled=checkpoints
@@ -337,7 +374,8 @@ def build_runtime(
         ctx = ToolContext(root, settings.bash_timeout, guard=guard)
         # lives for the whole run; /new and session switches do not touch it
         manager = TerminalManager(root, guard=guard) if terminals else None
-        commands = load_commands(root, builtins)  # read once, like the settings files
+        commands = load_commands(root, builtins, hold_global=global_held)  # read once, like the settings files
+        held = HeldGlobal(guard.held_keep_env, commands.held, skills.held, agents.held, workflows.held)
         mcp = McpHub(  # nothing starts yet
             connector if connector is not None else SdkConnector(guard=guard),
             root,
@@ -345,8 +383,11 @@ def build_runtime(
             settings.mcp_timeout,
             setup.warnings,
             start_timeout=settings.mcp_start_timeout,
-            untrusted=frozenset() if trust_project_mcp else setup.untrusted,
+            untrusted=(frozenset() if trust_project_mcp else setup.untrusted)
+            | (frozenset(s.name for s in setup.servers if s.source == "global") if global_held else frozenset()),
         )
+        config_guard = ConfigGuard(root, permissions.rules, mcp, [permission_store, mcp_store], marker)
+        config_guard.bind(config_watch)  # from here a change is reacted to (one seen before is handed over)
 
         puller: ImagePuller | None = None
         if images:
@@ -389,12 +430,19 @@ def build_runtime(
                 hooks=hooks,
                 checkpoints=shadow,
                 vision=vision,
+                watch=config_watch,
             )
 
         prune_pastes(Path(tempfile.gettempdir()), Path.home() / ".cache" / "agent")  # folders of dead runs
         paste = PasteFolder(root)
+        # Every loader has read its files: a change made during the build is reacted to now, before anything runs
+        # (the first listener hears it).
+        _last_check(config_watch)
 
         async def close() -> None:
+            with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
+                config_watch.check(Cause.background())  # first: a process that outlived the last turn, before anything is stopped
+                await config_guard.settle()  # the servers the reaction stops
             if puller is not None:
                 await puller.cancel()  # first: it may be downloading, and its mflux must not outlive the run
             paste.remove()
@@ -415,7 +463,10 @@ def build_runtime(
                             if search is not None:
                                 await search.aclose()
                         finally:
-                            await client.aclose()
+                            try:
+                                await client.aclose()
+                            finally:
+                                _last_check(config_watch)  # the hooks, servers and terminals are gone now
 
         return Runtime(
             settings=settings,
@@ -441,6 +492,10 @@ def build_runtime(
             workflows=workflows,
             catalog=run_catalog,
             vision=vision,
+            config_watch=config_watch,
+            config_guard=config_guard,
+            global_held=global_held,
+            held=held,
             model_notices=model_notices,
             warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
             close=close,

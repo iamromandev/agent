@@ -17,6 +17,8 @@ from typing import BinaryIO, Literal
 from src.engine import Agent
 from src.engine.commands.builtins import BUILTINS
 from src.engine.compaction import STOP_NOTE_PREFIX
+from src.engine.configguard import held_warning
+from src.engine.configwatch import Cause
 from src.engine.events import AgentEvent, Notice, TurnEnded
 from src.engine.loop import close_recorder
 from src.engine.mcp.contract import McpConnector
@@ -139,6 +141,9 @@ def run_headless(
             catalog=catalog,
         )
         state.redact = _redactor(rt)
+        # A change the config watch sees is a warning (kept with --quiet; a `notice` in stream-json), also one seen
+        # while the runtime was built, which the guard holds until this first listener.
+        rt.config_guard.listen(lambda text: sink(Notice("warn", text)))
         model = getattr(rt.provider, "model", None)
         state.model = model if isinstance(model, str) else None
         mention_notes: list[MentionNote] = []
@@ -158,7 +163,8 @@ def run_headless(
         tools = default_tools(None, fetcher=rt.web, searcher=rt.search, skills=rt.skills)
         warnings = run_rule_warnings(allow, tool_keys(tools))
         waiting = () if opts.trust_project else _untrusted_warnings(rt)
-        for warning in (*rt.warnings, *warnings, *waiting, *rt.commands.warnings, *rt.skills.warnings):
+        held = (held_warning(rt.held),) if rt.global_held else ()  # no prompt here: only the app's dialog clears it
+        for warning in (*rt.warnings, *held, *warnings, *waiting, *rt.commands.warnings, *rt.skills.warnings):
             sink(Notice("warn", warning))
         for note in rt.model_notices:
             sink(Notice("info", note))
@@ -186,6 +192,9 @@ def run_headless(
                 for step in (rt.abort, rt.kill_all) if not started else (rt.kill_all,):
                     with contextlib.suppress(_Terminated, KeyboardInterrupt):
                         step()  # abort: the loop never ran; kill_all: only what `close` could not stop
+                # The quit check once every child process group is gone (kill_all checks too; this one is cheap).
+                with contextlib.suppress(Exception, _Terminated, KeyboardInterrupt):
+                    rt.config_watch.check(Cause.background())
             try:
                 code = _finish(state)
             except (_Terminated, KeyboardInterrupt):
@@ -242,7 +251,7 @@ def _untrusted_warnings(rt: Runtime) -> list[str]:
         lines.append(f"{len(rules)} project allow rule{'s' * (len(rules) != 1)} {hint}")
     if (entries := rt.hooks.untrusted()):
         lines.append(f"{len(entries)} project hook{'s' * (len(entries) != 1)} {hint}")
-    if (servers := rt.mcp.untrusted()):
+    if (servers := rt.mcp.untrusted("project")):  # the global ones held by the marker have their own warning
         lines.append(f"{len(servers)} project MCP server{'s' * (len(servers) != 1)} {hint}")
     return lines
 

@@ -39,6 +39,7 @@ OVER = re.compile(r"[a-z_][a-z0-9_]*(?:\.[A-Za-z0-9_]+)+")
 class Workflows:
     items: dict[str, Workflow] = field(default_factory=dict)
     warnings: list[str] = field(default_factory=list)  # already escaped and capped
+    held: tuple[str, ...] = ()  # global workflows not loaded: the config watch holds the global config until trusted
 
 
 def builtin_dir() -> Path:
@@ -217,13 +218,17 @@ def _load_dir(directory: Path, source: Source, found: dict[str, Workflow], warni
                 warnings.append(f"{path}: {reason}")
 
 
-def load_workflows(workspace: Path, env: Mapping[str, str] = os.environ, builtin: Path | None = None) -> Workflows:
+def load_workflows(
+    workspace: Path, env: Mapping[str, str] = os.environ, builtin: Path | None = None, *, hold_global: bool = False
+) -> Workflows:
     """Read the folders once. Later sources replace earlier ones by name: builtin, global, project. Problems become
-    warnings. `builtin` is the shipped folder (`builtin_dir()`) unless a test names another."""
+    warnings. `builtin` is the shipped folder (`builtin_dir()`) unless a test names another. `hold_global` (the config
+    watch's marker): the global ones are read only to name them in `held`, and not loaded."""
     found: dict[str, Workflow] = {}
     warnings: list[str] = []
+    held: dict[str, Workflow] = {}
     _load_dir(builtin if builtin is not None else builtin_dir(), "builtin", found, warnings)
-    _load_dir(global_dir(env), "global", found, warnings)
+    _load_dir(global_dir(env), "global", held if hold_global else found, [] if hold_global else warnings)
     project = project_dir(workspace)
     if project.parent.is_symlink() or project.is_symlink():
         warnings.append(f"{project}: a symlink is not followed in the project folder")
@@ -232,4 +237,4 @@ def load_workflows(workspace: Path, env: Mapping[str, str] = os.environ, builtin
     shown = [escape(w) for w in warnings]
     if len(shown) > MAX_WARNINGS:
         shown = [*shown[:MAX_WARNINGS], f"and {len(shown) - MAX_WARNINGS} more warnings"]
-    return Workflows(found, shown)
+    return Workflows(found, shown, tuple(sorted(held)))

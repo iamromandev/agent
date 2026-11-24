@@ -97,6 +97,22 @@ async def test_trusting_starts_the_servers_and_remembers_the_choice(launch: Laun
     assert prepare(launch.workspace, launch.global_path, launch.store).untrusted == frozenset()
 
 
+async def test_trusting_after_a_revoke_in_this_run_starts_nothing_and_says_why(launch: Launch) -> None:
+    launch.write_project({"db": {"command": "psql"}})
+    revoked = [False]
+    setup = prepare(launch.workspace, launch.global_path, launch.store, revoked=lambda: revoked[0])
+    launch.hub = McpHub(launch.connector, launch.workspace, setup.servers, 5.0, untrusted=setup.untrusted)
+    app = launch.make_app(mcp=launch.hub, mcp_trust=setup.remember)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _is_prompt(app))
+        revoked[0] = True  # the config watch revoked project trust while the prompt was open
+        await _answer(pilot, "trust")
+        await until(pilot, lambda: any("project trust was revoked" in n for n in _notices(app)))
+        await pilot.pause()
+        assert launch.connector.connects == []
+    assert not launch.store.holds(launch.workspace)
+
+
 async def test_after_trusting_a_relaunch_does_not_ask_and_starts_the_servers(launch: Launch) -> None:
     launch.write_project({"db": {"command": "psql"}})
     first = launch.app()

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
+from contextlib import AbstractContextManager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 
+from src.engine.configwatch import TrustRevoked
 from src.engine.mcp.config import ServerConfig, load_file, merge, project_config_path
 from src.engine.mcp.trust import TrustStore
 
@@ -18,8 +20,17 @@ class McpSetup:
     remember: Callable[[], None]  # trust the project file as it was read here; raises OSError if it cannot be saved
 
 
-def prepare(workspace: Path, global_path: Path, store: TrustStore) -> McpSetup:
-    """Read the global and the project file once. The project file's bytes are hashed as they were parsed."""
+def prepare(
+    workspace: Path,
+    global_path: Path,
+    store: TrustStore,
+    own_write: Callable[[Sequence[Path]], AbstractContextManager[None]] = lambda paths: nullcontext(),
+    *,
+    revoked: Callable[[], bool] = lambda: False,
+) -> McpSetup:
+    """Read the global and the project file once. The project file's bytes are hashed as they were parsed.
+    `own_write([store])` is entered around the trust store write, so the config watch does not take it for a child's
+    change. Once `revoked()` (the config watch revoked project trust in this run) `remember` raises `TrustRevoked`."""
     project = load_file(project_config_path(workspace), "project")
     merged = merge(load_file(global_path, "global"), project)
     raw = project.raw
@@ -30,7 +41,14 @@ def prepare(workspace: Path, global_path: Path, store: TrustStore) -> McpSetup:
         warnings.append(f"mcp: the trust store {store.path} is inside the workspace, so project servers stay untrusted")
 
     def remember() -> None:
+        if revoked():
+            raise TrustRevoked("trusting the project's MCP servers")
         if raw is not None:
-            store.trust(workspace, raw)
+            with own_write([store.path]):
+                if revoked():  # the check that opens the write saw a change
+                    raise TrustRevoked("trusting the project's MCP servers")
+                store.trust(workspace, raw)
+        if revoked():  # the check after it did: the guard already forgot the entry
+            raise TrustRevoked("trusting the project's MCP servers")
 
     return McpSetup(merged.servers, warnings, untrusted, remember)

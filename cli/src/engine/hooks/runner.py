@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from src.engine.configwatch import Cause, NullWatch, Watch
 from src.engine.guardrails.setup import Guardrails
 from src.engine.process import kill_group, shell_argv
 
@@ -31,7 +32,9 @@ class HookRun:
 
 
 class Runner(Protocol):
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun: ...
+    async def run(
+        self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""
+    ) -> HookRun: ...
 
 
 async def _read(stream: asyncio.StreamReader | None, into: bytearray) -> None:
@@ -58,9 +61,10 @@ async def _feed(proc: Process, data: bytes) -> None:
 
 
 class ProcessRunner:
-    def __init__(self, workspace: Path, guard: Guardrails) -> None:
+    def __init__(self, workspace: Path, guard: Guardrails, watch: Watch | None = None) -> None:
         self._workspace = workspace
         self._guard = guard
+        self._watch: Watch = watch if watch is not None else NullWatch()
         self._live: set[Process] = set()  # hooks whose shell has not exited yet
         self._closed = False
 
@@ -72,9 +76,20 @@ class ProcessRunner:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.killpg(proc.pid, signal.SIGKILL)
 
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
+    async def run(
+        self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""
+    ) -> HookRun:
+        """Run one hook for `event`. The config watch is checked before it (a change then is background) and after it,
+        also when it timed out or was cancelled (a change then is blamed on the hook's event)."""
         if self._closed:
             return HookRun(None, "", "", False, "could not start: hooks are closed")
+        self._watch.check(Cause.background())
+        try:
+            return await self._run(command, stdin, timeout, env_extra)
+        finally:
+            self._watch.check(Cause.hook(event or "(unknown event)"))
+
+    async def _run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
         guard = self._guard
         argv = shell_argv(command)
         # The parent's environment as it is (no colour forcing: a hook's text is read by a person and a model).

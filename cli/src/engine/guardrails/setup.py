@@ -32,6 +32,7 @@ class Guardrails:
     removed_env: tuple[str, ...] = ()  # names only, never values
     redactions: int = 0  # how many secrets were replaced in this run, for /guardrails
     own_folders: tuple[Path, ...] = ()  # the agent's config, data and sessions folders (`agent_folders`), unresolved
+    held_keep_env: tuple[str, ...] = ()  # the global keepEnv names ignored while the config watch holds the global config
 
     def redact_result(self, result: ToolResult) -> ToolResult:
         """`result` with secrets replaced in its output and its display copy.
@@ -116,16 +117,23 @@ def prepare(
     global_path: Path | str = "global settings",
     project_path: Path | str = ".agent/settings.json",
     sessions: Path | None = None,
+    hold_keep_env: bool = False,
 ) -> Guardrails:
     """Build the launch's `Guardrails` from both settings files' parsed data and the agent's own environment.
 
-    `sessions` is the sessions folder, one of the agent's own folders that accept-edits never writes into."""
+    `sessions` is the sessions folder, one of the agent's own folders that accept-edits never writes into.
+    `hold_keep_env` (the config watch's marker: the global config is held until trusted): the global `keepEnv` is
+    treated as empty, so the child environment loses everything the filter normally strips."""
     config, warnings = read_guardrails(global_data, project_data, global_path=global_path, project_path=project_path)
+    held = tuple(sorted(config.keep_env)) if hold_keep_env else ()
+    if hold_keep_env:
+        config = dataclasses.replace(config, keep_env=frozenset())
     # A `home` given by the caller is used as it is; otherwise both `Path.home()` (from `$HOME`) and the account's
     # recorded home count, because `$HOME` can name any folder.
     home_folder = home if home is not None else Path.home()
     guard = _build(config, home_folder, env, tuple(warnings), workspace, login_home() if home is None else None)
     guard.own_folders = agent_folders(env, home_folder, sessions)
+    guard.held_keep_env = held
     return guard
 
 

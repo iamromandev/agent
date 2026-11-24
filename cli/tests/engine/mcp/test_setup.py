@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Generator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from src.engine.configwatch import TrustRevoked
 from src.engine.mcp.setup import prepare
 from src.engine.mcp.trust import TrustStore
 
@@ -37,3 +40,27 @@ def test_a_store_inside_the_workspace_leaves_the_servers_untrusted_with_a_warnin
     assert any("trust store" in w and "inside the workspace" in w for w in setup.warnings)
     with pytest.raises(OSError, match="inside the workspace"):
         setup.remember()
+
+
+def test_remember_after_a_revoke_is_refused_and_writes_nothing(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    write(workspace / ".agent" / "mcp.json", {"db": {"command": "psql"}})
+    store = TrustStore(tmp_path / "data" / "trust.json")
+    revoked = [False]
+    paths: list[tuple[Path, ...]] = []
+
+    @contextmanager
+    def own_write(named: Sequence[Path]) -> Generator[None]:
+        paths.append(tuple(named))
+        revoked[0] = True  # the check that opens the write sees a change and revokes
+        yield
+
+    setup = prepare(workspace, tmp_path / "none.json", store, own_write, revoked=lambda: revoked[0])
+
+    with pytest.raises(TrustRevoked):
+        setup.remember()
+    assert paths == [(store.path,)]
+    assert not store.path.exists()
+    with pytest.raises(TrustRevoked):
+        setup.remember()  # and refused outright afterwards
+    assert len(paths) == 1

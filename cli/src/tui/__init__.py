@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 from src.runtime import NEW, StartChoice, build_runtime
@@ -43,6 +44,8 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             hooks=rt.hooks,
             paste=rt.paste,
             images=rt.images,
+            config_guard=rt.config_guard,
+            held=rt.held,
         )
     except BaseException:
         rt.abort()  # the app could not be built, so it can never close them
@@ -50,5 +53,10 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
     try:
         app.run()
     finally:
-        rt.kill_all()
+        try:
+            rt.kill_all()
+        finally:
+            # Config watch warnings the quit checks saw after the transcript was gone (already escaped).
+            for text in rt.config_guard.undelivered():
+                print(f"warning: {text}", file=sys.stderr)
     return app.return_code or 0

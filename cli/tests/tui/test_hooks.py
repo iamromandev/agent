@@ -216,7 +216,9 @@ async def test_esc_during_a_prompt_hook_kills_it_and_restores_the_prompt(launch:
         started = asyncio.Event()
         cancelled = False
 
-        async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
+        async def run(
+            self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""
+        ) -> HookRun:
             self.started.set()
             try:
                 await asyncio.Event().wait()
@@ -293,7 +295,9 @@ class SlowStart(FakeRunner):
         self.started = 0
         self.cancelled = 0
 
-    async def run(self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str]) -> HookRun:
+    async def run(
+        self, command: str, stdin: bytes, timeout: float, env_extra: Mapping[str, str], *, event: str = ""
+    ) -> HookRun:
         self.started += 1
         if self.started <= self.hang:
             try:

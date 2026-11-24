@@ -44,6 +44,7 @@ class Command:
 class Commands:
     by_name: Mapping[str, Command]
     warnings: tuple[str, ...]
+    held: tuple[str, ...] = ()  # global commands not loaded: the config watch holds the global config until trusted
 
     def get(self, name: str) -> Command | None:
         return self.by_name.get(name)
@@ -123,11 +124,15 @@ def _load_dir(
                 warnings.append(f"{path}: {reason}")
 
 
-def load_commands(workspace: Path, builtins: Collection[str], env: Mapping[str, str] = os.environ) -> Commands:
-    """Read both folders once. A project command replaces a global one; problems become warnings."""
+def load_commands(
+    workspace: Path, builtins: Collection[str], env: Mapping[str, str] = os.environ, *, hold_global: bool = False
+) -> Commands:
+    """Read both folders once. A project command replaces a global one; problems become warnings. `hold_global`
+    (the config watch's marker): the global ones are read only to name them in `held`, and not loaded."""
     found: dict[str, Command] = {}
     warnings: list[str] = []
-    _load_dir(global_commands_dir(env), "global", builtins, found, warnings)
+    held: dict[str, Command] = {}
+    _load_dir(global_commands_dir(env), "global", builtins, held if hold_global else found, [] if hold_global else warnings)
     project = project_commands_dir(workspace)
     if project.parent.is_symlink() or project.is_symlink():
         warnings.append(f"{project}: a symlink is not followed in the project folder")
@@ -136,4 +141,4 @@ def load_commands(workspace: Path, builtins: Collection[str], env: Mapping[str, 
     shown = [escape(w) for w in warnings]
     if len(shown) > MAX_WARNINGS:
         shown = [*shown[:MAX_WARNINGS], f"and {len(shown) - MAX_WARNINGS} more warnings"]
-    return Commands(found, tuple(shown))
+    return Commands(found, tuple(shown), tuple(sorted(held)))

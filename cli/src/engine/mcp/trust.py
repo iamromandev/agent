@@ -57,6 +57,23 @@ class TrustStore:
             raise OSError(f"the trust store {self.path} is inside the workspace")
         data = self._read()  # a corrupt file reads as empty, so it is overwritten here
         data[str(workspace)] = _digest(content)
+        self._write(data)
+
+    def holds(self, workspace: Path) -> bool:
+        """Does the store list `workspace` at all (whatever the digest)?"""
+        return str(workspace) in self._read()
+
+    def forget(self, workspace: Path) -> bool:
+        """Remove `workspace` from the store (the config watch revoked it). Atomic like `trust`; nothing is written
+        when there is nothing to remove. Returns whether it wrote; raises OSError if the write fails."""
+        data = self._read()
+        if str(workspace) not in data:
+            return False
+        del data[str(workspace)]
+        self._write(data)
+        return True
+
+    def _write(self, data: dict[str, str]) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp = tempfile.mkstemp(dir=self.path.parent, prefix=f".{self.path.stem}-", suffix=".tmp")  # mode 0600
         try:

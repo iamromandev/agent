@@ -568,6 +568,7 @@ class WorkflowRunner:
             role="task",
             vision=agent.vision,
             rules=self._rules,
+            watch=agent.watch,
             hooks=agent.hooks,
             subagent="workflow",
             mode_source=lambda: agent.mode,
