@@ -1,4 +1,4 @@
-"""The real image-model smoke test: `make -C cli image-eval`.
+"""The real image-model smoke test: `make cli-image-eval`.
 
 Opt-in (Apple Silicon, the `image` extra, the models in the Hugging Face cache); not part of `make test`, `make eval`
 or CI. The orchestrator (`main`) runs one worker process per case (`python -m evals.images --worker <case> ...`)
@@ -8,7 +8,7 @@ files). The pixel checks run in `pixel_compare.py` in their own processes, so no
 
 Cleanup: mflux and `hf` run in their own sessions, so killing the worker's group does not reach them. The worker
 therefore records the group id of every process it starts in a file (`_track_groups`, a wrapper around
-`asyncio.create_subprocess_exec` installed only in the worker, so `cli/src/` is untouched) and the orchestrator
+`asyncio.create_subprocess_exec` installed only in the worker, so `apps/cli/src/` is untouched) and the orchestrator
 SIGKILLs those groups whenever a worker ends abnormally, times out or is interrupted. The worker's `TMPDIR` is a
 folder inside the eval's workspace, so the `agent-image-*` folders of a killed worker go with it.
 """

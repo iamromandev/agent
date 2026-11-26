@@ -1,0 +1,46 @@
+id: "ui"
+language: "typescript"
+layer: "application"
+
+toolchains:
+  default: "system"
+
+tasks:
+  install:
+    command: "bun install"
+    options:
+      cache: false
+  dev:
+    command: "bun run web:dev"
+    options:
+      cache: false
+      interactive: true
+  build:
+    command: "bun run web:build"
+    options:
+      cache: false
+  check:
+    command: "bun run web:check"
+    options:
+      cache: false
+  test:
+    command: "bun run web:test"
+    options:
+      cache: false
+  format:
+    command: "bun run web:format"
+    options:
+      cache: false
+  format-check:
+    command: "bun run web:format.check"
+    options:
+      cache: false
+  restart:
+    command: "bun run web:restart"
+    options:
+      cache: false
+      interactive: true
+  clean:
+    command: "bun run clean"
+    options:
+      cache: false

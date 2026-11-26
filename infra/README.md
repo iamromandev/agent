@@ -18,7 +18,7 @@ what they publish.
 
 1. Apply `exateks/infra` `stack/network`, then `stack/shared`, for the environment.
 2. Fill in `hostnames` in `env/<env>.tfvars`. They are placeholders.
-3. `make init ENV=<env> BUCKET=<state bucket>`, then `make apply ENV=<env> IMAGE_TAG=unset` with
+3. From the repo root, `make infra-init ENV=<env> BUCKET=<state bucket>`, then `make infra-apply ENV=<env> IMAGE_TAG=unset` with
    `-var desired_count=0` so the service waits for an image.
 4. Put a value in each secret from `secret_arns`, if any.
 5. Build and push the image to `ecr_repository_url` with

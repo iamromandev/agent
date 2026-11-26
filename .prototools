@@ -1,0 +1,4 @@
+# Tool versions for this repo; `proto install` installs them. uv matches CI (moonrepo/setup-toolchain reads this file).
+# Python is pinned by apps/api/.python-version and apps/cli/pyproject.toml (uv installs it), not here.
+moon = "2.6.6"
+uv = "0.13.10"

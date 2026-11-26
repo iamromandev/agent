@@ -9,60 +9,61 @@ that only delegates.
 | Tool | Version | Purpose |
 |------|---------|---------|
 | Python | 3.15.0 | API and CLI runtime |
-| uv | latest | Python package manager |
+| proto | latest | Installs moon and uv at the versions in `.prototools` (`proto install`) |
+| moon | 2.6.6 | Task runner; the root `makefile` delegates to it |
+| uv | 0.13.10 | Python package manager |
 | Docker | latest | PostgreSQL database, API container, OpenTofu |
 | Bun | latest | UI package manager & runtime |
 
-## Project Structure
+## Repository structure
 
 ```
 agent/
-├── api/                # Python FastAPI backend
-│   ├── src/
-│   │   ├── core/       # base model/repo/schema/service, error + success envelopes, enums
-│   │   ├── config/     # Settings (pydantic-settings), logging
-│   │   ├── route/      # HTTP routers            ─┐
-│   │   ├── service/    # business services        │ route → service → data/repo
-│   │   ├── data/       # db, model, repo, schema, type, seed
-│   │   ├── lib/        # domain logic
-│   │   ├── deps/       # FastAPI dependencies
-│   │   ├── client/     # outbound clients
-│   │   ├── middleware/
-│   │   └── main.py     # src.main:app
-│   ├── scripts/        # migrate, lint
-│   ├── tests/          # mirrors src/
-│   ├── dockerfile
-│   ├── docker-compose.yml
-│   ├── makefile
-│   └── pyproject.toml
-├── cli/                # Python Typer CLI (`agent`) that talks to the API
-│   ├── src/            # main.py, command/, client/, config/
-│   ├── tests/
-│   ├── makefile
-│   └── pyproject.toml
-├── ui/                 # TypeScript React frontend (Bun workspace)
-│   └── apps/web/       # Vite + React Router SPA
-├── infra/              # OpenTofu (AWS ECS + RDS) in Docker
-└── docs/               # Design documents
+├── apps/
+│   ├── api/                # Python FastAPI backend
+│   │   ├── src/
+│   │   │   ├── core/       # base model/repo/schema/service, error + success envelopes, enums
+│   │   │   ├── config/     # Settings (pydantic-settings), logging
+│   │   │   ├── route/      # HTTP routers            ─┐
+│   │   │   ├── service/    # business services        │ route → service → data/repo
+│   │   │   ├── data/       # db, model, repo, schema, type, seed
+│   │   │   ├── lib/        # domain logic
+│   │   │   ├── deps/       # FastAPI dependencies
+│   │   │   ├── client/     # outbound clients
+│   │   │   ├── middleware/
+│   │   │   └── main.py     # src.main:app
+│   │   ├── scripts/        # migrate, lint
+│   │   ├── tests/          # mirrors src/
+│   │   ├── dockerfile
+│   │   ├── docker-compose.yml
+│   │   └── pyproject.toml
+│   ├── cli/                # Python Typer CLI (`agent`) that talks to the API
+│   │   ├── src/            # main.py, command/, client/, config/
+│   │   ├── tests/
+│   │   └── pyproject.toml
+│   └── ui/                 # TypeScript React frontend (Bun workspace)
+│       └── apps/web/       # Vite + React Router SPA
+├── infra/                  # OpenTofu (AWS ECS + RDS) in Docker
+├── docs/                   # Design documents
+└── makefile                # the only makefile; delegates to moon
 ```
 
 ## API
 
 ```bash
-cd api
-cp .env.example .env
-make up        # Postgres + API on http://localhost:8000; migrations run on boot
-make logs
+cp apps/api/.env.example apps/api/.env
+make api-up    # Postgres + API on http://localhost:8000; migrations run on boot
+make api-logs
 ```
 
-Postgres is published on host port **5410**. `make run` serves on the host instead (set `DB_HOST=localhost`
+Postgres is published on host port **5410**. `make api-run` serves on the host instead (set `DB_HOST=localhost`
 and `DB_PORT=5410` in `.env`). Check it with:
 
 ```bash
 curl http://localhost:8000/health/check
 ```
 
-`make check` (ruff + ty, fixes), `make check-ci` (no fixes), `make test` (pytest).
+`make api-check` (ruff + ty, fixes), `make api-check-ci` (no fixes), `make api-test` (pytest).
 
 ## CLI
 
@@ -100,10 +101,10 @@ make cli-sync
 ```
 
 ```bash
-cp cli/.env.example cli/.env
+cp apps/cli/.env.example apps/cli/.env
 ```
 
-`make cli-sync` runs `uv sync` in `cli/` (with `--extra image` on Apple Silicon, for the `generate_image` tool). The `.env` file is optional: every value has a default. `.env` is read from the folder the agent is launched in, so for other folders export the variables in `~/.zshrc` or put a `.env` there. Main settings (all in [cli/.env.example](cli/.env.example)):
+`make cli-sync` runs `uv sync` in `apps/cli/` (with `--extra image` on Apple Silicon, for the `generate_image` tool). The `.env` file is optional: every value has a default. `.env` is read from the folder the agent is launched in, so for other folders export the variables in `~/.zshrc` or put a `.env` there. Main settings (all in [apps/cli/.env.example](apps/cli/.env.example)):
 
 | Variable | Default | What it sets |
 | --- | --- | --- |
@@ -145,13 +146,13 @@ make cli-run ARGS="health check"
 make cli-run
 ```
 
-The workspace is the folder the agent runs in: `cli/` for `make cli-run` (same as `cd cli && uv run agent`). To work on another project, either install the command (step 6) or run it from that project's folder without installing:
+The workspace is the folder the agent runs in: `apps/cli/` for `make cli-run` (same as `cd apps/cli && uv run agent`). To work on another project, either install the command (step 6) or run it from that project's folder without installing:
 
 ```bash
-cd /path/to/your/project && uv run --project /path/to/agent/cli agent
+cd /path/to/your/project && uv run --project /path/to/agent/apps/cli agent
 ```
 
-Use `--project`, not `--directory`: `--project` keeps the current folder as the workspace, while `--directory` switches to `cli/`.
+Use `--project`, not `--directory`: `--project` keeps the current folder as the workspace, while `--directory` switches to `apps/cli/`.
 
 ### 6. Install `agent` on your PATH (optional)
 
@@ -163,7 +164,7 @@ make cli-install
 cd ~/projects/other-app && agent
 ```
 
-- This is an editable install of `cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. On Apple Silicon it includes the `image` extra (mflux). Rerun `make cli-install` after dependency changes in `cli/pyproject.toml` or after moving the checkout.
+- This is an editable install of `apps/cli/` as the uv tool `agent-cli`, so `git pull` is enough to upgrade. On Apple Silicon it includes the `image` extra (mflux). Rerun `make cli-install` after dependency changes in `apps/cli/pyproject.toml` or after moving the checkout.
 - `agent` not found: run `uv tool update-shell` and open a new shell. `command -v agent` shows which `agent` runs.
 - Uninstall: `make cli-uninstall`.
 
@@ -301,18 +302,18 @@ agent -p "list the TODOs" --output json < /dev/null
 | Command | What it does |
 | --- | --- |
 | `make cli-check` | `ruff check --fix` + `ty check` (fixes files) |
-| `make -C cli check-ci` | The same without fixes, as CI runs it |
+| `make cli-check-ci` | The same without fixes, as CI runs it |
 | `make cli-test` | pytest suite |
-| `uv run --directory cli pytest tests/path/test_file.py::test_name -q` | One test |
+| `uv run --directory apps/cli pytest tests/path/test_file.py::test_name -q` | One test |
 | `make cli-eval` | Real-model smoke test (needs Ollama) |
 
-`make cli-eval` runs four fixed tasks (`find`, `rename`, `rules`, `command`) headlessly, each in a throwaway copy of `cli/evals/fixtures/sample`. It prints pass counts and median steps, tokens and time, and writes `cli/.eval/<UTC timestamp>.json`. Settings: `EVAL_RUNS` (default 3), `EVAL_TASKS=find,rename`, `EVAL_TIMEOUT` (seconds, default 300), `EVAL_KEEP=1` (keep the temp folders). Without Ollama it prints a skip line and exits 0. `bash` runs with your real environment, so the tasks allow only fixed commands. It is not part of `make test` or CI.
+`make cli-eval` runs four fixed tasks (`find`, `rename`, `rules`, `command`) headlessly, each in a throwaway copy of `apps/cli/evals/fixtures/sample`. It prints pass counts and median steps, tokens and time, and writes `apps/cli/.eval/<UTC timestamp>.json`. Settings: `EVAL_RUNS` (default 3), `EVAL_TASKS=find,rename`, `EVAL_TIMEOUT` (seconds, default 300), `EVAL_KEEP=1` (keep the temp folders). Without Ollama it prints a skip line and exits 0. `bash` runs with your real environment, so the tasks allow only fixed commands. It is not part of `make test` or CI.
 
 ## UI
 
 ```bash
-bun install --cwd ui
-bun run --cwd ui web:dev   # http://localhost:3000, proxies /api/* to the API
+bun install --cwd apps/ui
+bun run --cwd apps/ui web:dev   # http://localhost:3000, proxies /api/* to the API
 ```
 
 ## Infra

@@ -1,0 +1,65 @@
+id: "cli"
+language: "python"
+layer: "application"
+
+fileGroups:
+  sources: ["src/**/*", "evals/**/*"]
+  configs: ["pyproject.toml", "ruff.toml", ".python-version"]
+
+# Apple Silicon Macs also get the `image` extra (mflux, for the generate_image tool) and the `media` extra (mlx-audio,
+# for the speak tool); elsewhere they are not installed.
+tasks:
+  # python tools (uv)
+  sync:
+    # The dependencies into apps/cli/.venv
+    script: "if [ \"$(uname -s)\" = Darwin ] && [ \"$(uname -m)\" = arm64 ]; then uv sync --extra image --extra media; else uv sync; fi"
+    options:
+      cache: false
+  check:
+    # Fixes what ruff can, so it edits sources and is never cached.
+    script: "uvx ruff check --fix && uv run ty check"
+    deps: ["sync"]
+    options:
+      cache: false
+  check-ci:
+    # Same checks without fixing anything. For CI.
+    script: "uvx ruff check && uv run ty check"
+    deps: ["sync"]
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
+  test:
+    command: "uv run pytest"
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
+  run:
+    # Arguments after -- go to agent, e.g. moon run cli:run -- health check
+    command: "uv run agent"
+    options:
+      cache: false
+      interactive: true
+  eval:
+    # Real-model smoke test (needs Ollama)
+    command: "uv run python -m evals"
+    options:
+      cache: false
+      interactive: true
+  image-eval:
+    # Real image-model smoke test (Apple Silicon + image extra)
+    command: "uv run python -m evals.images"
+    options:
+      cache: false
+      interactive: true
+
+  # the agent command on your PATH (editable, from this checkout)
+  install:
+    script: "if [ \"$(uname -s)\" = Darwin ] && [ \"$(uname -m)\" = arm64 ]; then uv tool install --editable --force '.[image,media]'; else uv tool install --editable --force .; fi"
+    options:
+      cache: false
+  uninstall:
+    script: "uv tool uninstall agent-cli || true"
+    options:
+      cache: false
+
+  # cleanup
+  clean:
+    script: "find . -name __pycache__ -type d -prune -exec rm -r {} + && rm -rf .pytest_cache .ruff_cache"
+    options:
+      cache: false
