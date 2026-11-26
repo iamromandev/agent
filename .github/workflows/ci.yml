@@ -20,7 +20,10 @@ jobs:
     name: api, cli — lint, types
     runs-on: ubuntu-latest
     steps:
+      # Full history: moon compares against the dev branch (vcs.defaultBranch) to find changed projects.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       # Installs proto and moon (moon at the .prototools version). Python comes from uv
       # (``requires-python`` / ``.python-version``). ``**/*.lock`` is gitignored,
@@ -45,7 +48,10 @@ jobs:
     name: ui — formatting, types
     runs-on: ubuntu-latest
     steps:
+      # Full history: moon compares against the dev branch (vcs.defaultBranch) to find changed projects.
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Install toolchain
         uses: moonrepo/setup-toolchain@v0
