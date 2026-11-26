@@ -9,3 +9,7 @@
 
 ### project ###
 docs/conf/*
+
+### moon ###
+.moon/cache
+.moon/docker

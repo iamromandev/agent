@@ -1,0 +1,32 @@
+id: "infra"
+layer: "configuration"
+
+# OpenTofu in Docker. Needs AWS credentials in the environment (for example from `aws sso login`).
+# ENV (default dev) picks env/<ENV>.tfvars and the state key; REGION defaults to ap-southeast-1; IMAGE_TAG to unset.
+tasks:
+  init:
+    # BUCKET=<state bucket> required: the state_bucket_name output of exateks/infra stack/bootstrap
+    script: "docker run --rm -it -v \"$PWD\":/work -w /work -e AWS_PROFILE -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -v \"$HOME/.aws\":/root/.aws:ro ghcr.io/opentofu/opentofu:1.13.1 init -reconfigure -backend-config=\"bucket=${BUCKET:?set BUCKET=<state bucket>, the state_bucket_name output of exateks/infra stack/bootstrap}\" -backend-config=\"key=${ENV:-dev}/agent.tfstate\" -backend-config=\"region=${REGION:-ap-southeast-1}\""
+    options:
+      cache: false
+      interactive: true
+  validate:
+    script: "docker run --rm -it -v \"$PWD\":/work -w /work -e AWS_PROFILE -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -v \"$HOME/.aws\":/root/.aws:ro ghcr.io/opentofu/opentofu:1.13.1 validate"
+    options:
+      cache: false
+      interactive: true
+  plan:
+    script: "docker run --rm -it -v \"$PWD\":/work -w /work -e AWS_PROFILE -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -v \"$HOME/.aws\":/root/.aws:ro ghcr.io/opentofu/opentofu:1.13.1 plan -var-file=env/${ENV:-dev}.tfvars -var image_tag=${IMAGE_TAG:-unset}"
+    options:
+      cache: false
+      interactive: true
+  apply:
+    script: "docker run --rm -it -v \"$PWD\":/work -w /work -e AWS_PROFILE -e AWS_REGION -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -v \"$HOME/.aws\":/root/.aws:ro ghcr.io/opentofu/opentofu:1.13.1 apply -var-file=env/${ENV:-dev}.tfvars -var image_tag=${IMAGE_TAG:-unset}"
+    options:
+      cache: false
+      interactive: true
+  fmt:
+    script: "docker run --rm -it -v \"$PWD\":/work -w /work ghcr.io/opentofu/opentofu:1.13.1 fmt -recursive"
+    options:
+      cache: false
+      interactive: true

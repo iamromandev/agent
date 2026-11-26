@@ -25,7 +25,7 @@ from tortoise.query_utils import Prefetch
 # ``unique_together`` and ``Meta.indexes`` and nothing else, so a database
 # built from scratch by ``make migrate`` gets none of these rules until an
 # ``AddConstraint`` reaches it. Existing databases keep the indexes they were
-# built with. See "Tortoise ORM notation" in ``api/docs/model.md``.
+# built with. See "Tortoise ORM notation" in ``apps/api/docs/model.md``.
 
 
 class IdBase(models.Model):

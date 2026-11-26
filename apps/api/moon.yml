@@ -1,0 +1,110 @@
+id: "api"
+language: "python"
+layer: "application"
+
+fileGroups:
+  sources: ["src/**/*", "scripts/**/*"]
+  configs: ["pyproject.toml", "ruff.toml", "ty.toml", ".python-version", ".env"]
+
+# Every task runs in apps/api/. Docker Compose uses docker-compose.yml with the project name `agent`.
+tasks:
+  # python tools (uv)
+  install:
+    command: "uv sync"
+    options:
+      cache: false
+  install-dev:
+    # Add the development dependencies
+    command: "uv add --dev ruff ty"
+    options:
+      cache: false
+  check:
+    # Fixes what ruff can, so it edits sources and is never cached.
+    script: "uvx ruff check --fix && uv run ty check"
+    deps: ["install"]
+    options:
+      cache: false
+  check-ci:
+    # Same checks without fixing anything. For CI.
+    script: "uvx ruff check && uv run ty check"
+    deps: ["install"]
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
+  test:
+    command: "uv run pytest"
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
+  run:
+    # FastAPI dev server on the host, after the checks
+    command: "uv run uvicorn src.main:app --reload --loop uvloop"
+    deps: ["check"]
+    options:
+      cache: false
+      interactive: true
+  export:
+    command: "uv export --format requirements-txt --output requirements.txt"
+    options:
+      cache: false
+
+  # docker control
+  ps:
+    command: "docker compose -f docker-compose.yml -p agent ps -a"
+    options:
+      cache: false
+  build:
+    command: "docker compose -f docker-compose.yml -p agent build"
+    options:
+      cache: false
+  build-prod:
+    # The prod image (arm64). TAG=<repository>:<tag> optional, default agent-api:prod
+    script: "docker buildx build --platform linux/arm64 --target prod --build-arg ENV=prod --build-arg WORK_DIR=/workdir --build-arg INSTALL_DIR=/opt/install --build-arg PW_DIR=/pwdir -t \"${TAG:-agent-api:prod}\" --load ."
+    options:
+      cache: false
+  push-prod:
+    # Builds, then pushes the prod image to ECR. TAG=<ecr_repository_url>:<tag> required; needs AWS credentials.
+    # REGION (default ap-southeast-1) must match the infra stack's region.
+    script: "case \"${TAG:-}\" in *.amazonaws.com/*:*) ;; *) echo 'set TAG=<ecr_repository_url>:<tag> (the ecr_repository_url output of infra)'; exit 1;; esac && docker buildx build --platform linux/arm64 --target prod --build-arg ENV=prod --build-arg WORK_DIR=/workdir --build-arg INSTALL_DIR=/opt/install --build-arg PW_DIR=/pwdir -t \"$TAG\" --load . && aws ecr get-login-password --region \"${REGION:-ap-southeast-1}\" | docker login --username AWS --password-stdin \"${TAG%%/*}\" && docker push \"$TAG\""
+    options:
+      cache: false
+  up:
+    command: "docker compose -f docker-compose.yml -p agent up -d"
+    options:
+      cache: false
+  stop:
+    command: "docker compose -f docker-compose.yml -p agent stop"
+    options:
+      cache: false
+  down:
+    command: "docker compose -f docker-compose.yml -p agent down"
+    options:
+      cache: false
+  restart:
+    script: "docker compose -f docker-compose.yml -p agent stop && docker compose -f docker-compose.yml -p agent build && docker compose -f docker-compose.yml -p agent up -d"
+    options:
+      cache: false
+  logs:
+    command: "docker compose -f docker-compose.yml -p agent logs -f"
+    options:
+      cache: false
+      interactive: true
+
+  # database
+  migrate:
+    command: "docker exec server-agent-api python -m scripts.migrate"
+    options:
+      cache: false
+
+  # cleanup
+  clean-volumes:
+    # This project's volumes (db)
+    command: "docker compose -f docker-compose.yml -p agent down -v"
+    options:
+      cache: false
+  clean-all:
+    # Stops the containers, removes the volumes and images
+    command: "docker compose -f docker-compose.yml -p agent down -v --rmi all"
+    options:
+      cache: false
+  clean-host:
+    # Prunes all unused Docker data on the host
+    script: "docker system prune --all --force && docker volume prune --all --force && docker buildx prune --all --force && docker builder prune --all --force"
+    options:
+      cache: false
