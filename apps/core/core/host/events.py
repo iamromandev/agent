@@ -21,6 +21,7 @@ class UserEntry:
 
     text: str
     label: str | None = None
+    client: str = ""  # the client that sent it
 
 
 @dataclass(frozen=True)
@@ -47,7 +48,9 @@ class TurnOutcome:
     go back to the input box, in that order. `delivered` False: the agent never got the message, so the images the
     client handed over for turn `turn` are its again. `ack` (not 0): the host holds the claim until a client calls
     `outcome_applied(ack)` once it has applied this outcome (or a short timeout passes), so nothing new starts before
-    the box got its text back."""
+    the box got its text back. With several clients, `restores` says whose each text is: `restore_for(client)` is what
+    goes back into that client's box (`restore` is all of it, for a lone client). `client` sent the turn and
+    `interrupted_by` pressed Esc (empty: nobody)."""
 
     kind: JobKind
     status: str | None
@@ -58,8 +61,16 @@ class TurnOutcome:
     turn: int = 0
     init_check: tuple[str, str] | None = None  # the `/init` file check's notice (level, text), also published
     ack: int = 0
+    client: str = ""
+    interrupted_by: str = ""
+    restores: tuple[tuple[str, str], ...] = ()  # (client, typed text): the draft's parts, then the queue's
 
     @property
     def restore(self) -> str | None:
         back = [text for text in (self.restore_text, self.queue_restore) if text]
+        return "\n".join(back) if back else None
+
+    def restore_for(self, client: str) -> str | None:
+        """The text that goes back into `client`'s input box, in order; None when nothing of it is that client's."""
+        back = [text for owner, text in self.restores if owner == client and text]
         return "\n".join(back) if back else None

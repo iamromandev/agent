@@ -60,12 +60,22 @@ def _tmp_is_outside_any_git_repo(tmp_path_factory: pytest.TempPathFactory) -> No
 
 @pytest.fixture(autouse=True)
 def _no_network(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Fail any real HTTP call. Tests use httpx.MockTransport instead (NFR2)."""
+    """Fail any real HTTP call. Tests use httpx.MockTransport instead (NFR2). A Unix socket transport stays allowed:
+    it never leaves the machine (the daemon tests talk to a daemon on a temp socket)."""
+    real_async = httpx.AsyncHTTPTransport.handle_async_request
+    real_sync = httpx.HTTPTransport.handle_request
+
+    def _uds(transport: Any) -> bool:
+        return getattr(getattr(transport, "_pool", None), "_uds", None) is not None
 
     async def deny_async(self: Any, request: httpx.Request) -> httpx.Response:
+        if _uds(self):
+            return await real_async(self, request)
         raise NetworkAccessError(f"real network call blocked: {request.url}")
 
     def deny_sync(self: Any, request: httpx.Request) -> httpx.Response:
+        if _uds(self):
+            return real_sync(self, request)
         raise NetworkAccessError(f"real network call blocked: {request.url}")
 
     monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", deny_async)

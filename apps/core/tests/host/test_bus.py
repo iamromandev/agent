@@ -67,3 +67,18 @@ async def test_drained_waits_until_every_subscriber_marked_its_events_done() -> 
     sub.queue.get_nowait()
     sub.queue.task_done()
     await waiter
+
+
+async def test_since_a_seq_the_bus_never_gave_is_none() -> None:
+    bus = EventBus()
+    bus.publish(_n("a"))
+    assert bus.since(1) == []
+    assert bus.since(2) is None  # a client from another bus (a restarted daemon) must start over
+
+
+async def test_drained_gives_a_remote_subscriber_only_a_deadline() -> None:
+    bus = EventBus()
+    bus.subscribe(remote=True)  # never marks anything handled (a stuck socket)
+    bus.publish(_n("x"))
+    async with asyncio.timeout(1.0):
+        await bus.drained(remote_timeout=0.05)

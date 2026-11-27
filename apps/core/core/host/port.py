@@ -18,9 +18,19 @@ from core.engine.text import one_line
 from core.engine.turn_diff import DiffItem, FileDiff, TurnDiff
 from core.host.asks import Answer, AnswerResult, AskEvent
 from core.host.bus import Subscriber
-from core.host.session import ModelSwitch, OpenedSession, SendResult, SessionHost, SessionSource, UndoResult
+from core.host.session import (
+    LOCAL_CLIENT,
+    Attachments,
+    ModelSwitch,
+    OpenedSession,
+    SendResult,
+    SessionHost,
+    SessionSource,
+    UndoResult,
+)
 
-LOCAL_CLIENT = "local"  # the client id of the in-process TUI
+__all__ = ["LOCAL_CLIENT", "LocalPort", "SessionPort"]
+
 SHOWN = 200  # characters of an error's text in its notice
 
 OnEvent = Callable[[object], Awaitable[None]]
@@ -37,7 +47,7 @@ class SessionPort(Protocol):
     @property
     def local(self) -> bool: ...
 
-    def subscribe(self, on_event: OnEvent, on_ask: OnAsk) -> None: ...
+    def subscribe(self, on_event: OnEvent, on_ask: OnAsk, attachments: Attachments | None = None) -> None: ...
     def send(
         self,
         text: str,
@@ -88,8 +98,10 @@ class LocalPort:
     def mode(self) -> Mode:
         return self.host.agent.mode
 
-    def subscribe(self, on_event: OnEvent, on_ask: OnAsk) -> None:
-        """Start handing the bus's events to `on_event` and the asks to `on_ask` (needs a running loop)."""
+    def subscribe(self, on_event: OnEvent, on_ask: OnAsk, attachments: Attachments | None = None) -> None:
+        """Start handing the bus's events to `on_event` and the asks to `on_ask` (needs a running loop). A turn this
+        client sends takes its pasted images from `attachments`."""
+        self.host.register_client(LOCAL_CLIENT, attachments=attachments)
         sub = self.host.bus.subscribe(queue_size=0)  # never dropped: the TUI draws everything, as it always did
         self._subscriber = sub
         self._pump = asyncio.get_running_loop().create_task(self._run(sub, on_event, on_ask))
@@ -189,4 +201,4 @@ class LocalPort:
 
     def outcome_applied(self, ack: int) -> bool:
         """The client applied a `TurnOutcome` with this ack; True when a message queued meanwhile started a turn."""
-        return self.host.outcome_applied(ack)
+        return self.host.outcome_applied(ack, LOCAL_CLIENT)

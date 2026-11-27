@@ -497,6 +497,7 @@ async def test_a_failed_provider_recheck_puts_the_draft_and_the_queue_back(
             return "down"
 
         app.query_one(StatusBar).error = "not ready"
+        app.host.not_ready = True  # as a failed launch check leaves it (the host asks again before the turn)
         monkeypatch.setattr(type(app.provider), "check", lambda _self: check())
         await type_and_send(pilot, "x")
         await until(pilot, lambda: app.host.turn_active)

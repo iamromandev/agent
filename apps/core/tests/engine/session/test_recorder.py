@@ -63,6 +63,16 @@ def mode(path: Path) -> int:
     return stat.S_IMODE(path.stat().st_mode)
 
 
+def test_a_chosen_id_is_known_before_the_first_record_and_names_the_file(directory: Path, workspace: Path) -> None:
+    chosen = "01KCHOSENCHOSENCHOSENCHOSE"
+    rec = FileRecorder(directory, workspace, session_id=chosen)
+    assert rec.session_id == chosen and rec.path is None  # no file yet
+    rec.message(Message("user", "hi"), None)
+    rec.close()
+    assert rec.path == directory / f"{chosen}.jsonl"
+    assert json.loads(rec.path.read_text().splitlines()[0])["id"] == chosen
+
+
 def test_a_first_message_that_is_not_from_the_user_writes_no_title(recorder: FileRecorder) -> None:
     recorder.message(Message("assistant", "hello"), None)
     assert recorder.path is not None

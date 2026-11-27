@@ -20,6 +20,7 @@ from core.host.events import EntryEnd, TurnOutcome, UserEntry
 from core.host.queue import Queued
 from core.host.session import SessionHost
 from core.testing.fakes import FakeCatalog, Gate, ScriptedProvider
+from core.testing.helpers import session_held_elsewhere
 
 REPLY = [TextDelta("ok"), Done(1, 1)]
 
@@ -333,6 +334,102 @@ async def test_init_checks_a_written_agents_md(made) -> None:
 
     check = client.outcomes()[0].init_check
     assert check is not None and check[1].startswith("/init check")
+
+
+async def test_a_restored_draft_and_queue_go_only_to_the_client_that_sent_them(made) -> None:
+    gate = Gate()
+    host, client = made([[gate, *REPLY], REPLY])
+    host.send("first", client="A")
+    await asyncio.wait_for(gate.reached.wait(), 5)
+    host.send("from a", client="A")
+    host.send("from b", client="B")
+    host.interrupt(client="B")
+    await host.idle()
+
+    (entry,) = [e for e in client.events if isinstance(e, UserEntry)]
+    (outcome,) = client.outcomes()
+    assert entry.client == "A" and outcome.client == "A" and outcome.interrupted_by == "B"
+    assert outcome.restore_for("A") == "from a" and outcome.restore_for("B") == "from b"
+    assert outcome.restore_for("C") is None
+
+
+async def test_a_switch_claim_is_the_clients_and_goes_when_it_disconnects(made) -> None:
+    host, _ = made([REPLY], models=("fake", "other:7b"))
+    assert host.begin_switch("A")
+    refused = await host.switch_model("other:7b", client="B")
+    assert refused.model is None and refused.notices == [("warn", "busy — a session is loading")]
+    host.end_switch("B")  # not B's: nothing happens
+    assert host.switching
+    host.client_gone("A")
+    assert not host.switching
+
+    switched = await host.switch_model("other:7b", client="B")  # takes the claim itself, and lets it go
+    assert switched.model == "other:7b" and not host.switching
+
+
+async def test_open_session_takes_the_claim_itself_and_refuses_another_clients(made) -> None:
+    host, _ = made([REPLY])
+    host.send("remember me")
+    await host.idle()
+    (info,) = await host.list_sessions()
+    assert await host.new_session(client="A") is None
+    refused = await host.open_session(info, client="B")
+    assert refused.loaded is None and refused.notices == [("warn", "busy — a session is loading")]
+    host.end_switch("A")
+
+    opened = await host.open_session(info, client="B")
+    assert opened.loaded is not None and not host.switching
+
+
+async def test_a_session_open_in_another_process_is_not_opened(made) -> None:
+    host, _ = made([REPLY, REPLY])
+    host.send("remember me")
+    await host.idle()
+    (info,) = await host.list_sessions()
+    assert await host.new_session() is None  # the old recorder (and its lock) is closed
+    host.end_switch()
+
+    with session_held_elsewhere(info.path.parent, info.id):
+        opened = await host.open_session(info)
+    assert opened.loaded is None and host.agent.history == []
+    assert opened.notices == [("error", f"session {info.id} is open in another agent process")]
+
+
+async def test_an_outcome_whose_client_disconnects_releases_the_claim_at_once(made) -> None:
+    host, client = made([REPLY])
+    client.hold = TurnOutcome  # A never applies it
+    host.send("x", client="A")
+    host.interrupt()
+    await asyncio.wait_for(client.held.wait(), 5)
+    held = host.turn_active
+    host.client_gone("A")
+    released = not host.turn_active
+    client.release.set()
+    await asyncio.wait_for(host.idle(), 5)
+
+    assert held and released
+
+
+async def test_an_outcome_for_a_client_that_is_not_connected_holds_nothing(made) -> None:
+    host, client = made([REPLY])
+    host.connected = lambda name: name != "gone"
+    client.hold = TurnOutcome  # no client applies it
+    host.send("x", client="gone")
+    await asyncio.wait_for(client.held.wait(), 5)
+    released = not host.turn_active
+    client.release.set()
+    await asyncio.wait_for(host.idle(), 5)
+
+    assert released and client.outcomes()[0].ack == 0
+
+
+async def test_aclose_waits_for_the_cancelled_turn(made) -> None:
+    gate = Gate()
+    host, _ = made([[gate, *REPLY]])
+    host.send("x")
+    await asyncio.wait_for(gate.reached.wait(), 5)
+    await host.aclose()
+    assert host.busy_tasks() == [] and host.closing
 
 
 async def test_an_approval_becomes_an_ask_on_the_bus(made) -> None:

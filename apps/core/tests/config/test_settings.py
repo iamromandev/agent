@@ -22,11 +22,17 @@ def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     assert settings.num_ctx == 4096
 
 
-@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_TASK_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT"])
+@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_TASK_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT", "AGENT_DAEMON_IDLE"])
 def test_non_positive_values_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
     monkeypatch.setenv(name, "0")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_daemon_idle_defaults_to_ten_minutes(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).daemon_idle == 600.0
+    monkeypatch.setenv("AGENT_DAEMON_IDLE", "1.5")
+    assert Settings(_env_file=None).daemon_idle == 1.5
 
 
 def test_session_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
