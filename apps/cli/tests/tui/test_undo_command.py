@@ -11,12 +11,11 @@ from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from core.engine.session import FileRecorder
 from core.testing.fakes import Gate
 from src.tui.app import HELP
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, Transcript, UserEntry
 
-from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, reached, settled, type_and_send, until
 
 SaveSession = Callable[..., Path]
 REPLY = [TextDelta("ok"), Done(1, 1)]
@@ -47,7 +46,7 @@ def _left(app, screen) -> Callable[[], bool]:
 
 async def _approve(pilot, app, times: int = 1) -> None:
     for _ in range(times):
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         screen = app.screen
         await choose(pilot, "once")
         await until(pilot, _left(app, screen))
@@ -78,10 +77,10 @@ async def test_undo_while_a_turn_runs_is_refused_and_changes_nothing(
         assert b'"undo"' not in saved
         assert [e.text for e in app.query(UserEntry)] == ["go"]
         assert _box(app) == ""
-        assert app.query_one(StatusBar).busy and app._turn_active and app.agent.busy  # the turn is untouched
+        assert app.query_one(StatusBar).busy and app.host.turn_active and app.agent.busy  # the turn is untouched
         gate.release.set()
         await settled(app)
-        assert not app.query_one(StatusBar).busy and not app._turn_active and not app.agent.busy
+        assert not app.query_one(StatusBar).busy and not app.host.turn_active and not app.agent.busy
 
         await _undo(pilot, app)  # and the turn is undoable once it ended
         assert (tmp_path / "a.txt").read_text() == "old"
@@ -106,17 +105,17 @@ async def test_interrupt_keys_during_an_undo_do_nothing_to_it(
 
         async def undo_with_a_key(emit):
             app.action_interrupt_turn() if key == "escape" else app.action_interrupt_or_quit()
-            seen.append((app._turn_active, app.query_one(StatusBar).busy, app.agent.busy))
+            seen.append((app.host.turn_active, app.query_one(StatusBar).busy, app.agent.busy))
             return await real(emit)
 
         monkeypatch.setattr(app.agent, "undo", undo_with_a_key)
-        app._turn_entered = False  # stale after a turn that Esc cancelled before its first line
+        app.host.turn_entered = False  # stale after a turn that Esc cancelled before its first line
         await _undo(pilot, app)
 
         assert seen == [(True, True, False)]  # the busy guard stayed up through the key
         assert app.is_running
         assert _box(app) == "hello"
-        assert not app._turn_active and not app.query_one(StatusBar).busy
+        assert not app.host.turn_active and not app.query_one(StatusBar).busy
 
 
 async def test_an_unexpected_error_from_undo_shows_an_error_notice_and_frees_the_app(
@@ -134,7 +133,7 @@ async def test_an_unexpected_error_from_undo_shows_an_error_notice_and_frees_the
         await _undo(pilot, app)
 
         assert any("kaboom" in n for n in _notices(app))
-        assert not app._turn_active and not app.query_one(StatusBar).busy
+        assert not app.host.turn_active and not app.query_one(StatusBar).busy
 
 
 async def test_esc_between_the_user_entry_and_the_turn_removes_the_orphan_and_keeps_the_prompt(
@@ -161,7 +160,7 @@ async def test_esc_between_the_user_entry_and_the_turn_removes_the_orphan_and_ke
 
         assert [e.text for e in app.query(UserEntry)] == ["first"]  # no orphan on screen
         assert _box(app) == "second"  # and the message is back in the box
-        assert not app._turn_active and not app.query_one(StatusBar).busy
+        assert not app.host.turn_active and not app.query_one(StatusBar).busy
 
         await _undo(pilot, app)  # removes the real first turn, not something else
         assert not list(app.query(UserEntry))

@@ -70,6 +70,23 @@ async def test_new_and_clear_after_the_edits_mode_return_to_build(make_app: AppF
         assert app.query_one(StatusBar).line.startswith("BUILD")
 
 
+async def test_new_releases_the_switch_claim_even_when_redrawing_the_panels_fails(
+    make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    app = make_app([])
+    async with app.run_test() as pilot:
+        await pilot.pause()
+
+        def broken() -> None:
+            raise RuntimeError("panel gone")
+
+        monkeypatch.setattr(app, "_show_pending", broken)
+        with pytest.raises(RuntimeError, match="panel gone"):
+            await app._command("/new")
+
+        assert not app.host.switching  # else no message would ever be accepted again
+
+
 # custom commands
 
 REPLY = [TextDelta("ok"), Done(1, 1)]

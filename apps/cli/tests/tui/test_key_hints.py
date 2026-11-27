@@ -157,12 +157,12 @@ async def test_undo_shows_idle_because_esc_and_enter_do_nothing_then_idle_after(
         monkeypatch.setattr(app.agent, "undo", held_undo)
         task = asyncio.create_task(app._undo_command())  # the slash handler would block the pilot
         await reached(gate)
-        assert app._undoing and app.query_one(StatusBar).busy
+        assert app.host.undoing and app.query_one(StatusBar).busy
         await pilot.pause()
         assert _hints(app).plain == IDLE
         gate.release.set()
         await task
-        await until(pilot, lambda: not app._undoing and _hints(app).plain == IDLE)
+        await until(pilot, lambda: not app.host.undoing and _hints(app).plain == IDLE)
 
 
 async def test_without_a_terminal_manager_busy_ends_at_tab_mode(make_app: AppFactory) -> None:

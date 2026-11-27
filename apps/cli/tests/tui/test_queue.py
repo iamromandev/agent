@@ -14,9 +14,9 @@ from core.engine.hooks.setup import prepare as prepare_hooks
 from core.engine.mcp.trust import TrustStore, trust_store_path
 from core.engine.permissions.setup import prepare
 from core.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from core.host.queue import Queued
+from core.host.session import SessionHost
 from core.testing.fakes import FakeRunner, Gate, exit_run
-from src.tui.app import AgentApp
-from src.tui.queue import Queued
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar
@@ -94,7 +94,7 @@ async def test_ac2_the_queue_runs_as_one_merged_turn_when_the_turn_ends_done(mak
         assert len(scripted(app).requests) == 2
         assert _last_user(app) == "a\n\nb"
         assert [e.text for e in app.query(UserEntry)] == ["first", "a\n\nb"]
-        assert not _panel(app).display and not app.query_one(StatusBar).busy and not app._turn_active
+        assert not _panel(app).display and not app.query_one(StatusBar).busy and not app.host.turn_active
 
 
 async def test_ac3_a_mention_in_the_queue_is_attached(make_app: AppFactory, tmp_path: Path) -> None:
@@ -106,7 +106,7 @@ async def test_ac3_a_mention_in_the_queue_is_attached(make_app: AppFactory, tmp_
         await type_and_send(pilot, "see @x.txt ")
         await pilot.pause()
         gate.release.set()
-        await until(pilot, lambda: len(scripted(app).requests) == 2 and not app._turn_active)
+        await until(pilot, lambda: len(scripted(app).requests) == 2 and not app.host.turn_active)
 
         last = _last_user(app)
         assert last.startswith("see @x.txt") and "file body" in last and '<attached path="' in last
@@ -178,7 +178,7 @@ async def test_ac7_builtins_are_still_refused_during_a_turn_and_nothing_is_queue
             await type_and_send(pilot, command)
             await pilot.pause()
         assert len([n for n in _notices(app) if "busy" in n]) == 3
-        assert not app._queue and not _panel(app).display
+        assert not app.host.queue and not _panel(app).display
         gate.release.set()
         await settled(app)
 
@@ -187,14 +187,11 @@ async def test_ac7_a_message_during_a_session_load_is_refused_and_restored(make_
     app = make_app([REPLY])
     async with app.run_test() as pilot:
         await settled(app)
-        app._switching = True
-        try:
+        with app.host.hold_claim_for_test("switch"):
             await type_and_send(pilot, "hello")
             await pilot.pause()
             assert any("busy — a session is loading" in n for n in _notices(app))
-            assert _box(app) == "hello" and not app._queue
-        finally:
-            app._switching = False
+            assert _box(app) == "hello" and not app.host.queue
 
 
 async def test_ac8_whitespace_is_not_queued(make_app: AppFactory) -> None:
@@ -204,7 +201,7 @@ async def test_ac8_whitespace_is_not_queued(make_app: AppFactory) -> None:
         await _hold(pilot, app, gate)
         await type_and_send(pilot, "   ")
         await pilot.pause()
-        assert not app._queue and not _panel(app).display
+        assert not app.host.queue and not _panel(app).display
         gate.release.set()
         await settled(app)
 
@@ -321,15 +318,15 @@ async def test_ac15_the_panel_shows_five_lines_a_count_and_escapes(make_app: App
         await pilot.pause()
         assert _panel(app).plain.splitlines() == [f"{n}" for n in range(5)] + ["and 2 more"]
 
-        app._queue.take()
-        from src.tui.queue import Queued
+        app.host.queue.take()
+        from core.host.queue import Queued
 
-        app._queue.add(Queued("a\x1b[2Jb‮c\nmore", "x", None))
+        app.host.queue.add(Queued("a\x1b[2Jb‮c\nmore", "x", None))
         app._show_queue()
         plain = _panel(app).plain
         assert "\x1b" not in plain and "‮" not in plain and plain.endswith("…")
         gate.release.set()
-        app._queue.take()
+        app.host.queue.take()
         await settled(app)
 
 
@@ -352,7 +349,7 @@ async def test_ac17_an_empty_custom_command_is_not_queued(make_app: AppFactory) 
         await type_and_send(pilot, "/blank")
         await pilot.pause()
         assert any("/blank is empty" in n for n in _notices(app))
-        assert not app._queue
+        assert not app.host.queue
         gate.release.set()
         await settled(app)
 
@@ -366,8 +363,8 @@ async def test_ac18_a_hundred_large_entries_queue_quickly(make_app: AppFactory) 
         for _ in range(100):
             await app.on_chat_input_submitted(ChatInput.Submitted("z" * 10_000))
         assert time.perf_counter() - start < 1.0
-        assert len(app._queue.entries) == 100
-        app._queue.take()
+        assert len(app.host.queue.entries) == 100
+        app.host.queue.take()
         gate.release.set()
         await settled(app)
 
@@ -398,7 +395,7 @@ async def test_ac22_a_blocked_turn_restores_its_text_then_the_queue_then_what_wa
     app = make_app([REPLY], permissions=setup.rules, hooks=hooks)
     async with app.run_test() as pilot:
         await type_and_send(pilot, "D")
-        await until(pilot, lambda: app._turn_active)
+        await until(pilot, lambda: app.host.turn_active)
         await type_and_send(pilot, "Q")
         await pilot.pause()
         await pilot.press("B")
@@ -417,13 +414,13 @@ async def test_ac21_escape_after_done_while_init_checks_the_file_restores_the_qu
     async def slow_check(self) -> None:
         await hold.wait()
 
-    monkeypatch.setattr(AgentApp, "_check_init", slow_check)
+    monkeypatch.setattr(SessionHost, "_check_init", slow_check)
     prints = iter(range(100))
-    monkeypatch.setattr("src.tui.app.fingerprint", lambda _path: next(prints))  # AGENTS.md "changed": the check runs
+    monkeypatch.setattr("core.host.session.fingerprint", lambda _path: next(prints))  # AGENTS.md "changed": the check runs
     app = make_app([REPLY, REPLY])
     async with app.run_test() as pilot:
         await type_and_send(pilot, "/init")
-        await until(pilot, lambda: app._job_status == "done")
+        await until(pilot, lambda: app.host.job_status == "done")
         await type_and_send(pilot, "a")
         await pilot.pause()
         assert _panel(app).plain == "a"
@@ -476,14 +473,14 @@ async def test_interrupting_compact_puts_the_queue_back(make_app: AppFactory, ke
 
 async def test_cancel_before_the_turn_entered_puts_the_draft_and_the_queue_back(make_app: AppFactory) -> None:
     app = make_app([REPLY])
-    async with app.run_test() as pilot:
+    async with app.run_test():
         await settled(app)
-        app._queue.add(Queued("q", "q", None))
+        app.host.queue.add(Queued("q", "q", None))
         app._begin_turn("x", "x")
         app.interrupt_turn()
-        await pilot.pause()
+        await settled(app)  # the outcome is applied: the box has the text back
 
-        assert _box(app) == "x\nq" and not app._turn_active and not _panel(app).display
+        assert _box(app) == "x\nq" and not app.host.turn_active and not _panel(app).display
         assert len(scripted(app).requests) == 0
 
 
@@ -502,7 +499,7 @@ async def test_a_failed_provider_recheck_puts_the_draft_and_the_queue_back(
         app.query_one(StatusBar).error = "not ready"
         monkeypatch.setattr(type(app.provider), "check", lambda _self: check())
         await type_and_send(pilot, "x")
-        await until(pilot, lambda: app._turn_active)
+        await until(pilot, lambda: app.host.turn_active)
         await type_and_send(pilot, "q")
         await pilot.pause()
         release.set()

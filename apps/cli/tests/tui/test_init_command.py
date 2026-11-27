@@ -45,15 +45,12 @@ async def test_init_is_refused_while_a_session_loads(make_app: AppFactory) -> No
     app = make_app([REPLY])
     async with app.run_test() as pilot:
         await settled(app)
-        app._switching = True
-        try:
+        with app.host.hold_claim_for_test("switch"):
             await type_and_send(pilot, "/init")
             await pilot.pause()
 
             assert any("busy — a session is loading" in n for n in _notices(app))
             assert scripted(app).requests == [] and _sessions() == []
-        finally:
-            app._switching = False
 
 
 async def test_init_is_refused_in_plan_mode(make_app: AppFactory) -> None:
@@ -67,7 +64,7 @@ async def test_init_is_refused_in_plan_mode(make_app: AppFactory) -> None:
 
         assert PLAN_REFUSAL in _notices(app)[-1]
         assert scripted(app).requests == [] and _sessions() == []
-        assert not app._turn_active
+        assert not app.host.turn_active
 
 
 def _git_with_parent(tmp_path: Path, parent_text: str, work_text: str) -> Path:
@@ -95,17 +92,17 @@ async def test_an_error_building_the_prompt_is_a_notice_and_starts_nothing(
         await pilot.pause()
 
         assert "Could not start /init: disk gone" in _notices(app)[-1]
-        assert scripted(app).requests == [] and not app._turn_active and not app._switching
+        assert scripted(app).requests == [] and not app.host.turn_active and not app.host.switching
 
 
 async def test_esc_before_the_init_worker_runs_gives_back_init(make_app: AppFactory) -> None:
     app = make_app([REPLY])
-    async with app.run_test() as pilot:
+    async with app.run_test():
         await settled(app)
         app._begin_turn("long prompt", draft="/init", init=True)
         app.interrupt_turn()  # no await in between: the worker has not had its first line yet
-        await pilot.pause()
+        await settled(app)  # the outcome is applied: the box has the text back
 
         assert app.query_one(ChatInput).text == "/init"
-        assert scripted(app).requests == [] and not app._turn_active
+        assert scripted(app).requests == [] and not app.host.turn_active
         assert not any(DONE in n for n in _notices(app))

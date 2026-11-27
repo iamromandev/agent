@@ -20,6 +20,7 @@ from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import ImagePuller
 from core.engine.imagegen import MfluxGenerator
 from core.engine.mcp.hub import McpHub
+from core.engine.mentions_index import FileIndex
 from core.engine.permissions.setup import Rules
 from core.engine.provider.base import Message, ProviderEvent
 from core.engine.session import (
@@ -38,6 +39,8 @@ from core.engine.web import Fetcher
 from core.engine.workflows.loader import Workflows
 from core.engine.workflows.runs import RunIndex
 from core.engine.workflows.timings import TimingStore
+from core.host.port import LocalPort
+from core.host.session import SessionHost
 from core.testing.fakes import FakeCatalog, Gate, ScriptedProvider
 from core.testing.helpers import assert_all_gone
 from src.tui import NEW, StartChoice
@@ -166,26 +169,29 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
                 watch=watch,
             )
 
-        return AgentApp(
+        host = SessionHost(
             factory,
             provider,
             root,
+            window_cap=window_cap,
             store=SessionStore(sessions, root),
-            start=start,
             recorder_factory=new_recorder,
+            catalog=catalog if catalog is not None else FakeCatalog([model]),
+            guard=guard,
+            permissions=permissions,
+            hooks=hooks,
+        )
+        return AgentApp(
+            LocalPort(host, FileIndex(root, host.guard)),
+            start=start,
             on_close=on_close,
             terminals=manager,
             mcp=mcp,
             mcp_trust=mcp_trust,
-            permissions=permissions,
             permission_warnings=permission_warnings,
             commands=commands,
             skills=skills,
             agents=agents,
-            guard=guard,
-            hooks=hooks,
-            catalog=catalog if catalog is not None else FakeCatalog([model]),
-            window_cap=window_cap,
             launch_notices=launch_notices,
             images=images,
             workflows=workflows,
@@ -247,11 +253,32 @@ def scripted(app: AgentApp) -> ScriptedProvider:
     return app.provider
 
 
+def dialog_ready(app: AgentApp) -> bool:
+    """The approval dialog is on top and ready for keys: mounted, its options mounted and focused. `push_screen` makes
+    it `app.screen` before it is composed, so a key pressed earlier may land elsewhere."""
+    from src.tui.screens.approval import ApprovalScreen
+    from textual.widgets import OptionList
+
+    screen = app.screen
+    if not isinstance(screen, ApprovalScreen) or not screen.is_mounted:
+        return False
+    options = screen.query(OptionList)
+    return bool(options) and options.first().is_mounted and screen.focused is options.first()
+
+
+async def dialog(pilot: Pilot) -> None:
+    """Wait until the approval dialog is ready for keys (see `dialog_ready`)."""
+    app = pilot.app
+    assert isinstance(app, AgentApp)
+    await until(pilot, lambda: dialog_ready(app))
+
+
 async def choose(pilot: Pilot, option_id: str) -> None:
     """Pick an approval option without depending on where the highlight starts, then press Enter."""
     from src.tui.screens.approval import ApprovalScreen
     from textual.widgets import OptionList
 
+    await dialog(pilot)
     screen = pilot.app.screen
     assert isinstance(screen, ApprovalScreen)
     options = screen.query_one(OptionList)
@@ -279,8 +306,17 @@ def _test_time_limit():
 
 
 async def settled(app: AgentApp) -> None:
-    """Wait for the app's workers to finish, at most WAIT seconds."""
-    await asyncio.wait_for(app.workers.wait_for_complete(), WAIT)
+    """Wait for the app's workers and the session host's job to finish and their events to be drawn, at most WAIT
+    seconds."""
+
+    async def quiet() -> None:
+        while True:
+            await app.workers.wait_for_complete()
+            await app.port.idle()
+            if all(worker.is_finished for worker in app.workers) and not app.host.busy_tasks():
+                return
+
+    await asyncio.wait_for(quiet(), WAIT)
 
 
 async def reached(gate: Gate) -> None:

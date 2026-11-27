@@ -83,13 +83,12 @@ class ApprovalScreen(ModalScreen[Decision | None]):
                 # Says what it saves: the rule comes from the call, so it is escaped and never read as markup.
                 options.append(Option(Text(_save_label(request.tool, request.save_rule)), id="project"))
             options.append(Option("Deny…", id="deny"))
-            yield OptionList(*options)
+            choices = OptionList(*options)
+            # Default to Deny: a stray Enter (or two) must never approve a call. Set here, not on mount, so a choice
+            # made between compose and mount is not reset.
+            choices.highlighted = choices.option_count - 1
+            yield choices
             yield Input(placeholder="Note for the model (optional), Enter to deny", id="note")
-
-    def on_mount(self) -> None:
-        # Default to Deny: a stray Enter (or two) must never approve a call.
-        options = self.query_one(OptionList)
-        options.highlighted = options.option_count - 1
 
     @on(OptionList.OptionSelected)
     def _selected(self, event: OptionList.OptionSelected) -> None:

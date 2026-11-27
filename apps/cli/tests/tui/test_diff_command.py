@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
 import shutil
 from pathlib import Path
@@ -18,7 +19,7 @@ from src.tui.screens.diff import DiffScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, reached, settled, type_and_send, until
 
 REPLY = [TextDelta("ok"), Done(1, 1)]
 
@@ -34,10 +35,9 @@ def _store(tmp_path: Path) -> CheckpointStore:
 
 
 async def _bash_turn(pilot, app, text: str = "go") -> None:
-    from src.tui.screens.approval import ApprovalScreen
 
     await type_and_send(pilot, text)
-    await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+    await dialog(pilot)
     await choose(pilot, "once")
     await settled(app)
 
@@ -194,15 +194,16 @@ async def test_a_diff_built_while_a_turn_started_shows_the_busy_line_instead_of_
     async with app.run_test() as pilot:
         await _bash_turn(pilot, app)
         real = app.agent.last_turn_diff
+        held = contextlib.ExitStack()
 
         async def then_a_turn_is_active():
             diff = await real()
-            app._turn_active = True
+            held.enter_context(app.host.hold_claim_for_test("turn"))
             return diff
 
         monkeypatch.setattr(app.agent, "last_turn_diff", then_a_turn_is_active)
         await type_and_send(pilot, "/diff")
         await until(pilot, lambda: any("press Esc to interrupt, then /diff" in n for n in _notices(app)))
-        app._turn_active = False
+        held.close()
 
         assert not isinstance(app.screen, DiffScreen)

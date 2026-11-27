@@ -57,7 +57,7 @@ async def test_enter_switches_with_the_length_already_read(make_app: AppFactory)
         await until(pilot, lambda: app.query_one(StatusBar).model == "other")
         assert app.query_one(StatusBar).window == 4096
         assert catalog.length_calls.count("other") == 1
-        assert not app._switching
+        assert not app.host.switching
 
 
 async def test_escape_changes_nothing(make_app: AppFactory) -> None:
@@ -69,7 +69,7 @@ async def test_escape_changes_nothing(make_app: AppFactory) -> None:
         await pilot.pause()
         await until(pilot, lambda: not isinstance(app.screen, ModelPicker))
         assert app.query_one(StatusBar).model == "fake"
-        assert not app._switching
+        assert not app.host.switching
 
 
 async def test_no_models_installed(make_app: AppFactory) -> None:
@@ -107,24 +107,23 @@ async def test_a_turn_started_while_loading_skips_the_picker(make_app: AppFactor
     async with app.run_test() as pilot:
         await type_and_send(pilot, "/model")
         await pilot.pause(0.05)
-        app._turn_active = True
-        await pilot.pause(0.8)
-        assert not isinstance(app.screen, ModelPicker)
-        assert _busy(app)
-        assert app.query_one(StatusBar).model == "fake"
-        app._turn_active = False
+        with app.host.hold_claim_for_test("turn"):
+            await pilot.pause(0.8)
+            assert not isinstance(app.screen, ModelPicker)
+            assert _busy(app)
+            assert app.query_one(StatusBar).model == "fake"
 
 
 async def test_a_switch_started_while_the_picker_is_open_makes_enter_busy(make_app: AppFactory) -> None:
     app = make_app(catalog=FakeCatalog(["fake", "other"]))
     async with app.run_test() as pilot:
         await _open(app, pilot)
-        app._switching = True
+        assert app.host.begin_switch()  # another switch holds the claim
         await pilot.press("down", "enter")
         await until(pilot, lambda: _busy(app))
         assert app.query_one(StatusBar).model == "fake"
-        assert app._switching  # not ours to release
-        app._switching = False
+        assert app.host.switching  # not ours to release
+        app.host.end_switch()
 
 
 class _Slow(FakeCatalog):
@@ -169,7 +168,7 @@ async def test_a_generic_error_leaves_the_state_unchanged(make_app: AppFactory, 
         await type_and_send(pilot, "/model")
         await until(pilot, lambda: any("Model switch failed" in n for n in _notices(app)))
         assert not isinstance(app.screen, ModelPicker)
-        assert not app._switching
+        assert not app.host.switching
         assert app.query_one(StatusBar).model == "fake"
 
 
@@ -181,7 +180,7 @@ async def test_escape_while_the_list_loads_opens_no_picker(make_app: AppFactory)
         await pilot.press("escape")
         await pilot.pause(0.8)
         assert not isinstance(app.screen, ModelPicker)
-        assert not app._switching
+        assert not app.host.switching
         await app._command("/model")  # and a new one can start
         await until(pilot, lambda: isinstance(app.screen, ModelPicker))
 
