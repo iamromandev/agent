@@ -3,12 +3,12 @@ from __future__ import annotations
 import os
 
 import pytest
-from src.engine.provider.base import Done, TextDelta
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import Gate
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, Transcript, UserEntry
 from textual.pilot import Pilot
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, settled, type_and_send, until
 
 

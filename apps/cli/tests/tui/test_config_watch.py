@@ -11,17 +11,17 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from src.engine.configguard import GlobalMarker, marker_path
-from src.engine.configwatch import Cause
-from src.engine.provider.base import Done, ProviderEvent, TextDelta
-from src.runtime import Runtime, build_runtime
+from core.engine.configguard import GlobalMarker, marker_path
+from core.engine.configwatch import Cause
+from core.engine.provider.base import Done, ProviderEvent, TextDelta
+from core.runtime import Runtime, build_runtime
+from core.testing.fakes import FakeCatalog, FakeConnection, FakeConnector, Gate, ScriptedProvider
 from src.tui.app import AgentApp
 from src.tui.screens.global_trust import GlobalTrustScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
 from src.tui.widgets.transcript import NoticeEntry
 from textual.widgets import Label, OptionList
 
-from tests.fakes import FakeCatalog, FakeConnection, FakeConnector, Gate, ScriptedProvider
 from tests.tui.conftest import AppFactory, type_and_send, until
 
 SPACES = chr(0x2420) + chr(0xD7)  # how the dialog writes a run of spaces: the sign, a times sign, the count
@@ -189,7 +189,7 @@ async def test_with_the_marker_the_global_dialog_lists_rules_hooks_servers_and_t
 
 def _held_extras() -> None:
     """A deny rule, a keepEnv name and one global command, skill, agent and workflow (hostile names escaped)."""
-    from src.engine.workflows.loader import builtin_dir
+    from core.engine.workflows.loader import builtin_dir
 
     config = _config()
     body = json.loads((config / "settings.json").read_text())
@@ -333,10 +333,10 @@ async def test_the_global_dialog_comes_before_the_project_server_prompt_which_li
 async def test_the_global_dialog_escapes_what_came_from_the_files() -> None:
     from datetime import UTC, datetime
 
-    from src.engine.configguard import MarkerInfo
-    from src.engine.hooks.config import HookEntry
-    from src.engine.mcp.config import ServerConfig
-    from src.engine.permissions.rules import parse_rule
+    from core.engine.configguard import MarkerInfo
+    from core.engine.hooks.config import HookEntry
+    from core.engine.mcp.config import ServerConfig
+    from core.engine.permissions.rules import parse_rule
     from textual.app import App, ComposeResult
 
     screen = GlobalTrustScreen(

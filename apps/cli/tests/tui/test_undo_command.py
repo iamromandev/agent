@@ -7,15 +7,15 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import FileRecorder
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import FileRecorder
+from core.testing.fakes import Gate
 from src.tui.app import HELP
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, Transcript, UserEntry
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
 
 SaveSession = Callable[..., Path]

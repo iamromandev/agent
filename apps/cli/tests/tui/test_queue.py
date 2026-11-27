@@ -9,11 +9,12 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from src.engine.commands.loader import Command, Commands
-from src.engine.hooks.setup import prepare as prepare_hooks
-from src.engine.mcp.trust import TrustStore, trust_store_path
-from src.engine.permissions.setup import prepare
-from src.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from core.engine.commands.loader import Command, Commands
+from core.engine.hooks.setup import prepare as prepare_hooks
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.permissions.setup import prepare
+from core.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import FakeRunner, Gate, exit_run
 from src.tui.app import AgentApp
 from src.tui.queue import Queued
 from src.tui.widgets.chat_input import ChatInput
@@ -21,7 +22,6 @@ from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
-from tests.fakes import FakeRunner, Gate, exit_run
 from tests.tui.conftest import AppFactory, reached, scripted, settled, type_and_send, until
 
 REPLY = [TextDelta("ok"), Done(1, 1)]

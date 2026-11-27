@@ -5,8 +5,8 @@ from __future__ import annotations
 from io import BytesIO
 
 import pytest
-from src.engine.commands.builtins import BUILTINS
-from src.engine.commands.loader import Command, Commands
+from core.engine.commands.builtins import BUILTINS
+from core.engine.commands.loader import Command, Commands
 from src.headless import STDIN_LIMIT, UsageError
 from src.headless.prompt import build_prompt
 

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.guardrails.paths import MAX_TRACKED_FILES
-from src.engine.guardrails.setup import Guardrails, prepare
+from core.engine.guardrails.paths import MAX_TRACKED_FILES
+from core.engine.guardrails.setup import Guardrails, prepare
 from src.tui.widgets.transcript import NoticeEntry
 
 from tests.tui.conftest import AppFactory, scripted, type_and_send, until
@@ -72,7 +72,7 @@ async def test_guardrails_shows_both_homes_when_there_are_two(make_app: AppFacto
     home, other = tmp_path / "home", tmp_path / "account-home"
     home.mkdir()
     other.mkdir()
-    from src.engine.guardrails import setup as guard_setup
+    from core.engine.guardrails import setup as guard_setup
 
     guard = guard_setup._build(guard_setup.GuardConfig(), home, {}, also_home=other)
     app = make_app(guard=guard)

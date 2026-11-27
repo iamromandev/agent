@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, ClassVar
 
+from core.engine.mentions_index import Suggestion, current_token
 from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -11,7 +12,6 @@ from textual.containers import Horizontal
 from textual.message import Message
 from textual.widgets import Static, TextArea
 
-from src.engine.mentions_index import Suggestion, current_token
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.path_suggestions import PathSuggestions
 

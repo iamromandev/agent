@@ -5,7 +5,7 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-from src.runtime import NEW, StartChoice, build_runtime
+from core.runtime import NEW, StartChoice, build_runtime
 
 __all__ = ["NEW", "StartChoice", "run"]
 

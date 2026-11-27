@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-from src.engine.commands.loader import Command, Commands
-from src.engine.mode import Mode
-from src.engine.provider.base import Done, TextDelta
+from core.engine.commands.loader import Command, Commands
+from core.engine.mode import Mode
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import Gate
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.command_suggestions import CommandSuggestions
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 from textual.app import App, ComposeResult
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, scripted, settled, until
 
 ENTRIES = [

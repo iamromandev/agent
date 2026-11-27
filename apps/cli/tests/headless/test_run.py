@@ -9,14 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from src.config.settings import get_settings
-from src.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import SessionStore
+from core.config.settings import get_settings
+from core.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import SessionStore
+from core.runtime import StartChoice
+from core.testing.fakes import ScriptedProvider
 from src.headless import EXIT_FAIL, EXIT_OK, EXIT_USAGE, HEADLESS_DENY, HeadlessOptions
 from src.headless.run import run_headless
-from src.runtime import StartChoice
-
-from tests.fakes import ScriptedProvider
 
 CLI = Path(__file__).parent.parent.parent
 
@@ -83,7 +82,7 @@ def test_an_invalid_allow_rule_exits_2_naming_it_before_anything_runs(
 
 
 def _sessions() -> Path:
-    from src.engine.session import sessions_root
+    from core.engine.session import sessions_root
 
     return sessions_root(get_settings().sessions_dir)
 
@@ -243,7 +242,7 @@ class _FakeOllama:
 
 
 def test_a_model_that_is_not_installed_exits_1_with_the_message(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from src.engine.provider.ollama import OllamaProvider
+    from core.engine.provider.ollama import OllamaProvider
 
     provider = OllamaProvider(_FakeOllama(["other:latest"]), "ghost", 1000)  # ty: ignore[invalid-argument-type]
 
@@ -257,7 +256,7 @@ def test_a_model_that_is_not_installed_exits_1_with_the_message(ws: Path, capsys
 def test_a_session_error_with_a_file_derived_id_is_written_out_escaped(
     ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from src.engine.session import SessionError
+    from core.engine.session import SessionError
 
     go(ws, ScriptedProvider([say("one")]), prompt="first")
     (info,) = SessionStore(_sessions(), ws.resolve()).list()
@@ -278,7 +277,7 @@ def test_a_session_error_with_a_file_derived_id_is_written_out_escaped(
 def test_mcp_server_names_and_failure_reasons_are_written_out_escaped(
     ws: Path, env: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.fakes import FakeConnector
+    from core.testing.fakes import FakeConnector
 
     (env / "agent").mkdir(parents=True)
     (env / "agent" / "mcp.json").write_text(json.dumps({"servers": {"srv": {"command": "x"}}}))
@@ -315,7 +314,7 @@ def _project(ws: Path, hook_log: Path) -> None:
 def test_an_untrusted_project_warns_once_per_kind_and_none_of_it_is_active(
     ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.fakes import FakeConnector
+    from core.testing.fakes import FakeConnector
 
     log = tmp_path / "hook.log"
     _project(ws, log)
@@ -338,7 +337,7 @@ def test_an_untrusted_project_warns_once_per_kind_and_none_of_it_is_active(
 def test_trust_project_activates_rules_hooks_and_servers_without_writing_a_trust_store(
     ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from tests.fakes import FakeConnector
+    from core.testing.fakes import FakeConnector
 
     log = tmp_path / "hook.log"
     _project(ws, log)
@@ -472,10 +471,10 @@ def test_images_prompt_is_exit_2_like_other_builtins(ws: Path, capsys: pytest.Ca
 def test_headless_never_offers_generate_image_even_when_mflux_is_found(
     ws: Path, spy: Spy, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.image_fakes import fake_mflux
+    from core.testing.image_fakes import fake_mflux
 
     command = fake_mflux(tmp_path)
-    monkeypatch.setattr("src.engine.imagegen.find_mflux", lambda: command)
+    monkeypatch.setattr("core.engine.imagegen.find_mflux", lambda: command)
     provider = ScriptedProvider([say("x")])
 
     assert go(ws, provider) == EXIT_OK

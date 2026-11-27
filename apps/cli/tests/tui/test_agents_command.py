@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.agents.loader import AgentDef, Agents
-from src.engine.commands.loader import load_commands
+from core.engine.agents.loader import AgentDef, Agents
+from core.engine.commands.loader import load_commands
 from src.tui.widgets.transcript import NoticeEntry
 
 from tests.tui.conftest import AppFactory, type_and_send, until
@@ -72,7 +72,7 @@ async def test_agents_without_any_says_so(make_app: AppFactory) -> None:
 
 
 def test_a_custom_command_named_agents_is_skipped_as_a_built_in(tmp_path: Path) -> None:
-    from src.engine.commands.builtins import BUILTINS
+    from core.engine.commands.builtins import BUILTINS
 
     folder = tmp_path / ".agent" / "commands"
     folder.mkdir(parents=True)

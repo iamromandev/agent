@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.skills.loader import Skill, Skills
+from core.engine.skills.loader import Skill, Skills
 from src.tui.widgets.transcript import NoticeEntry
 
 from tests.tui.conftest import AppFactory, type_and_send, until

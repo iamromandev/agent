@@ -12,14 +12,13 @@ from typing import Any
 import pytest
 import src.tui
 import src.tui.app as tui_app
-from src.client import OllamaClient, SearxClient, WebClient
-from src.config.settings import get_settings
-from src.engine.mcp.hub import McpHub
-from src.engine.terminal import manager as terminal_manager
-from src.engine.terminal.manager import TerminalManager
+from core.client import OllamaClient, SearxClient, WebClient
+from core.config.settings import get_settings
+from core.engine.mcp.hub import McpHub
+from core.engine.terminal import manager as terminal_manager
+from core.engine.terminal.manager import TerminalManager
+from core.testing.helpers import assert_all_gone
 from src.tui.app import AgentApp
-
-from tests.helpers import assert_all_gone
 
 
 @pytest.fixture(autouse=True)
@@ -201,7 +200,7 @@ def test_run_says_on_stderr_when_asking_ollama_takes_long(
         return {}
 
     monkeypatch.setattr(OllamaClient, "show", slow_show)
-    monkeypatch.setattr("src.engine.provider.models.SLOW_AFTER", 0.02)
+    monkeypatch.setattr("core.engine.provider.models.SLOW_AFTER", 0.02)
     monkeypatch.setenv("AGENT_MODEL", "foo\x1b[2J")
     get_settings.cache_clear()
     try:

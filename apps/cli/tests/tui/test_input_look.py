@@ -89,7 +89,7 @@ async def test_lines_follow_focus_between_the_terminal_pane_and_the_input(make_a
 
 
 async def test_empty_input_shows_marker_and_placeholder_and_typed_text_submits_alone(make_app: AppFactory) -> None:
-    from src.engine.provider.base import Done, TextDelta
+    from core.engine.provider.base import Done, TextDelta
 
     app = make_app([[TextDelta("ok"), Done(1, 1)]])
     async with app.run_test(size=(80, 24)) as pilot:

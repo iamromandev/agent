@@ -5,8 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
-
-from src.config import get_settings
+from core.config import get_settings
 
 
 class ApiError(Exception):

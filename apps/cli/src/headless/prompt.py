@@ -6,7 +6,8 @@ import re
 from collections.abc import Callable, Iterable
 from typing import BinaryIO
 
-from src.engine.commands.loader import Commands
+from core.engine.commands.loader import Commands
+
 from src.headless import STDIN_LIMIT, UsageError
 
 _SLASH = re.compile(r"/([A-Za-z0-9_-]+)(?:\s+(.*))?", re.DOTALL)

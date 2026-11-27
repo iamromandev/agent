@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from src.engine.text import escape_display
+from core.engine.text import escape_display
 
 SHOWN_LINES = 5
 SHOWN_CHARS = 80

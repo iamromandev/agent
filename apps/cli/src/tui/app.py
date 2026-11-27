@@ -15,17 +15,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from textual import events
-from textual.app import App, ComposeResult, ScreenStackError
-from textual.binding import Binding, BindingType
-from textual.css.query import NoMatches
-from textual.message import Message
-from textual.widgets import OptionList, Tabs, TextArea
-from textual.worker import WorkerCancelled
-
-from src.client import clipboard
-from src.client.clipboard import ClipboardError, ClipboardUnsupported, PasteFolder
-from src.engine import (
+from core.client import clipboard
+from core.client.clipboard import ClipboardError, ClipboardUnsupported, PasteFolder
+from core.engine import (
     Agent,
     AgentBusy,
     AgentEvent,
@@ -42,37 +34,37 @@ from src.engine import (
     TurnEnded,
     UsageUpdate,
 )
-from src.engine.agents.loader import READ_ONLY_TOOLS, Agents
-from src.engine.approval import ApprovalRequest, Approver, Choice
-from src.engine.commands.builtins import BUILTINS
-from src.engine.commands.loader import Commands
-from src.engine.compaction import CHARS_PER_TOKEN, turn_starts
-from src.engine.configguard import NEXT_LAUNCH, ConfigGuard, HeldGlobal
-from src.engine.configwatch import Cause, TrustRevoked
-from src.engine.events import WorkflowLine, WorkflowProgress
-from src.engine.facts import FACTS_SHARE, init_check, render_facts, scan
-from src.engine.guardrails.paths import (
+from core.engine.agents.loader import READ_ONLY_TOOLS, Agents
+from core.engine.approval import ApprovalRequest, Approver, Choice
+from core.engine.commands.builtins import BUILTINS
+from core.engine.commands.loader import Commands
+from core.engine.compaction import CHARS_PER_TOKEN, turn_starts
+from core.engine.configguard import NEXT_LAUNCH, ConfigGuard, HeldGlobal
+from core.engine.configwatch import Cause, TrustRevoked
+from core.engine.events import WorkflowLine, WorkflowProgress
+from core.engine.facts import FACTS_SHARE, init_check, render_facts, scan
+from core.engine.guardrails.paths import (
     BUILTIN_HOME,
     BUILTIN_NAMES,
     MAX_TRACKED_DEPTH,
     MAX_TRACKED_DIRS,
     MAX_TRACKED_FILES,
 )
-from src.engine.guardrails.setup import Guardrails
-from src.engine.hooks.setup import Hooks, hook_failed
-from src.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
-from src.engine.instructions import fingerprint, levels
-from src.engine.loop import NOT_SUMMARIZED, close_recorder
-from src.engine.mcp.hub import HubEvent, McpHub
-from src.engine.mcp.names import tool_name
-from src.engine.mentions import MentionNote, apply_vision, expand_mentions, note_text
-from src.engine.mentions_index import FileIndex
-from src.engine.mode import Mode
-from src.engine.permissions.setup import Rules, RuleSavedNotTrusted
-from src.engine.prompt import build_init_prompt
-from src.engine.provider.base import Image, SwitchableProvider
-from src.engine.provider.images import MAX_IMAGES, ImageError, describe, read_image_fd, size_text, sniff
-from src.engine.provider.models import (
+from core.engine.guardrails.setup import Guardrails
+from core.engine.hooks.setup import Hooks, hook_failed
+from core.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
+from core.engine.instructions import fingerprint, levels
+from core.engine.loop import NOT_SUMMARIZED, close_recorder
+from core.engine.mcp.hub import HubEvent, McpHub
+from core.engine.mcp.names import tool_name
+from core.engine.mentions import MentionNote, apply_vision, expand_mentions, note_text
+from core.engine.mentions_index import FileIndex
+from core.engine.mode import Mode
+from core.engine.permissions.setup import Rules, RuleSavedNotTrusted
+from core.engine.prompt import build_init_prompt
+from core.engine.provider.base import Image, SwitchableProvider
+from core.engine.provider.images import MAX_IMAGES, ImageError, describe, read_image_fd, size_text, sniff
+from core.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
     ModelCatalog,
@@ -81,8 +73,8 @@ from src.engine.provider.models import (
     resolve_window,
     shown_name,
 )
-from src.engine.provider.vision import VisionCheck
-from src.engine.session import (
+from core.engine.provider.vision import VisionCheck
+from core.engine.session import (
     FileRecorder,
     NullRecorder,
     Recorder,
@@ -91,18 +83,26 @@ from src.engine.session import (
     SessionStore,
     SessionWriteError,
 )
-from src.engine.session.records import model_notice
-from src.engine.skills.loader import Skills
-from src.engine.terminal.manager import TerminalError, TerminalManager
-from src.engine.text import escape, escape_display, one_line
-from src.engine.tools.base import Preview
-from src.engine.turn_diff import BANNER, NO_FILES, NOTHING
-from src.engine.usage import summary
-from src.engine.workflows.loader import Workflows
-from src.engine.workflows.model import PlanSummary, RunResult
-from src.engine.workflows.runner import WorkflowRunner
-from src.engine.workflows.runs import RunIndex
-from src.engine.workflows.timings import TimingStore
+from core.engine.session.records import model_notice
+from core.engine.skills.loader import Skills
+from core.engine.terminal.manager import TerminalError, TerminalManager
+from core.engine.text import escape, escape_display, one_line
+from core.engine.tools.base import Preview
+from core.engine.turn_diff import BANNER, NO_FILES, NOTHING
+from core.engine.usage import summary
+from core.engine.workflows.loader import Workflows
+from core.engine.workflows.model import PlanSummary, RunResult
+from core.engine.workflows.runner import WorkflowRunner
+from core.engine.workflows.runs import RunIndex
+from core.engine.workflows.timings import TimingStore
+from textual import events
+from textual.app import App, ComposeResult, ScreenStackError
+from textual.binding import Binding, BindingType
+from textual.css.query import NoMatches
+from textual.message import Message
+from textual.widgets import OptionList, Tabs, TextArea
+from textual.worker import WorkerCancelled
+
 from src.tui import NEW, StartChoice
 from src.tui.approver import TuiApprover
 from src.tui.hints import MIN_ROWS, hint_text

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from core.engine.approval import ApprovalRequest, Choice, Decision
+from core.engine.text import escape
 from rich.syntax import Syntax
 from rich.text import Text
 from textual import on
@@ -14,8 +16,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Input, Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from src.engine.approval import ApprovalRequest, Choice, Decision
-from src.engine.text import escape
 from src.tui.styles import TOOL_NAME, diff_theme
 
 

@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from core.engine.text import escape
+from core.engine.todo import MARK, TodoItem, active
 from rich.text import Text
 from textual.widgets import Static
-
-from src.engine.text import escape
-from src.engine.todo import MARK, TodoItem, active
 
 
 class TodoPanel(Static):

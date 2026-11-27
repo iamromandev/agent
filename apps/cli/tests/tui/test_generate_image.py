@@ -8,16 +8,16 @@ import time
 from pathlib import Path
 
 import pytest
-from src.engine.events import TaskProgress, ToolProgress
-from src.engine.guardrails.setup import Guardrails
-from src.engine.imagegen import MfluxGenerator
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.events import TaskProgress, ToolProgress
+from core.engine.guardrails.setup import Guardrails
+from core.engine.imagegen import MfluxGenerator
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.image_fakes import fake_mflux
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import Transcript
 
-from tests.image_fakes import fake_mflux
 from tests.tui.conftest import AppFactory, choose, type_and_send, until
 
 
@@ -71,7 +71,7 @@ async def test_the_input_stays_usable_and_escape_cancels_a_running_generation(
 async def test_the_status_bar_shows_progress_while_running_and_clears_after(
     make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("src.engine.imagegen.PROGRESS_TICK", 0.05)
+    monkeypatch.setattr("core.engine.imagegen.PROGRESS_TICK", 0.05)
     monkeypatch.setenv("FAKE_MFLUX_MODE", "progress")
     monkeypatch.setenv("FAKE_MFLUX_DELAY", "0.15")
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))

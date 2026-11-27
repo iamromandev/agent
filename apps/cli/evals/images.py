@@ -106,9 +106,9 @@ def options_from_env(env: Mapping[str, str]) -> Options | str:
 
 def discover(settings: Any) -> Tools | str:
     """The commands and models of this machine, or the reason the eval cannot run here."""
-    from src.engine.image_pull import HF_COMMAND
-    from src.engine.imagegen import EDIT_COMMAND, find_mflux
-    from src.engine.tools import image as image_tools
+    from core.engine.image_pull import HF_COMMAND
+    from core.engine.imagegen import EDIT_COMMAND, find_mflux
+    from core.engine.tools import image as image_tools
 
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return "needs an Apple Silicon Mac"
@@ -224,12 +224,12 @@ async def run_case(name: str, workspace: Path, tools: Tools) -> CaseResult:
 
 
 async def _run_case(name: str, workspace: Path, tools: Tools) -> str | None:
-    from src.engine.guardrails.setup import prepare
-    from src.engine.image_pull import ImagePuller, grey_png
-    from src.engine.imagegen import EDIT_EXTRA, MfluxGenerator, png_size
-    from src.engine.tools import image as image_tools
-    from src.engine.tools.base import Prepared, ToolContext, ToolResult
-    from src.engine.tools.image import EditImageTool, GenerateImageTool
+    from core.engine.guardrails.setup import prepare
+    from core.engine.image_pull import ImagePuller, grey_png
+    from core.engine.imagegen import EDIT_EXTRA, MfluxGenerator, png_size
+    from core.engine.tools import image as image_tools
+    from core.engine.tools.base import Prepared, ToolContext, ToolResult
+    from core.engine.tools.image import EditImageTool, GenerateImageTool
 
     guard = prepare(workspace, None, None, os.environ)
     ctx = ToolContext(workspace=workspace, bash_timeout=120.0, guard=guard)
@@ -466,7 +466,7 @@ def main(
     signal.signal(signal.SIGINT, signal.default_int_handler)
     try:
         if settings_factory is None:
-            from src.config.settings import Settings
+            from core.config.settings import Settings
 
             settings_factory = Settings
         found = discover(settings_factory())
@@ -474,7 +474,7 @@ def main(
             print(f"image-eval skipped: {found}")
             return 0
         tools = found
-        from src.engine.imagegen import model_cached
+        from core.engine.imagegen import model_cached
 
         plan = plan_cases(opts, tools, lambda model: model_cached(model, env))
     except KeyboardInterrupt:

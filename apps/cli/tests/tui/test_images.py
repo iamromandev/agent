@@ -6,12 +6,12 @@ import asyncio
 import base64
 from pathlib import Path
 
-from src.engine.provider.base import Done, TextDelta
-from src.engine.session import FileRecorder
+from core.engine.provider.base import Done, TextDelta
+from core.engine.session import FileRecorder
+from core.testing.fakes import FakeCatalog
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
-from tests.fakes import FakeCatalog
 from tests.tui.conftest import AppFactory, scripted, settled, type_and_send, until
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\0" * 2048
@@ -113,8 +113,8 @@ async def test_the_session_file_holds_the_image_and_undo_puts_back_the_typed_tex
 import stat  # noqa: E402
 
 import pytest  # noqa: E402
-from src.client import clipboard  # noqa: E402
-from src.client.clipboard import ClipboardError, ClipboardUnsupported  # noqa: E402
+from core.client import clipboard  # noqa: E402
+from core.client.clipboard import ClipboardError, ClipboardUnsupported  # noqa: E402
 from src.tui.widgets.attachment_panel import AttachmentPanel  # noqa: E402
 
 VISION_CAT = FakeCatalog(["fake"], capabilities={"fake": ("vision",)})
@@ -307,7 +307,7 @@ async def test_a_message_that_never_sends_keeps_the_chips(
 
 
 async def _block(text, emit):
-    from src.engine.hooks.setup import HookDecision
+    from core.engine.hooks.setup import HookDecision
 
     return HookDecision(True, "no", [], [])
 

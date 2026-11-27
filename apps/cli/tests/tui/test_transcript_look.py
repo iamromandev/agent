@@ -4,10 +4,10 @@
 from __future__ import annotations
 
 import pytest
+from core.engine.session import TranscriptItem
+from core.engine.tools.base import Preview, ToolResult
 from rich.style import Style
 from rich.text import Text
-from src.engine.session import TranscriptItem
-from src.engine.tools.base import Preview, ToolResult
 from src.tui.widgets.transcript import AssistantEntry, GutterMark, NoticeEntry, Transcript, UserEntry
 from textual.app import App, ComposeResult
 from textual.pilot import Pilot

@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import ClassVar
 
+from core.engine.provider.models import NAME_SHOWN, ModelInfo
+from core.engine.text import escape_display
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -13,9 +15,6 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
-
-from src.engine.provider.models import NAME_SHOWN, ModelInfo
-from src.engine.text import escape_display
 
 GIB = 1024**3
 NAME_WIDTH = 40

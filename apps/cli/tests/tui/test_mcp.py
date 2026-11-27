@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.mcp.config import ServerConfig
-from src.engine.mcp.contract import ToolInfo
-from src.engine.mcp.hub import McpHub
-from src.engine.provider.base import Done, TextDelta
+from core.engine.mcp.config import ServerConfig
+from core.engine.mcp.contract import ToolInfo
+from core.engine.mcp.hub import McpHub
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import FakeConnection, FakeConnector
 from src.tui.app import AgentApp
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.fakes import FakeConnection, FakeConnector
 from tests.tui.conftest import AppFactory, until
 
 ECHO = ToolInfo("echo", "Echo it", {"type": "object", "properties": {"text": {"type": "string"}}})

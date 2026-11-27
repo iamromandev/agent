@@ -6,8 +6,8 @@ import io
 import json
 
 import pytest
-from src.engine.events import Compacting, Notice, ToolFinished, ToolStarted
-from src.engine.tools.base import ToolResult
+from core.engine.events import Compacting, Notice, ToolFinished, ToolStarted
+from core.engine.tools.base import ToolResult
 from src.headless.output import JsonCollector, Outcome, json_line
 
 TOKEN = "ghp_" + "a" * 36

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.engine.hooks.config import DEFAULT_TIMEOUT, Event, HookEntry
+from core.engine.hooks.config import DEFAULT_TIMEOUT, Event, HookEntry
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from textual.app import App, ComposeResult
 from textual.containers import VerticalScroll

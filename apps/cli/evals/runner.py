@@ -15,19 +15,19 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
-from src.client import OllamaClient, OllamaError
-from src.config.settings import Settings
-from src.engine import Agent
-from src.engine.commands.loader import load_commands
-from src.engine.guardrails.setup import prepare as prepare_guardrails
-from src.engine.mcp.trust import TrustStore, trust_store_path
-from src.engine.permissions import setup as permission_setup
-from src.engine.permissions.config import global_settings_path, project_settings_path
-from src.engine.provider.base import Provider
-from src.engine.provider.ollama import OllamaProvider
-from src.engine.session import NullRecorder
-from src.engine.tools import default_tools, read_only_tools
-from src.engine.tools.base import ToolContext
+from core.client import OllamaClient, OllamaError
+from core.config.settings import Settings
+from core.engine import Agent
+from core.engine.commands.loader import load_commands
+from core.engine.guardrails.setup import prepare as prepare_guardrails
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.permissions import setup as permission_setup
+from core.engine.permissions.config import global_settings_path, project_settings_path
+from core.engine.provider.base import Provider
+from core.engine.provider.ollama import OllamaProvider
+from core.engine.session import NullRecorder
+from core.engine.tools import default_tools, read_only_tools
+from core.engine.tools.base import ToolContext
 
 from evals.approver import AutoApprover
 from evals.record import RunRecord, sink

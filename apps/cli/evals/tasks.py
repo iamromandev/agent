@@ -11,7 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.engine.approval import ApprovalRequest
+from core.engine.approval import ApprovalRequest
 
 from evals.record import RunRecord
 

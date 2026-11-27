@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from src.engine.todo import TodoItem
+from core.engine.todo import TodoItem
 from src.tui.queue import Queued
 from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import InputRow

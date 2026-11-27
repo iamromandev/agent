@@ -1,8 +1,7 @@
 from __future__ import annotations
 
-from src.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
-
-from tests.fakes import Gate
+from core.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import Gate
 
 Reply = list[ProviderEvent | Gate]
 

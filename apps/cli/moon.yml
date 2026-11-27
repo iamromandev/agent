@@ -2,9 +2,11 @@ id: "cli"
 language: "python"
 layer: "application"
 
+dependsOn: ["core"]
+
 fileGroups:
-  sources: ["src/**/*", "evals/**/*"]
-  configs: ["pyproject.toml", "ruff.toml", ".python-version"]
+  sources: ["src/**/*", "evals/**/*", "/apps/core/core/**/*"]
+  configs: ["pyproject.toml", "ruff.toml", ".python-version", "/apps/core/pyproject.toml"]
 
 # Apple Silicon Macs also get the `image` extra (mflux, for the generate_image tool) and the `media` extra (mlx-audio,
 # for the speak tool); elsewhere they are not installed.

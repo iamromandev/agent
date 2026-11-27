@@ -8,21 +8,21 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from pathlib import Path
 
 import pytest
-from src.engine import Agent
-from src.engine.agents.loader import Agents
-from src.engine.approval import Approver
-from src.engine.checkpoints.store import CheckpointStore
-from src.engine.commands.loader import Commands
-from src.engine.configguard import ConfigGuard, HeldGlobal
-from src.engine.configwatch import Watch
-from src.engine.guardrails.setup import Guardrails
-from src.engine.hooks.setup import Hooks
-from src.engine.image_pull import ImagePuller
-from src.engine.imagegen import MfluxGenerator
-from src.engine.mcp.hub import McpHub
-from src.engine.permissions.setup import Rules
-from src.engine.provider.base import Message, ProviderEvent
-from src.engine.session import (
+from core.engine import Agent
+from core.engine.agents.loader import Agents
+from core.engine.approval import Approver
+from core.engine.checkpoints.store import CheckpointStore
+from core.engine.commands.loader import Commands
+from core.engine.configguard import ConfigGuard, HeldGlobal
+from core.engine.configwatch import Watch
+from core.engine.guardrails.setup import Guardrails
+from core.engine.hooks.setup import Hooks
+from core.engine.image_pull import ImagePuller
+from core.engine.imagegen import MfluxGenerator
+from core.engine.mcp.hub import McpHub
+from core.engine.permissions.setup import Rules
+from core.engine.provider.base import Message, ProviderEvent
+from core.engine.session import (
     FileRecorder,
     Recorder,
     SessionStore,
@@ -30,20 +30,19 @@ from src.engine.session import (
     sessions_root,
     workspace_dir,
 )
-from src.engine.skills.loader import Skills
-from src.engine.terminal.manager import TerminalManager
-from src.engine.tools import default_tools, read_only_tools
-from src.engine.tools.base import Tool, ToolContext
-from src.engine.web import Fetcher
-from src.engine.workflows.loader import Workflows
-from src.engine.workflows.runs import RunIndex
-from src.engine.workflows.timings import TimingStore
+from core.engine.skills.loader import Skills
+from core.engine.terminal.manager import TerminalManager
+from core.engine.tools import default_tools, read_only_tools
+from core.engine.tools.base import Tool, ToolContext
+from core.engine.web import Fetcher
+from core.engine.workflows.loader import Workflows
+from core.engine.workflows.runs import RunIndex
+from core.engine.workflows.timings import TimingStore
+from core.testing.fakes import FakeCatalog, Gate, ScriptedProvider
+from core.testing.helpers import assert_all_gone
 from src.tui import NEW, StartChoice
 from src.tui.app import AgentApp
 from textual.pilot import Pilot
-
-from tests.fakes import FakeCatalog, Gate, ScriptedProvider
-from tests.helpers import assert_all_gone
 
 WAIT = 5.0  # no test waits longer than this for the app; a regression fails instead of hanging
 TEST_LIMIT = 30

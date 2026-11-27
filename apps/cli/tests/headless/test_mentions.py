@@ -7,12 +7,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from src.config.settings import get_settings
-from src.engine.provider.base import Done, TextDelta
+from core.config.settings import get_settings
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import FakeCatalog, ScriptedProvider
 from src.headless import HeadlessOptions
 from src.headless.run import run_headless
-
-from tests.fakes import FakeCatalog, ScriptedProvider
 
 
 @pytest.fixture(autouse=True)

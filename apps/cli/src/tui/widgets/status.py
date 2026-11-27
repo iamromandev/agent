@@ -6,13 +6,12 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
+from core.engine.compaction import CHARS_PER_TOKEN
+from core.engine.events import Phase
+from core.engine.mode import Mode
+from core.engine.text import escape_display
 from textual.reactive import reactive
 from textual.widgets import Static
-
-from src.engine.compaction import CHARS_PER_TOKEN
-from src.engine.events import Phase
-from src.engine.mode import Mode
-from src.engine.text import escape_display
 
 WARN_AT = 0.8
 PHASE_TICK = 0.25  # seconds between timer redraws

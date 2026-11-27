@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.mode import Mode
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import sessions_root
+from core.engine.mode import Mode
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import sessions_root
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import NoticeEntry
 

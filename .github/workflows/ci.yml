@@ -17,7 +17,7 @@ permissions:
 
 jobs:
   python:
-    name: api, cli — lint, types
+    name: api, core, cli — lint, types
     runs-on: ubuntu-latest
     steps:
       # Full history: moon compares against the dev branch (vcs.defaultBranch) to find changed projects.
@@ -42,7 +42,7 @@ jobs:
       # ``check-ci`` rather than ``check``: ``ruff check --fix`` exits 0 once it
       # has fixed what it found, so it would pass a branch that does not lint.
       - name: Lint and type-check
-        run: moon run api:check-ci cli:check-ci
+        run: moon run api:check-ci core:check-ci cli:check-ci
 
   ui:
     name: ui — formatting, types

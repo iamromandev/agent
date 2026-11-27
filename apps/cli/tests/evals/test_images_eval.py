@@ -13,9 +13,8 @@ from typing import Any
 
 import evals.images as images_module
 import pytest
+from core.testing.image_fakes import dry_run, fake_compare, fake_composite, fake_hf, fake_mflux
 from evals.images import CASES, Tools, main, options_from_env, plan_cases
-
-from tests.image_fakes import dry_run, fake_compare, fake_composite, fake_hf, fake_mflux
 
 CLI = Path(__file__).resolve().parents[2]
 GEN, EDIT = "mflux-generate-z-image-turbo", "mflux-generate-flux2-edit"

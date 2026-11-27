@@ -1,6 +1,6 @@
 # Runs the checks this repo already runs, at the moment they are cheapest to
 # fix. Nothing here is a new opinion: every hook mirrors something in
-# ``make api-check``, ``make cli-check`` or ``bun run --cwd apps/ui web:check``.
+# ``make api-check``, ``make core-check``, ``make cli-check`` or ``bun run --cwd apps/ui web:check``.
 #
 # Install once:
 #     uv run --directory apps/api pre-commit install
@@ -27,7 +27,7 @@ repos:
       # in files nobody was looking at.
       - id: ruff-check
         args: [--fix]
-        files: ^apps/(api|cli)/.*\.py$
+        files: ^apps/(api|core|cli)/.*\.py$
 
   - repo: local
     hooks:
@@ -40,6 +40,14 @@ repos:
         language: system
         pass_filenames: false
         files: ^apps/api/.*\.py$
+        types: [python]
+
+      - id: ty-core
+        name: ty (core type check)
+        entry: uv run --directory apps/core ty check
+        language: system
+        pass_filenames: false
+        files: ^apps/core/.*\.py$
         types: [python]
 
       - id: ty-cli

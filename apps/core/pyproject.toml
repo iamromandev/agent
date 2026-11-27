@@ -1,0 +1,66 @@
+[project]
+name = "agent-core"
+version = "0.0.1"
+description = "Agent engine: loop, tools, providers, sessions"
+requires-python = "==3.15.0"
+dependencies = [
+    "httpx==0.28.1",
+    "pydantic-settings==2.12.0",
+    "mcp==2.3.0",
+]
+
+[project.optional-dependencies]
+# Image generation (the `generate_image` tool): Apple Silicon Macs only. `uv sync --extra image`.
+image = [
+    "mflux==0.24.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    # the masked edit_image compositing helper (a separate process, never imported by the agent)
+    "pillow==13.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+# Reel media tools (`speak`, later `assemble_video`): Apple Silicon Macs only. `uv sync --extra media`. Pulls torch and
+# spacy through misaki (about 1.2 GB). The spacy model is pinned by URL because misaki would pip-install it into the venv
+# on first use; pinning it up front keeps the install reproducible and stops a tool call from modifying the
+# environment. That wheel is fetched from the GitHub release with no hash pin in the repo (`uv.lock`
+# is gitignored); it only affects this opt-in extra.
+media = [
+    "mlx-audio==0.6.7; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "misaki[en]==0.9.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "en-core-web-sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl ; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "imageio-ffmpeg==0.8.1; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "pillow==13.0.0; sys_platform == 'darwin' and platform_machine == 'arm64'",
+    "numpy==2.5.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
+
+[tool.uv]
+# The agent is Unix-only (ptys). Without this, uv's universal lock fails on the `image` extra: mflux's other-platform
+# dependencies (mlx[cuda13]==0.32.2) have no cp315 wheels, even though the extra is limited to Apple Silicon.
+environments = ["sys_platform == 'darwin'", "sys_platform == 'linux'"]
+
+[dependency-groups]
+dev = [
+    "ruff==0.17.0",
+    "ty==0.0.86",
+    "pytest==9.1.1",
+    "pytest-asyncio==1.4.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+# the media extra pins the spacy model by URL
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = [
+    # PtyProcess.spawn forks while asyncio threads may exist; the child only execs (see its docstring)
+    "ignore:This process .* is multi-threaded:DeprecationWarning",
+]

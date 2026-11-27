@@ -10,8 +10,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Literal, TextIO
 
-from src.engine.events import AgentEvent, Compacting, Notice, ToolFinished, ToolStarted, UsageUpdate
-from src.engine.text import escape, escape_display
+from core.engine.events import AgentEvent, Compacting, Notice, ToolFinished, ToolStarted, UsageUpdate
+from core.engine.text import escape, escape_display
 
 ARG_LIMIT = 120  # characters of a tool call's argument shown on its line
 

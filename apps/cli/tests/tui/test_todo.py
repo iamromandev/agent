@@ -5,8 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from src.engine.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import ToolMeta
+from core.engine.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import ToolMeta
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import ToolEntry
 

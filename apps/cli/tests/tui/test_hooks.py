@@ -9,15 +9,16 @@ from collections.abc import Mapping
 from pathlib import Path
 
 import pytest
-from src.engine.hooks.runner import HookRun
-from src.engine.hooks.setup import Hooks
-from src.engine.hooks.setup import prepare as prepare_hooks
-from src.engine.mcp.hub import McpHub
-from src.engine.mcp.setup import prepare as prepare_mcp
-from src.engine.mcp.trust import TrustStore, trust_store_path
-from src.engine.permissions.config import project_settings_path
-from src.engine.permissions.setup import PermissionSetup, prepare
-from src.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from core.engine.hooks.runner import HookRun
+from core.engine.hooks.setup import Hooks
+from core.engine.hooks.setup import prepare as prepare_hooks
+from core.engine.mcp.hub import McpHub
+from core.engine.mcp.setup import prepare as prepare_mcp
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.permissions.config import project_settings_path
+from core.engine.permissions.setup import PermissionSetup, prepare
+from core.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import FakeConnection, FakeConnector, FakeRunner, Gate, exit_run, ok_run
 from src.tui import StartChoice
 from src.tui.app import HELP, AgentApp
 from src.tui.screens.mcp_trust import McpTrustScreen
@@ -28,7 +29,6 @@ from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 from textual.widgets import Label, OptionList
 
-from tests.fakes import FakeConnection, FakeConnector, FakeRunner, Gate, exit_run, ok_run
 from tests.tui.conftest import AppFactory, chat, scripted, settled, type_and_send, until
 
 Script = list[list[ProviderEvent | Gate]]

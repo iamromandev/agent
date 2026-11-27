@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.provider.base import Done, TextDelta
-from src.engine.session import FileRecorder, sessions_root, workspace_dir
-from src.engine.usage import UsageRecord
+from core.engine.provider.base import Done, TextDelta
+from core.engine.session import FileRecorder, sessions_root, workspace_dir
+from core.engine.usage import UsageRecord
 from src.tui import StartChoice
 from src.tui.screens.usage import UsageScreen
 from src.tui.widgets.transcript import NoticeEntry, Transcript

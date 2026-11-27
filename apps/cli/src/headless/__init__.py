@@ -5,9 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from core.runtime import NEW, StartChoice
+
 from src.headless.approver import HEADLESS_DENY as HEADLESS_DENY
 from src.headless.approver import HeadlessApprover as HeadlessApprover
-from src.runtime import NEW, StartChoice
 
 EXIT_OK, EXIT_FAIL, EXIT_USAGE, EXIT_INT, EXIT_TERM = 0, 1, 2, 130, 143
 STDIN_LIMIT = 1 << 20
