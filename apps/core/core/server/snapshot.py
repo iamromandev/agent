@@ -12,13 +12,13 @@ from core.host.session import SessionHost
 from core.wire import models as wm
 
 
-def _redacted(value: object, redact: Callable[[str], str]) -> Any:
+def redacted(value: object, redact: Callable[[str], str]) -> Any:
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: _redacted(item, redact) for key, item in value.items()}
+        return {key: redacted(item, redact) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_redacted(item, redact) for item in value]
+        return [redacted(item, redact) for item in value]
     return value
 
 
@@ -27,7 +27,7 @@ def wire_record(record: dict[str, Any], redact: Callable[[str], str]) -> dict[st
     text redacted (a tool result was redacted by the engine already; the user's and the model's text were not)."""
     images = record.get("images")
     out = {key: value for key, value in record.items() if key != "images"}
-    out = _redacted(out, redact)
+    out = redacted(out, redact)
     if images:
         out["images"] = [
             {"format": i.get("format"), "name": redact(str(i.get("name", ""))), "size": i.get("size", 0)} for i in images
@@ -64,6 +64,7 @@ def snapshot(
         session_id=host.session_id,
         seq=seq,
         model=redact(host.model),
+        window=host.provider.context_window,
         mode=str(agent.mode),
         busy=host.turn_active,
         claims=wm.Claims(

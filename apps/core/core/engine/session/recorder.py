@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import contextlib
 import errno
+import logging
 import os
 import stat
 from collections.abc import Callable, Mapping, Sequence
@@ -18,7 +19,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.engine.provider.base import Message
-from core.engine.session.lock import SessionLock, SessionLocked
+from core.engine.session.lock import LockUnsupported, SessionLock, SessionLocked
 from core.engine.session.records import (
     SessionHeader,
     ToolMeta,
@@ -28,6 +29,18 @@ from core.engine.session.records import (
 from core.engine.session.records import title_from as title_from
 from core.engine.session.ulid import new_ulid
 from core.engine.usage import UsageRecord
+
+log = logging.getLogger("agent.session")
+log.addHandler(logging.NullHandler())  # never Python's last-resort stderr handler: that would draw over the TUI
+NO_LOCK_WARNING = "the sessions folder does not support file locks: sessions are saved without a lock"
+_warned_no_lock = False  # said once per process
+
+
+def _warn_no_lock() -> None:
+    global _warned_no_lock
+    if not _warned_no_lock:
+        _warned_no_lock = True
+        log.warning(NO_LOCK_WARNING)
 
 DIR_MODE = 0o700
 FILE_MODE = 0o600
@@ -159,6 +172,7 @@ class FileRecorder:
         self._pending: list[bytes] = []
         self._held: list[bytes] = []  # model switches and usage records made before the file started
         self._lock: SessionLock | None = None  # held while the recorder is open (from the file's creation, or resume)
+        self._unlocked = False  # the folder has no `flock`: saved without a lock
 
     @classmethod
     def resume(cls, path: Path, workspace: Path) -> FileRecorder:
@@ -292,9 +306,12 @@ class FileRecorder:
         else:
             _secure_dir(root, create=False)
         _secure_dir(self._directory, create=self._creating)
-        if self._lock is None:  # a new session (its folder exists now), or a reopen after `close`
+        if self._lock is None and not self._unlocked:  # a new session (its folder exists now), or a reopen after `close`
             try:
                 self._lock = SessionLock.acquire(self._directory, self._path.stem)
+            except LockUnsupported:
+                self._unlocked = True
+                _warn_no_lock()
             except (SessionLocked, OSError) as error:
                 raise SessionWriteError(errno.EBUSY, f"could not lock the session: {error}") from error
         flags =os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC  # RDWR: the tail is read

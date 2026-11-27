@@ -23,6 +23,7 @@ class Opened(list):
     """What `src.tui.run` was called with: `(workspace, start)` items, and the `--model` values in `models`."""
 
     models: list[str | None]
+    shared: list[bool]
 
 
 @pytest.fixture
@@ -30,10 +31,12 @@ def opened(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> list[tuple[Path, 
     """What `src.tui.run` was called with."""
     calls = Opened()
     calls.models = []
+    calls.shared = []
 
-    def fake_run(workspace: Path, start: StartChoice, model: str | None = None) -> None:
+    def fake_run(workspace: Path, start: StartChoice, model: str | None = None, shared: bool = False) -> None:
         calls.append((workspace, start))
         calls.models.append(model)
+        calls.shared.append(shared)
 
     monkeypatch.setattr(src.tui, "run", fake_run)
     monkeypatch.chdir(tmp_path)
@@ -207,3 +210,61 @@ def test_stop_says_when_no_daemon_runs_and_exits_0(daemon_calls: DaemonCalls, tm
 def test_a_word_after_resume_is_its_value_even_when_it_is_serve(daemon_calls: DaemonCalls, opened: Opened) -> None:
     runner.invoke(app, ["--resume", "serve"])
     assert daemon_calls == [] and opened  # `serve` is the session id here: the agent opened, no daemon started
+
+
+def test_stop_reports_an_unusable_run_folder_in_one_line_and_exits_1(
+    daemon_calls: DaemonCalls, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import core.server.serve as served
+    from core.server.paths import RunDirError
+
+    def refused(workspace: Path) -> bool:
+        raise RunDirError("/x/agent/run is not owned by the current user")
+
+    monkeypatch.setattr(served, "stop", refused)
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 1
+    assert result.output.strip() == "agent stop: /x/agent/run is not owned by the current user"
+
+
+@pytest.mark.parametrize("command", ["stop", "serve"])
+def test_p_before_a_daemon_command_is_a_usage_error(daemon_calls: DaemonCalls, headless: Headless, command: str) -> None:
+    result = runner.invoke(app, ["-p", "x", command])
+    assert result.exit_code == 2
+    assert daemon_calls == [] and headless == []
+
+
+def test_shared_opens_the_agent_on_the_daemon_with_the_start_choice(opened: Opened, tmp_path: Path) -> None:
+    result = runner.invoke(app, ["--shared", "--continue", "--model", "m"])
+    assert result.exit_code == 0
+    assert opened == [(tmp_path, StartChoice("continue"))] and opened.shared == [True] and opened.models == ["m"]
+    runner.invoke(app, [])
+    assert opened.shared[-1] is False  # plain `agent` never touches the daemon
+
+
+def test_shared_with_p_is_a_usage_error(opened: Opened, headless: Headless) -> None:
+    result = runner.invoke(app, ["--shared", "-p", "x"])
+    assert result.exit_code == 2 and opened == [] and headless == []
+
+
+def test_run_shared_opens_the_app_on_the_daemon_and_says_why_when_it_cannot(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import core.server.serve as served
+    from src.tui import run_shared
+    from src.tui.app import AgentApp
+    from src.tui.remote import RemotePort
+
+    ran: list[AgentApp] = []
+    monkeypatch.setattr(AgentApp, "run", lambda self: ran.append(self))
+    monkeypatch.setattr(served, "ensure_daemon", lambda ws: tmp_path / "d.sock")
+    assert run_shared(tmp_path, StartChoice("continue"), "m") == 0
+    (app,) = ran
+    assert isinstance(app.port, RemotePort) and app.port.socket == tmp_path / "d.sock" and app.start.kind == "continue"
+
+    def down(ws: Path) -> Path:
+        raise TimeoutError("the agent daemon did not start within 10 s (see x.log)")
+
+    monkeypatch.setattr(served, "ensure_daemon", down)
+    assert run_shared(tmp_path) == 1
+    assert "agent --shared: the agent daemon did not start" in capsys.readouterr().err

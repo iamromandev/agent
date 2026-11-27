@@ -15,6 +15,7 @@ import time
 from collections.abc import Generator
 from pathlib import Path
 from types import FrameType
+from typing import Protocol
 
 import httpx
 import uvicorn
@@ -22,7 +23,7 @@ import uvicorn
 from core.server.app import build_app
 from core.server.daemon import Daemon
 from core.server.files import AlreadyRunning, PidLock, bind_socket, pid_held, read_pid
-from core.server.paths import RunDirError, log_path, pid_path, socket_path
+from core.server.paths import RunDirError, existing_socket_path, log_path, pid_path, socket_path
 from core.server.protocol import PeerCheckedH11
 
 log = logging.getLogger("agent.daemon")
@@ -121,12 +122,28 @@ def serve(workspace: Path) -> int:
                 finally:
                     _remove(sock, path, lock)
                     sock = None
+                    log_undelivered(rt.config_guard)  # what the quit checks saw after the streams were gone
     finally:
         if sock is not None:  # the runtime could not be built
             _remove(sock, path, lock)
         else:
             lock.release()  # idempotent
     return 0
+
+
+class _Undelivered(Protocol):
+    def undelivered(self) -> list[str]: ...
+
+
+def log_undelivered(guard: _Undelivered) -> None:
+    """The config watch warnings no client heard (said after the streams ended), into the daemon's log. Never raises."""
+    try:
+        texts = guard.undelivered()
+    except Exception:
+        log.exception("could not read the config watch's warnings")
+        return
+    for text in texts:
+        log.warning("warning: %s", text)
 
 
 def _remove(sock: socket.socket, path: Path, lock: PidLock) -> None:
@@ -148,9 +165,10 @@ def _client(path: Path, timeout: float) -> httpx.Client:
 
 
 def hello(workspace: Path, timeout: float = 1.0) -> dict[str, object] | None:
-    """The running daemon's `/v1/hello`, or None when none answers."""
-    path = socket_path(workspace.resolve())
-    if not path.exists():
+    """The running daemon's `/v1/hello`, or None when none answers (the run folder is never made here). `RunDirError`
+    when the run folder is not ours alone."""
+    path = existing_socket_path(workspace.resolve())
+    if path is None or not path.exists():
         return None
     try:
         with _client(path, timeout) as client:
@@ -196,17 +214,25 @@ def start_background(workspace: Path) -> Path:
     raise TimeoutError(f"the agent daemon did not start within {START_WAIT:g} s (see {log_file})")
 
 
+def ensure_daemon(workspace: Path) -> Path:
+    """The socket of `workspace`'s daemon: the running one, else one started now (`start_background`)."""
+    ws = workspace.resolve()
+    if hello(ws) is not None:
+        return socket_path(ws)
+    return start_background(ws)
+
+
 def stop(workspace: Path) -> bool:
-    """Ask the daemon for `workspace` to stop and wait until it let go of its pid file; False when none was running.
+    """`RunDirError` when the run folder is not ours alone. Ask the daemon for `workspace` to stop and wait until it let go of its pid file; False when none was running.
 
     "Gone" is the pid file's lock, not the pid: a daemon that exited but was not reaped yet (a zombie) still answers
     `kill(pid, 0)`, and a reused pid would answer for someone else. Only while the lock is held, so the pid in the file
     is the holder's, does a daemon that did not stop in time get SIGTERM (which runs the same cleanup)."""
     ws = workspace.resolve()
+    if hello(ws) is None:  # also when there is no run folder: it is not made just to find nothing in it
+        return False
     path = socket_path(ws)
     pids = pid_path(ws)
-    if hello(ws) is None:
-        return False
     with contextlib.suppress(httpx.HTTPError), _client(path, 5.0) as client:
         client.post("/v1/stop")
     deadline = time.monotonic() + STOP_WAIT

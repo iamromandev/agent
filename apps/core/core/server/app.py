@@ -23,14 +23,14 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from core.engine.compaction import turn_starts
 from core.engine.mode import Mode
 from core.engine.provider.models import CatalogError
-from core.engine.turn_diff import DiffItem, TurnDiff
+from core.engine.turn_diff import DiffItem
 from core.engine.usage import summary
 from core.host.asks import answer_from_wire
 from core.host.events import TurnOutcome
 from core.host.session import SessionHost
 from core.host.wire import encode
-from core.server.daemon import Daemon, SessionLockedElsewhere, UnknownSession
-from core.server.snapshot import snapshot
+from core.server.daemon import Daemon, OpenFailed, SessionLockedElsewhere
+from core.server.snapshot import redacted, snapshot
 from core.wire import models as wm
 
 PROTOCOL = "1"
@@ -136,7 +136,9 @@ def build_app(daemon: Daemon) -> ASGIApp:
         return run
 
     async def hello(request: Request) -> Response:
-        return JSONResponse({"v": 1, "version": VERSION, "pid": os.getpid(), "workspace": str(daemon.workspace)})
+        return JSONResponse(
+            {"v": 1, "version": VERSION, "pid": os.getpid(), "instance": daemon.instance, "workspace": str(daemon.workspace)}
+        )
 
     async def list_sessions(request: Request) -> Response:
         client_of(request)
@@ -162,10 +164,10 @@ def build_app(daemon: Daemon) -> ASGIApp:
         opened: OpenBody = await body(request, OpenBody)
         try:
             host, created = await daemon.open(opened.resume)
-        except UnknownSession as exc:
-            raise ApiError(404, str(exc)) from None
         except SessionLockedElsewhere as exc:
             raise ApiError(409, f"locked by another process: {exc}") from None
+        except OpenFailed as exc:
+            raise ApiError(exc.status, str(exc)) from None
         # A session made now has only its first notices on its bus: the client streams them from 0.
         return JSONResponse({"session_id": host.session_id, "snapshot": snap(host, 0 if created else host.bus.seq)})
 
@@ -177,18 +179,22 @@ def build_app(daemon: Daemon) -> ASGIApp:
             after = int(raw) if raw is not None else None
         except ValueError:
             raise ApiError(400, "after must be a number") from None
-        sub = host.bus.subscribe(remote=True)  # first, then the backlog: nothing in between can be missed
-        backlog = host.bus.since(after) if after is not None else None
-        start_seq = host.bus.seq
-        first = snap(host, start_seq) if backlog is None else None
-        daemon.attach(session_id, client)
 
         def line(data: dict[str, Any], seq: int) -> bytes:
             return f"id: {seq}\ndata: {json.dumps(data, separators=(',', ':'))}\n\n".encode()
 
         async def stream() -> AsyncIterator[bytes]:
-            last = start_seq if backlog is None else (after or 0)
+            # Subscribed and counted only once the stream runs, and released in its `finally`: a client that went
+            # before the body started, or a snapshot that failed, leaves no subscriber and no connection behind.
+            sub = host.bus.subscribe(remote=True)  # first, then the backlog: nothing in between can be missed
+            attached = False
             try:
+                backlog = host.bus.since(after) if after is not None else None
+                start_seq = host.bus.seq
+                first = snap(host, start_seq) if backlog is None else None
+                daemon.attach(session_id, client)
+                attached = True
+                last = start_seq if backlog is None else (after or 0)
                 if first is not None:  # too far behind (or a first attach): the state, then live events
                     yield line(first, start_seq)
                 else:
@@ -228,18 +234,24 @@ def build_app(daemon: Daemon) -> ASGIApp:
                             if seq <= last:
                                 continue  # already sent from the backlog
                             data = encode(item, session_id=host.session_id, seq=seq, redact=daemon.redact)
-                            if data is not None:  # an event with no wire form (a workflow's) is skipped
-                                yield line(data, seq)
                             last = seq
+                            if data is None:  # an event with no wire form (a workflow's) is skipped
+                                continue
+                            yield line(data, seq)
+                            # Written: its own text is on the way to its box (one that could not be sent is not
+                            # acknowledged, so the claim waits for the timeout instead of dropping the text).
                             if isinstance(item, TurnOutcome) and item.ack and item.client == client:
-                                host.outcome_applied(item.ack, client)  # its own text is on the way to its box
+                                host.outcome_applied(item.ack, client)
                         finally:
                             sub.queue.task_done()
                 finally:
                     stopping.cancel()
                     gone.cancel()
             finally:
-                daemon.detach(host, session_id, client, sub)
+                if attached:
+                    daemon.detach(host, session_id, client, sub)
+                else:
+                    host.bus.unsubscribe(sub)
 
         return StreamingResponse(
             stream(),
@@ -271,9 +283,9 @@ def build_app(daemon: Daemon) -> ASGIApp:
         return Response(status_code=204)
 
     async def undo(request: Request) -> Response:
-        client_of(request)
+        client = client_of(request)
         _, host = session(request)
-        result = await host.undo()
+        result = await host.undo(client)
         return JSONResponse({"prompt": result.prompt, "events": [d for e in result.events if (d := wire(e, host))]})
 
     async def compact(request: Request) -> Response:
@@ -286,7 +298,7 @@ def build_app(daemon: Daemon) -> ASGIApp:
         client = client_of(request)
         _, host = session(request)
         named: ModelBody = await body(request, ModelBody)
-        result = await host.switch_model(named.name, client=client)
+        result = await daemon.switch_model(host, named.name, client)
         notices = [{"level": level, "text": daemon.redact(text)} for level, text in result.notices]
         return JSONResponse({"notices": notices, "model": result.model, "window": result.window})
 
@@ -297,7 +309,10 @@ def build_app(daemon: Daemon) -> ASGIApp:
         if name not in INFO_NAMES:
             raise ApiError(404, f"no info named {name}")
         if name != "usage":
-            raise ApiError(501, f"/{name} is not available in shared mode yet")
+            text = daemon.info_text(name)
+            if text is None:
+                raise ApiError(501, f"/{name} is not available in shared mode yet")
+            return JSONResponse({"lines": [{"level": "info", "text": daemon.redact(text)}]})
         agent = host.agent
         data = summary(
             agent.usage,
@@ -309,9 +324,9 @@ def build_app(daemon: Daemon) -> ASGIApp:
             unrecorded=agent.usage_unrecorded,
             estimated=True,
         )
-        return JSONResponse({"usage": asdict(data)})
+        return JSONResponse({"usage": redacted(asdict(data), daemon.redact)})
 
-    diffs: dict[tuple[str, str], TurnDiff] = {}  # the last list each client asked for: its files are loaded from it
+    diffs = daemon.diffs  # the last list each client asked for: its files are loaded from it
 
     def item_json(item: DiffItem) -> dict[str, Any]:
         return {
@@ -329,6 +344,8 @@ def build_app(daemon: Daemon) -> ASGIApp:
     async def diff_list(request: Request) -> Response:
         client = client_of(request)
         session_id, host = session(request)
+        if (reason := host.refusal("/diff")) is not None:
+            raise ApiError(409, reason)
         diff = await host.diff_list()
         if diff is None:
             diffs.pop((session_id, client), None)
@@ -341,9 +358,13 @@ def build_app(daemon: Daemon) -> ASGIApp:
     async def diff_file(request: Request) -> Response:
         client = client_of(request)
         session_id, host = session(request)
+        if (reason := host.refusal("/diff")) is not None:
+            raise ApiError(409, reason)
         diff = diffs.get((session_id, client))
-        path = request.query_params.get("path", "")
-        item = next((i for i in diff.items if i.path == path), None) if diff is not None else None
+        # By its place in the list: the path the client got is redacted, so it may not match the file's.
+        raw = request.query_params.get("index", "")
+        index = int(raw) if raw.isdigit() else -1
+        item = diff.items[index] if diff is not None and 0 <= index < len(diff.items) else None
         if diff is None or item is None:
             raise ApiError(404, "no such file in the last diff (ask for the list first)")
         loaded = await host.diff_file(diff, item)

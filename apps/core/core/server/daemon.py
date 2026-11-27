@@ -10,14 +10,20 @@ from collections import deque
 from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 
+from core import info
+from core.engine import AgentBusy
 from core.engine.events import Notice
 from core.engine.loop import close_recorder
 from core.engine.mentions_index import FileIndex
 from core.engine.session import FileRecorder, SessionError, SessionInfo, new_ulid, sessions_root, workspace_dir
-from core.engine.session.lock import SessionLock
+from core.engine.session.lock import LOCKED_HINT, SessionLock, SessionLocked
+from core.engine.session.store import AmbiguousSession, SessionNotFound
+from core.engine.text import escape_display
+from core.engine.turn_diff import TurnDiff
 from core.host.asks import Answer, AnswerResult, AskBroker, AskEvent
 from core.host.bus import Subscriber
-from core.host.session import SessionHost
+from core.host.events import ModelChanged
+from core.host.session import OTHER_SESSION, ModelSwitch, SessionHost
 from core.trust import TrustOutcome, apply_trust, trust_lines
 
 if TYPE_CHECKING:
@@ -25,16 +31,44 @@ if TYPE_CHECKING:
 
 log = logging.getLogger("agent.daemon")
 
+DROP_GRACE = 2.0  # seconds a session nobody watches stays live (a client reconnecting, or one about to stream)
 KEPT_NOTICES = 50  # daemon-wide notices a session opened later still gets (launch warnings, trust results)
 WATCH_STEP = 0.25  # seconds between two looks of the idle watchdog (at most)
 
 
-class SessionLockedElsewhere(Exception):
-    """The session is open in another agent process."""
+class OpenFailed(Exception):
+    """A session could not be opened; `status` is the HTTP status that says why."""
+
+    status = 500
 
 
-class UnknownSession(Exception):
+class SessionLockedElsewhere(OpenFailed):
+    """The session is open in another agent process (or busy in this one)."""
+
+    status = 409
+
+
+class UnknownSession(OpenFailed):
     """No saved session matches."""
+
+    status = 404
+
+
+class AmbiguousId(OpenFailed):
+    """The id prefix matches more than one session."""
+
+    status = 400
+
+
+def _open_error(error: Exception | None, text: str) -> OpenFailed:
+    """The `OpenFailed` for what `SessionHost.open_session` returned (its notice text is the reason)."""
+    if isinstance(error, SessionLocked):
+        return SessionLockedElsewhere(text)
+    if isinstance(error, AgentBusy):
+        return SessionLockedElsewhere(f"busy: {text}")
+    if isinstance(error, SessionNotFound):
+        return UnknownSession(text)
+    return OpenFailed(f"could not open the session: {text}")
 
 
 class _Fanout:
@@ -57,6 +91,7 @@ class Daemon:
         self.asks = AskBroker(_Fanout(self))  # the launch trust prompts, shown in every session
         self.file_index = FileIndex(rt.root, rt.guard)
         self.connections: dict[tuple[str, str], int] = {}  # (session id, client) -> open event streams
+        self.diffs: dict[tuple[str, str], TurnDiff] = {}  # (session id, client) -> the diff list it asked for last
         self._opening: dict[str, asyncio.Lock] = {}  # by session id: resumes of one session run one at a time
         self.stopping = asyncio.Event()
         self._notices: deque[Notice] = deque(maxlen=KEPT_NOTICES)
@@ -66,6 +101,10 @@ class Daemon:
         self._closed = False
         self.server: Any = None  # the uvicorn server, once `run_daemon` made it
         self._sessions = workspace_dir(sessions_root(rt.settings.sessions_dir), rt.root)
+        self.drop_grace = DROP_GRACE
+        self.instance = new_ulid()  # tells a reconnecting client that this is another daemon (its seqs start over)
+        self._indexing = False
+        self._reindex_pending = False
 
     # text
 
@@ -99,7 +138,7 @@ class Daemon:
         rt.config_guard.listen(self._config_changed)
         rt.mcp.listen(self._mcp_event)
         rt.mcp.start()  # never the untrusted ones
-        self._tasks.append(loop.create_task(asyncio.to_thread(self.file_index.build)))
+        self.reindex()
         self._tasks.append(loop.create_task(self._trust()))
         self._tasks.append(loop.create_task(self._watch_idle()))
 
@@ -117,11 +156,8 @@ class Daemon:
                 host.interrupt()
         self.asks.cancel_all("closing")
         for host in list(self.hosts.values()):
-            try:
-                await host.aclose()
-            except Exception:
-                log.exception("closing a session failed")
-            host.agent.close()  # flushes the recorder and releases the session lock
+            await self._close_host(host)
+        self.diffs.clear()
         self.file_index.cancel()
         for task in self._tasks:
             task.cancel()
@@ -134,6 +170,41 @@ class Daemon:
             log.exception("closing the runtime failed")
         finally:
             self.rt.kill_all()
+
+    def reindex(self) -> None:
+        """Build the `@` file index in a thread (at start, again after every job); a request during a build makes it
+        run once more."""
+        if self._loop is None or self._closed:
+            return
+        if self._indexing:
+            self._reindex_pending = True
+            return
+        self._indexing = True
+        self._tasks = [t for t in self._tasks if not t.done()]
+        self._tasks.append(self._loop.create_task(self._build_index()))
+
+    async def _build_index(self) -> None:
+        try:
+            while True:
+                self._reindex_pending = False
+                await asyncio.to_thread(self.file_index.build)
+                if not self._reindex_pending or self._closed:
+                    return
+        except Exception:
+            log.exception("building the file index failed")
+        finally:
+            self._indexing = False
+
+    async def _close_host(self, host: SessionHost) -> None:
+        """Stop a session's job and flush its recorder (which releases the session lock). Never raises."""
+        try:
+            await host.aclose()
+        except Exception:
+            log.exception("closing a session failed")
+        try:
+            host.agent.close()  # flushes the recorder and releases the session lock
+        except Exception:
+            log.exception("closing a session's agent failed")
 
     async def _watch_idle(self) -> None:
         """Exit after `idle` seconds with no event stream open and no turn or hook running."""
@@ -268,6 +339,9 @@ class Daemon:
             hooks=rt.hooks,
         )
         host.connected = lambda client: self.connections.get((host.session_id, client), 0) > 0
+        host.on_job_end = self.reindex  # files a turn made are offered as `@` mentions after it
+        # One job that runs tools at a time across the daemon: the sessions share the runtime's checkpoint store.
+        host.elsewhere = lambda: any(other.turn_active for other in self.hosts.values() if other is not host)
         old = host.agent.reset(recorder=FileRecorder(folder, rt.root, session_id=session_id))
         if old is not None:
             close_recorder(old)  # never written: the runtime's lazy recorder
@@ -280,9 +354,13 @@ class Daemon:
         (`"latest"`; a new one when there is none), or the saved one with that id or id prefix. A session already live
         in this daemon is shared. `UnknownSession`, or `SessionLockedElsewhere` when another process has it open."""
         info: SessionInfo | None = None
+        if resume is not None and (live := self.hosts.get(resume)) is not None:
+            return live, False  # live here, maybe with no file yet (a new session another client opened)
         if resume is not None:
             try:
                 info = await asyncio.to_thread(self.rt.store.latest if resume == "latest" else lambda: self.rt.store.find(resume))
+            except AmbiguousSession as exc:
+                raise AmbiguousId(str(exc)) from exc
             except SessionError as exc:
                 raise UnknownSession(str(exc)) from exc
         if info is None:
@@ -298,16 +376,32 @@ class Daemon:
             if live is not None:
                 return live, False
             if SessionLock.held_elsewhere(info.path.parent, info.id):
-                raise SessionLockedElsewhere(f"session {info.id} is open in another agent process")
+                raise SessionLockedElsewhere(f"session {info.id} is open in another agent process{LOCKED_HINT}")
             host = self._new_host(new_ulid())
             opened = await host.open_session(info, "daemon")
             if opened.loaded is None:
                 await host.aclose()
                 host.agent.close()
                 text = opened.notices[0][1] if opened.notices else "the session could not be opened"
-                raise SessionLockedElsewhere(text)
+                raise _open_error(opened.error, text)
             self.hosts[info.id] = host
             return host, True
+
+    async def switch_model(self, host: SessionHost, name: str, client: str) -> ModelSwitch:
+        """`/model` in one session: the provider is the daemon's, so the switch is every session's. Each session is
+        told (`ModelChanged`), and every other one also gets a notice saying so."""
+        if host.other_session_busy():  # its turn must not change model mid-way
+            return ModelSwitch([("warn", OTHER_SESSION)])
+        result = await host.switch_model(name, client=client)
+        if result.model is not None and result.window is not None:
+            changed = ModelChanged(result.model, result.window)
+            notice = Notice("info", f"model switched to {escape_display(result.model)} by another session")
+            for other in list(self.hosts.values()):
+                if other is not host:
+                    other.agent.model_switched(result.model, result.window)  # its file says so too
+                    other.bus.publish(notice)
+                other.bus.publish(changed)
+        return result
 
     def host(self, session_id: str) -> SessionHost | None:
         return self.hosts.get(session_id)
@@ -325,7 +419,54 @@ class Daemon:
             self.connections[key] = left
             return
         self.connections.pop(key, None)
+        self.diffs.pop(key, None)
         host.client_gone(client)
+        self._schedule_drop(host, session_id)
+
+    def _watched(self, session_id: str) -> bool:
+        return any(sid == session_id for sid, _ in self.connections)
+
+    def _idle(self, host: SessionHost) -> bool:
+        return not host.turn_active and not host.switching and not host.busy_tasks() and not host.asks.pending()
+
+    def _schedule_drop(self, host: SessionHost, session_id: str) -> None:
+        """Nobody watches the session: after `drop_grace` seconds (a client whose open finished but whose stream is not
+        up yet, or one reconnecting, comes back within it) it is closed, which releases its session lock, so plain
+        `agent --continue` can open it and a later open loads it again from its file. A session that is busy (a turn
+        with nobody watching, an ask waiting for a client) is looked at again later; a new session nobody wrote to is
+        just dropped."""
+        if self._loop is None or self._closed or self._watched(session_id) or self.hosts.get(session_id) is not host:
+            return
+        self._loop.call_later(self.drop_grace, self._drop_if_unused, host, session_id)
+
+    def _drop_if_unused(self, host: SessionHost, session_id: str) -> None:
+        if self._closed or self._watched(session_id) or self.hosts.get(session_id) is not host:
+            return
+        if not self._idle(host):
+            self._schedule_drop(host, session_id)
+            return
+        self.hosts.pop(session_id, None)
+        self.diffs = {key: diff for key, diff in self.diffs.items() if key[0] != session_id}
+        assert self._loop is not None
+        self._tasks.append(self._loop.create_task(self._close_host(host)))
+
+    def info_text(self, name: str) -> str | None:
+        """The text of a listing command (the same function the app calls); None for one served elsewhere."""
+        rt = self.rt
+        match name:
+            case "skills":
+                return info.skills_summary(rt.skills)
+            case "agents":
+                return info.agents_summary(rt.agents)
+            case "permissions":
+                return info.permissions_summary(rt.permissions.rules)
+            case "hooks":
+                return info.hooks_summary(rt.hooks)
+            case "mcp":
+                return info.mcp_summary(rt.mcp)
+            case "guardrails":
+                return info.guardrails_summary(rt.guard, rt.config_guard)
+        return None
 
     def pending_asks(self) -> list[AskEvent]:
         return self.asks.pending()

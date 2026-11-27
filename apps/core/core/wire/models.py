@@ -124,6 +124,12 @@ class ProviderState(Message):
     problem: str | None = None
 
 
+class ModelChanged(Message):
+    type: Literal["model_changed"] = "model_changed"
+    model: str
+    window: int
+
+
 class UserEntry(Message):
     type: Literal["user_entry"] = "user_entry"
     text: str
@@ -257,6 +263,21 @@ class QueueEntry(Strict):
     client: str = ""
 
 
+class QueueChanged(Message):
+    type: Literal["queue_changed"] = "queue_changed"
+    entries: list[QueueEntry] = Field(default_factory=list)
+
+
+class TurnUndone(Message):
+    type: Literal["turn_undone"] = "turn_undone"
+    client: str
+
+
+class ModeChanged(Message):
+    type: Literal["mode_changed"] = "mode_changed"
+    mode: Literal["build", "edits", "plan"]
+
+
 class Claims(Strict):
     """Who holds the session now: a turn (or compaction, undo, workflow), a switch, and whether a message queues."""
 
@@ -270,6 +291,7 @@ class Claims(Strict):
 class Snapshot(Message):
     type: Literal["snapshot"] = "snapshot"
     model: str = ""
+    window: int = 0
     mode: str = ""
     busy: bool = False
     claims: Claims = Field(default_factory=Claims)
@@ -303,6 +325,10 @@ WireMessage = Annotated[
     | ToolProgress
     | Phase
     | ProviderState
+    | ModelChanged
+    | QueueChanged
+    | ModeChanged
+    | TurnUndone
     | UserEntry
     | Delivering
     | JobEventsDone

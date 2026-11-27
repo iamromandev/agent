@@ -13,6 +13,7 @@ from core.engine.hooks.setup import HookDecision
 from core.engine.mode import Mode
 from core.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
 from core.engine.session import FileRecorder, SessionStore, sessions_root, workspace_dir
+from core.engine.session.lock import LOCKED_HINT
 from core.engine.tools import default_tools
 from core.engine.tools.base import ToolContext
 from core.host.asks import AskEvent
@@ -392,7 +393,7 @@ async def test_a_session_open_in_another_process_is_not_opened(made) -> None:
     with session_held_elsewhere(info.path.parent, info.id):
         opened = await host.open_session(info)
     assert opened.loaded is None and host.agent.history == []
-    assert opened.notices == [("error", f"session {info.id} is open in another agent process")]
+    assert opened.notices == [("error", f"session {info.id} is open in another agent process{LOCKED_HINT}")]
 
 
 async def test_an_outcome_whose_client_disconnects_releases_the_claim_at_once(made) -> None:

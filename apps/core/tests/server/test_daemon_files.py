@@ -89,3 +89,30 @@ def test_a_second_daemon_for_the_folder_is_refused_naming_the_pid(data_home: Pat
     finally:
         first.release()
     PidLock.acquire(pid_path(tmp_path)).release()  # free again
+
+
+def test_a_pid_file_removed_while_it_was_being_locked_is_locked_again(
+    data_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The last daemon removes its pid file while it still holds it: a new one that locked the removed file retries."""
+    import fcntl
+
+    from core.server import files
+
+    path = pid_path(tmp_path)
+    real = fcntl.flock
+    calls: list[int] = []
+
+    def racing(fd: int, op: int) -> None:
+        calls.append(fd)
+        if len(calls) == 1:
+            os.unlink(path)  # the old holder's release, between our open and our flock
+        real(fd, op)
+
+    monkeypatch.setattr(files.fcntl, "flock", racing)
+    lock = PidLock.acquire(path)
+    try:
+        assert len(calls) == 2
+        assert path.read_text().strip() == str(os.getpid())
+    finally:
+        lock.release()

@@ -17,6 +17,7 @@ from typing import Any, ClassVar, Literal
 
 from core.client import clipboard
 from core.client.clipboard import ClipboardError, ClipboardUnsupported, PasteFolder
+from core.client.daemon import DaemonError, DaemonUnavailable, ProtocolMismatch
 from core.engine import (
     Agent,
     AgentBusy,
@@ -34,7 +35,7 @@ from core.engine import (
     TurnEnded,
     UsageUpdate,
 )
-from core.engine.agents.loader import READ_ONLY_TOOLS, Agents
+from core.engine.agents.loader import Agents
 from core.engine.approval import ApprovalRequest, Choice, Decision
 from core.engine.commands.builtins import BUILTINS
 from core.engine.commands.loader import Commands
@@ -42,22 +43,19 @@ from core.engine.compaction import turn_starts
 from core.engine.configguard import ConfigGuard, HeldGlobal
 from core.engine.configwatch import Cause
 from core.engine.events import WorkflowLine, WorkflowProgress
-from core.engine.guardrails.paths import (
-    BUILTIN_HOME,
-    BUILTIN_NAMES,
-    MAX_TRACKED_DEPTH,
-    MAX_TRACKED_DIRS,
-    MAX_TRACKED_FILES,
-)
+from core.engine.guardrails.setup import Guardrails
+from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
 from core.engine.mcp.hub import HubEvent, McpHub
-from core.engine.mcp.names import tool_name
+from core.engine.mentions_index import FileIndex
 from core.engine.mode import Mode
-from core.engine.provider.base import Image
+from core.engine.permissions.setup import Rules
+from core.engine.provider.base import Image, SwitchableProvider
 from core.engine.provider.images import MAX_IMAGES, ImageError, read_image_fd, size_text, sniff
 from core.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
+    ModelCatalog,
     ModelInfo,
     installed_name,
 )
@@ -78,10 +76,22 @@ from core.engine.workflows.runner import WorkflowRunner
 from core.engine.workflows.runs import RunIndex
 from core.engine.workflows.timings import TimingStore
 from core.host.asks import AnswerResult, AskEvent, AskResolved
-from core.host.events import Delivering, EntryEnd, JobEventsDone, ProviderState, TurnOutcome, UserEntry
-from core.host.port import LOCAL_CLIENT, LocalPort
+from core.host.events import (
+    Delivering,
+    EntryEnd,
+    JobEventsDone,
+    ModeChanged,
+    ModelChanged,
+    ProviderState,
+    QueueChanged,
+    TurnOutcome,
+    TurnUndone,
+    UserEntry,
+)
+from core.host.port import LocalPort
 from core.host.session import WORKFLOW_RUNNING, SendResult, SessionHost, uninterrupted
-from core.trust import TrustOutcome, apply_trust
+from core.trust import TrustAsk, TrustOutcome, apply_trust
+from core.wire import models as wm
 from textual import events
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding, BindingType
@@ -89,9 +99,12 @@ from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import OptionList, Tabs, TextArea
 
+from core import info
 from src.tui import NEW, StartChoice
 from src.tui.hints import MIN_ROWS, hint_text
+from src.tui.remote import NOT_SHARED, DaemonGone, Reconnected, RemotePort
 from src.tui.screens.approval import ApprovalScreen
+from src.tui.screens.daemon_gone import DaemonGoneScreen
 from src.tui.screens.diff import DiffScreen
 from src.tui.screens.global_trust import GlobalTrustScreen
 from src.tui.screens.mcp_trust import McpTrustScreen
@@ -110,7 +123,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.todo_panel import TodoPanel
 from src.tui.widgets.transcript import Transcript
 
-DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, GlobalTrustScreen, DiffScreen, UsageScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
+DIALOGS = (ApprovalScreen, DaemonGoneScreen, SessionPicker, ModelPicker, McpTrustScreen, PermissionTrustScreen, GlobalTrustScreen, DiffScreen, UsageScreen)  # modal screens (and the diff viewer): the app's own keys leave them alone
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
@@ -123,6 +136,7 @@ HELP = (
     "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
 
+SHARED_INFO = frozenset({"/mcp", "/permissions", "/guardrails", "/hooks", "/skills", "/agents"})  # the daemon's
 WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] [--redo <step>] | cancel]"
 PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
 FAILED_SHOWN = 200
@@ -152,7 +166,7 @@ class AgentApp(App[None]):
 
     def __init__(
         self,
-        port: LocalPort,
+        port: LocalPort | RemotePort,
         *,
         start: StartChoice = NEW,
         on_close: Callable[[], Awaitable[None]] | None = None,
@@ -171,12 +185,12 @@ class AgentApp(App[None]):
         timings: TimingStore | None = None,
         config_guard: ConfigGuard | None = None,
         held: HeldGlobal | None = None,
+        model: str | None = None,
     ) -> None:
         super().__init__()
         # The live session: its turn pipeline, claims and queue are the host's; this app draws them and keeps the
         # input box, the pasted images, the terminals, the workflows and the image pull.
         self.port = port
-        host: SessionHost = port.host
         # What the marker holds until the next launch besides the allow rules, hooks and servers (shown and asked about
         # with them): the global keepEnv and the global commands, skills, agents and workflows.
         self._held = held if held is not None else HeldGlobal()
@@ -196,27 +210,29 @@ class AgentApp(App[None]):
         self.commands = commands if commands is not None else Commands({}, ())
         self.skills = skills if skills is not None else Skills({}, ())
         self.agents = agents if agents is not None else Agents.empty()
-        # The host's own, under the names the app has always used for them.
-        self.permissions = host.permissions
-        self.guard = host.guard
-        self.hooks = host.hooks
-        self.store: SessionStore | None = host.store
-        self.recorder_factory = host.recorder_factory
-        self.provider = host.provider
-        self.catalog = host.catalog
-        self.vision = host.vision
-        self.window_cap = host.window_cap
-        self.workspace = host.workspace
+        self.workspace = port.workspace
+        if isinstance(port, LocalPort):  # the host's own, under the names the app has always used for them
+            host = port.host
+            self.permissions = host.permissions
+            self.guard = host.guard
+            self.hooks = host.hooks
+            self.store: SessionStore | None = host.store
+        else:  # `--shared`: the rules, hooks and guardrails are the daemon's (its `info` route lists them)
+            self.permissions = Rules.empty()
+            self.guard = Guardrails.off(self.workspace)
+            self.hooks = Hooks.empty()
+            self.store = None
+            port.on_suggestions = self._paths_refreshed
         self.start = start
+        self._wanted_model = model  # `--shared --model`: the daemon's session decides; a different one is said
         self._launch_notices = tuple(launch_notices)  # info lines for the transcript, already escaped
-        self.file_index = port.file_index
         self._indexing = False
         self._reindex_pending = False
         self._shutting_down = False
         self.paste = paste if paste is not None else PasteFolder(self.workspace)  # removed when the app quits
         self._pending: list[tuple[Path, str, tuple[int, int, int, int]]] = []  # pasted images waiting: (file, chip label, identity)
         self._taken: tuple[int, list[tuple[Path, str, tuple[int, int, int, int]]]] | None = None  # (turn, chips it took)
-        self._ask_screens: dict[str, ApprovalScreen] = {}  # open approval dialogs by ask id
+        self._ask_screens: dict[str, ApprovalScreen | PermissionTrustScreen] = {}  # open ask dialogs by ask id
         self._progress_call: str | None = None  # the call whose live line the status bar shows
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
         self._signals_before: dict[signal.Signals, Any] = {}  # what SIGTERM and SIGHUP did before the app
@@ -224,12 +240,35 @@ class AgentApp(App[None]):
         self._closing_tabs: set[str] = set()  # terminals whose tab is being closed (they are being stopped)
 
     @property
+    def shared(self) -> bool:
+        """The session lives in the workspace's daemon (`agent --shared`)."""
+        return not isinstance(self.port, LocalPort)
+
+    def _local(self) -> LocalPort:
+        """The in-process port; what only it has (the host, the agent, the file index) is never used in shared mode."""
+        if not isinstance(self.port, LocalPort):
+            raise RuntimeError("not available in --shared mode")
+        return self.port
+
+    @property
     def host(self) -> SessionHost:
-        return self.port.host
+        return self._local().host
 
     @property
     def agent(self) -> Agent:
-        return self.port.host.agent
+        return self._local().host.agent
+
+    @property
+    def provider(self) -> SwitchableProvider:
+        return self._local().host.provider
+
+    @property
+    def catalog(self) -> ModelCatalog | None:
+        return self._local().host.catalog
+
+    @property
+    def file_index(self) -> FileIndex:
+        return self._local().file_index
 
     class McpEvent(Message):
         """An MCP server became ready, failed or exited, or the hub has a warning."""
@@ -253,10 +292,10 @@ class AgentApp(App[None]):
 
     def on_mount(self) -> None:
         status = self.query_one(StatusBar)
-        status.model = escape_display(self.provider.model)
-        status.window = self.provider.context_window
+        status.model = escape_display(self.port.model)
+        status.window = self.port.window
         status.workspace = display_path(self.workspace)
-        status.mode = self.agent.mode
+        status.mode = self.port.mode
         self.query_one(ChatInput).suggestions = self.query_one(CommandSuggestions)
         self.query_one(ChatInput).paths = self.query_one(PathSuggestions)
         self.query_one(ChatInput).focus()
@@ -269,9 +308,12 @@ class AgentApp(App[None]):
         self._loop_thread = threading.get_ident()
         if self.config_guard is not None:  # a reaction on another thread tells its listeners on this loop
             self.config_guard.attach_loop(asyncio.get_running_loop())
+        self.port.begin_switch()  # claimed before any worker runs (nothing else can hold it yet): `_start` releases it
+        if isinstance(self.port, RemotePort):  # the session is opened (and its stream subscribed) by the worker
+            self.run_worker(self._start_remote(self.port), group="start")
+            return
         # the host's events, drawn one after the other; a turn sent here takes the pasted images
         self.port.subscribe(self._on_port_event, self._on_ask, self._attachments)
-        self.host.begin_switch()  # claimed before any worker runs (nothing else can hold it yet): `_start` releases it
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
 
@@ -303,7 +345,7 @@ class AgentApp(App[None]):
 
     async def _run_check(self) -> bool:
         """Ask the provider whether it is ready (the host publishes the answer, shown by `_on_host_event`)."""
-        return await self.host.check()
+        return await self.port.check()
 
     async def _start(self) -> None:
         source: Literal["startup", "resume"] = "startup"
@@ -317,7 +359,120 @@ class AgentApp(App[None]):
                 self._start_trust()
             await self._session_started(source)
         finally:
-            self.host.end_switch()
+            self.port.end_switch()
+
+    # shared mode (`agent --shared`): the session is the daemon's
+
+    async def _start_remote(self, port: RemotePort) -> None:
+        """Reach the daemon, open the session the command line asked for, draw it from its snapshot, then follow its
+        stream. The switch claimed in `on_mount` is held until then, so no message is sent before the session is."""
+        transcript = self.query_one(Transcript)
+        try:
+            while True:  # unreachable: ask whether to keep waiting (a daemon of another version: quit, naming it)
+                try:
+                    await port.connect()
+                    opened = await self._open_remote_start(port)
+                except ProtocolMismatch as exc:
+                    self.exit(return_code=1, message=f"agent --shared: {exc}")
+                    return
+                except (DaemonUnavailable, DaemonError) as exc:
+                    opened, reason = None, f"the agent daemon cannot be reached: {exc}"
+                else:
+                    reason = "the agent daemon cannot be reached"
+                if opened is not None:
+                    break
+                if not await self.push_screen_wait(DaemonGoneScreen(reason)):
+                    self.exit(return_code=1, message=f"agent --shared: {reason}")
+                    return
+            snapshot, title, count = opened
+            await self._show_snapshot(snapshot)
+            if title:
+                await transcript.add_notice("info", f'Resumed "{title}" ({count} messages)')
+            if self._wanted_model is not None and snapshot.model != self._wanted_model:
+                await transcript.add_notice(
+                    "info", f"this session runs {escape_display(snapshot.model)}; /model switches it for every client"
+                )
+            port.subscribe(self._on_port_event, self._on_ask)
+            for ask in port.pending_asks():  # asked while no client was attached: shown now
+                self._on_ask(ask)
+        except Exception as exc:  # a bug or a bad answer must not take the app down: it says so and stays usable
+            with contextlib.suppress(Exception):
+                await transcript.add_notice("error", f"agent --shared: could not open the session: {escape(str(exc))[:200]}")
+        finally:
+            port.end_switch()
+
+    async def _open_remote_start(self, port: RemotePort) -> tuple[wm.Snapshot, str, int] | None:
+        """The start session as `--continue`, `--resume` or the picker chose it (a new one otherwise, also when the
+        chosen one cannot be opened: the notice says why). `(snapshot, title, message count)`; None: unreachable."""
+        transcript = self.query_one(Transcript)
+        kind = self.start.kind
+        resume: str | None = None
+        title, count = "", 0
+        if kind == "continue":
+            resume = "latest"
+        elif kind == "resume":
+            resume = self.start.session_id or ""
+        elif kind == "pick":
+            try:
+                infos = await port.list_sessions()
+            except (DaemonError, DaemonUnavailable) as exc:
+                await transcript.add_notice("warn", f"could not list the sessions: {escape(str(exc))}")
+                infos = []
+            if not infos:
+                await transcript.add_notice("info", "No saved sessions for this folder")
+            else:
+                chosen = await self.push_screen_wait(SessionPicker(infos))
+                info = next((i for i in infos if i.id == chosen), None)
+                if info is not None:
+                    resume, title, count = info.id, info.title, info.message_count
+        try:
+            try:
+                return await port.open(resume, self._wanted_model), title, count
+            except DaemonError as exc:
+                if resume is None:
+                    raise
+                await transcript.add_notice("error", escape(exc.text))
+                return await port.open(None, self._wanted_model), "", 0
+        except (DaemonError, DaemonUnavailable) as exc:
+            await transcript.add_notice("error", f"agent daemon: {escape(str(exc))}")
+            return None
+
+    async def _show_snapshot(self, snapshot: wm.Snapshot) -> None:
+        """Redraw the transcript, the panels and the status bar from a snapshot of the daemon's session."""
+        port = self._remote()
+        transcript = self.query_one(Transcript)
+        await transcript.clear_all()
+        await transcript.replay(port.snapshot_session(snapshot).items)
+        self.query_one(TodoPanel).show(port.todos)
+        self._show_queue()
+        status = self.query_one(StatusBar)
+        status.model = escape_display(port.model)
+        status.window = port.window
+        status.mode = port.mode
+        status.pending_mode = False
+        status.busy = port.turn_active
+        self._refresh_hints()
+
+    def _remote(self) -> RemotePort:
+        if not isinstance(self.port, RemotePort):
+            raise RuntimeError("only in --shared mode")
+        return self.port
+
+    async def _daemon_gone(self, gone: DaemonGone) -> None:
+        """The daemon did not come back: quit, or keep waiting (the typed text stays in the box either way)."""
+        keep = await self.push_screen_wait(DaemonGoneScreen(gone.reason))
+        if keep:
+            self._remote().keep_waiting()
+        else:
+            self.exit()
+
+    async def _refuse_shared(self) -> None:
+        await self.query_one(Transcript).add_notice("warn", NOT_SHARED)
+
+    def _paths_refreshed(self) -> None:
+        """A `--shared` path lookup came back: show it if the input still asks for it."""
+        with contextlib.suppress(NoMatches, ScreenStackError):
+            self._update_paths(self.query_one(ChatInput))
 
     def _start_mcp(self) -> None:
         """Start the configured MCP servers in the background; their events become notices."""
@@ -466,11 +621,11 @@ class AgentApp(App[None]):
     async def _announce_instructions(self) -> None:
         """Show which AGENTS.md files are in effect; never raises. The caller holds the switch claim."""
         try:
-            notice = await asyncio.to_thread(self.agent.instructions_notice)
+            notice = await asyncio.to_thread(self.port.instructions_notice)
             if notice is not None:
                 await self.query_one(Transcript).add_notice(notice.level, notice.text)
         except Exception as exc:  # a failure here must not take the app down
-            self.agent.forget_instructions_notice()  # not shown: the next turn announces it again
+            self.port.forget_instructions_notice()  # not shown: the next turn announces it again
             with contextlib.suppress(Exception):
                 await self.query_one(Transcript).add_notice("error", f"Could not read AGENTS.md: {exc}")
 
@@ -492,7 +647,7 @@ class AgentApp(App[None]):
         try:
             await self._session_started("new")
         finally:
-            self.host.end_switch()
+            self.port.end_switch()
 
     async def _open_start_session(self) -> Literal["startup", "resume"]:
         """Begin as the command line asked: the latest session, one by id prefix, or a new one. Returns the source
@@ -530,77 +685,13 @@ class AgentApp(App[None]):
 
     def _begin_switch(self) -> bool:
         """Claim the right to switch sessions: False while a turn runs or another switch is under way."""
-        if not self.host.begin_switch():  # no message is accepted until the switch ends
+        if not self.port.begin_switch():  # no message is accepted until the switch ends
             return False
         self._cancel_diff()
         return True
 
     def _busy_text(self, command: str) -> str:
-        return self.host.busy_text(command)
-
-    def _skills_summary(self) -> str:
-        """`<name> (<source>): <description>` per skill, then the launch warnings (file text, so escaped)."""
-        lines = [
-            f"{escape(s.name)} ({s.source}): {escape_display(' '.join(s.description.split()))}" for s in self.skills.sorted()
-        ]
-        lines.extend(self.skills.warnings)
-        return "\n".join(lines) if lines else "No skills."
-
-    def _agents_summary(self) -> str:
-        """Per agent `<name> (<source>)[ model <model>]: <description>` and its tools, then the launch warnings."""
-        lines: list[str] = []
-        for a in self.agents.sorted():
-            shown = a.resolved_model or a.model
-            model = f" model {escape_display(shown)}" if shown else ""
-            if a.missing:
-                model += " (not installed)"
-            lines.append(f"{escape(a.name)} ({a.source}){model}: {escape_display(' '.join(a.description.split()))}")
-            tools = READ_ONLY_TOOLS if a.tools is None else a.tools
-            lines.append(f"  tools: {', '.join(tools) or 'none'}")
-        lines.extend(self.agents.warnings)
-        return "\n".join(lines) if lines else "No agents."
-
-    def _guardrails_summary(self) -> str:
-        """What the guardrails do in this run. Names and paths only, never a value; all of it escaped."""
-        guard = self.guard
-        lines: list[str] = []
-        # `.env` and `.env.*` are shown as one `.env*` (matching is unchanged: the template files stay unprotected)
-        names = [".env*" if name == ".env" else name for name in BUILTIN_NAMES if name != ".env.*"]
-        builtin = [pattern.removesuffix("/**") for pattern in BUILTIN_HOME] + names
-        extra = guard.paths.extra_count
-        lines.append("Protected: " + ", ".join(builtin) + (f" (+{extra} from settings)" if extra else ""))
-        homes = guard.paths.home_folders
-        if len(homes) > 1:  # `$HOME` and the account's recorded home differ: `~` in a pattern means both
-            lines.append("Home folders: " + ", ".join(escape(str(home)) for home in homes))
-        if guard.paths.tracking_truncated:
-            lines.append(
-                f"Hard links to protected files are tracked for the first {MAX_TRACKED_FILES:,} files only "
-                f"(and {MAX_TRACKED_DEPTH} folder levels, {MAX_TRACKED_DIRS:,} folders) under protected folders "
-                "and, for protected names, in the workspace"
-            )
-        removed = ", ".join(escape(name) for name in guard.removed_env) or "none"
-        lines.append(f"Removed from child environment: {removed}")
-        lines.append(f"Redacted this run: {guard.redactions}")
-        if self.config_guard is not None:  # the changes the config watch saw (escaped there) and the global marker
-            lines.extend(self.config_guard.summary())
-        return "\n".join(lines)
-
-    def _mcp_summary(self) -> str:
-        """`<name> (<source>) <status>[: reason]` per server, the tool names of a ready one indented below it."""
-        states = self.mcp.states() if self.mcp is not None else []
-        if not states:
-            return "No MCP servers configured (global: ~/.config/agent/mcp.json, project: .agent/mcp.json)"
-        lines: list[str] = []
-        for state in states:
-            config = state.config
-            line = f"{config.name} ({config.source}) {state.status}"
-            line = f"{line}: {state.reason}" if state.reason else line
-            if config.overrides_global:
-                line += f" · overrides the global '{config.name}'"
-            lines.append(line)
-            if state.status == "ready":
-                lines.extend(f"  {name}" for name in dict.fromkeys(tool_name(config.name, i.name) for i in state.tools))
-        return "\n".join(lines)
+        return self.port.busy_text(command)
 
     async def _refuse_switch(self) -> None:
         await self.query_one(Transcript).add_notice("warn", self._busy_text("/sessions"))
@@ -612,10 +703,15 @@ class AgentApp(App[None]):
         The caller has claimed the switch (`_begin_switch`, or `on_mount` for the start) and releases it.
         """
         store, transcript = self.store, self.query_one(Transcript)
-        if store is None:
+        if store is None and not self.shared:
             return False
-        infos = await self.port.list_sessions()
-        await self._warn_skipped(store)
+        try:
+            infos = await self.port.list_sessions()
+        except (DaemonError, DaemonUnavailable) as exc:  # only the daemon's port raises
+            await transcript.add_notice("warn", f"could not list the sessions: {escape(str(exc))}")
+            return False
+        if store is not None:
+            await self._warn_skipped(store)
         if not infos:
             await transcript.add_notice("info", "No saved sessions for this folder")
             return False
@@ -631,7 +727,7 @@ class AgentApp(App[None]):
         except Exception as error:  # a bug must not leave the app claimed or kill it
             await self.query_one(Transcript).add_notice("error", f"Model switch failed: {escape(str(error))}")
         finally:
-            self.host.end_switch()
+            self.port.end_switch()
 
     def _picking(self) -> bool:
         """A bare `/model` is loading or its picker is open."""
@@ -644,7 +740,7 @@ class AgentApp(App[None]):
         switch itself, which takes the claim."""
         transcript = self.query_one(Transcript)
         try:
-            if self.catalog is None:
+            if not self.shared and self.catalog is None:
                 await transcript.add_notice("error", "No model catalog is available")
                 return
             try:
@@ -669,13 +765,13 @@ class AgentApp(App[None]):
 
             looked = await asyncio.gather(*(look(info) for info in infos))
             known = {info.name: result for info, (_, result) in zip(infos, looked, strict=True)}
-            if (reason := self.host.refusal("/model")) is not None:
+            if (reason := self.port.refusal("/model")) is not None:
                 await transcript.add_notice("warn", reason)
                 return
             if len(self.screen_stack) > 1:  # another dialog came up while the list loaded
                 await transcript.add_notice("warn", "Another dialog is open; run /model again after closing it")
                 return
-            current = installed_name(self.provider.model, [i.name for i in infos])
+            current = installed_name(self.port.model, [i.name for i in infos])
             chosen = await self.push_screen_wait(ModelPicker([info for info, _ in looked], current))
             if chosen is None:
                 return
@@ -685,7 +781,7 @@ class AgentApp(App[None]):
             try:
                 await self._switch_model(chosen, known.get(chosen))
             finally:
-                self.host.end_switch()
+                self.port.end_switch()
         except Exception as error:  # a bug must not kill the app
             await transcript.add_notice("error", f"Model switch failed: {escape(str(error))}")
 
@@ -705,30 +801,44 @@ class AgentApp(App[None]):
             if await self._pick_session():
                 await self._session_started("switch")
         finally:
-            self.host.end_switch()
+            self.port.end_switch()
 
     async def _show_session(self, info: SessionInfo) -> bool:
         """Load `info`, make it the live session and redraw its transcript. The switching flag is held by the caller.
         False when the session could not be opened (the current one stays)."""
         transcript = self.query_one(Transcript)
+        if isinstance(self.port, RemotePort):  # the session as the daemon has it now: turn, queue and asks included
+            try:
+                snapshot = await self.port.switch_to(info.id)
+            except (DaemonError, DaemonUnavailable) as exc:
+                await transcript.add_notice("error", escape(exc.text if isinstance(exc, DaemonError) else str(exc)))
+                return False
+            self._pending.clear()
+            self._show_pending()
+            await self._close_stale_dialogs()
+            await self._show_snapshot(snapshot)
+            await transcript.add_notice("info", f'Resumed "{info.title}" ({info.message_count} messages)')
+            for ask in self.port.pending_asks():
+                self._on_ask(ask)
+            return True
         opened = await self.port.open_session(info)
         for level, text in opened.notices:
             await transcript.add_notice(level, text)
         loaded = opened.loaded
         if loaded is None:
             return False
-        self.query_one(TodoPanel).show(self.agent.todos)
+        self.query_one(TodoPanel).show(self.port.todos)
         self._pending.clear()  # pasted images belong to the old session
         self._show_pending()
         status = self.query_one(StatusBar)
-        status.mode = self.agent.mode
+        status.mode = self.port.mode
         status.pending_mode = False
-        status.used = self.agent.estimate()
+        status.used = self.port.estimate()
         status.estimated = True
         await transcript.clear_all()
         await transcript.replay(loaded.items)
         await transcript.add_notice("info", f'Resumed "{info.title}" ({info.message_count} messages)')
-        self.agent.forget_instructions_notice()  # the transcript was redrawn: show the notice in it
+        self.port.forget_instructions_notice()  # the transcript was redrawn: show the notice in it
         await self._announce_instructions()
         return True
 
@@ -754,7 +864,7 @@ class AgentApp(App[None]):
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
         self._shutting_down = True  # from here on the widgets are going away: stop applying agent events
-        self.host.begin_close()  # and the host sends no queued message
+        self.port.begin_close()  # and the host sends no queued message
         super().exit(*args, **kwargs)
 
     def _stop_on_signals(self) -> None:
@@ -784,16 +894,20 @@ class AgentApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
-        self.host.begin_close()
+        self.port.begin_close()
         if self.config_guard is not None:  # the transcript is going away: what is said now is printed after the app
             self.config_guard.unlisten(self._config_changed)
-        with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
-            self.agent.watch.check(Cause.background())  # first: the shell tab and background processes still run
-        self.file_index.cancel()  # the build thread stops at its next check instead of walking on
-        with contextlib.suppress(Exception):  # the host's job and asks go with the app, as its workers do
-            await self.port.close()
-            self.host.close()
-        self.agent.close()
+        if isinstance(self.port, RemotePort):  # the session goes on in the daemon: only this client's stream ends
+            with contextlib.suppress(Exception):
+                await self.port.close()
+        else:
+            with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
+                self.agent.watch.check(Cause.background())  # first: the shell tab and background processes still run
+            self.file_index.cancel()  # the build thread stops at its next check instead of walking on
+            with contextlib.suppress(Exception):  # the host's job and asks go with the app, as its workers do
+                await self.port.close()
+                self.host.close()
+            self.agent.close()
         self.paste.remove()
         try:
             if self.mcp is not None:
@@ -816,10 +930,10 @@ class AgentApp(App[None]):
             await self.query_one(Transcript).add_notice("info", f"terminal {message.name} started · ctrl+t to show")
 
     def action_toggle_mode(self) -> None:
-        self.port.set_mode(self.agent.mode.next())
+        self.port.set_mode(self.port.mode.next())
         status = self.query_one(StatusBar)
-        status.mode = self.agent.mode
-        if self.host.turn_active and not self.host.undoing:  # a step already running keeps the mode it started with
+        status.mode = self.port.mode
+        if self.port.turn_active and not self.port.undoing:  # a step already running keeps the mode it started with
             self._finished_since_toggle = False
             status.pending_mode = True
         else:
@@ -831,6 +945,9 @@ class AgentApp(App[None]):
     async def action_toggle_terminal(self) -> None:
         """Show the pane (starting a shell if it is empty) and focus it; from a terminal go back to the input,
         and from the input hide the pane. Hidden terminals keep running."""
+        if self.shared:
+            await self._refuse_shared()
+            return
         if self.terminals is None:
             return
         pane = self.query_one(TerminalPane)
@@ -888,6 +1005,8 @@ class AgentApp(App[None]):
 
     def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
         stack = self.screen_stack  # empty while shutting down; `self.screen` would raise then
+        if action == "toggle_terminal" and self.shared:  # said, not silently ignored
+            return not any(isinstance(s, DIALOGS) for s in stack)
         if action in ("toggle_terminal", "focus_input"):
             return self.terminals is not None and not any(isinstance(s, DIALOGS) for s in stack)
         if action in ("terminal_tab", "close_terminal_tab"):
@@ -921,13 +1040,13 @@ class AgentApp(App[None]):
         return isinstance(focused, Tabs)  # a running tab closes only from the tab bar, never from the input or transcript
 
     def action_interrupt_or_quit(self) -> None:
-        if self.host.turn_active or self.host.session_starting:
+        if self.port.turn_active or self.port.session_starting:
             self.interrupt_turn()
         else:
             self.exit()
 
     def interrupt_turn(self) -> None:
-        host = self.host
+        host = self.port
         if host.undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
             return
         if self._pending and not host.turn_active and not host.switching and self._input_empty():
@@ -950,6 +1069,10 @@ class AgentApp(App[None]):
             self.query_one(AttachmentPanel).show([label for _, label, _ in self._pending])
 
     async def on_chat_input_paste_image(self, event: ChatInput.PasteImage) -> None:
+        if self.shared:  # images never go to the daemon: the text paste still works
+            await self.query_one(Transcript).add_notice("warn", f"pasting images is {NOT_SHARED}")
+            self.query_one(ChatInput).action_paste()
+            return
         self.run_worker(self._paste_image(), group="paste")
 
     async def _paste_image(self) -> None:
@@ -1027,11 +1150,11 @@ class AgentApp(App[None]):
 
     def _queueing(self) -> bool:
         """A message sent now waits for the running turn, `/init` or `/compact` (not for an undo or a session load)."""
-        return self.host.queueing
+        return self.port.queueing
 
     def _show_queue(self) -> None:
         with contextlib.suppress(NoMatches):  # gone when the app is shutting down
-            self.query_one(QueuePanel).show(self.host.queue.entries)
+            self.query_one(QueuePanel).show(self.port.queue_entries)
 
     def _apply_outcome(self, outcome: TurnOutcome) -> None:
         """Every turn, compaction and workflow ends here: after a `done` end the host sent the queue as one turn (busy
@@ -1040,7 +1163,7 @@ class AgentApp(App[None]):
         lands on."""
         started = False
         if not outcome.continued:
-            if (back := outcome.restore_for(LOCAL_CLIENT)) is not None:  # only what this client sent
+            if (back := outcome.restore_for(self.port.client_id)) is not None:  # only what this client sent
                 self._restore_draft(back)
             started = self.port.outcome_applied(outcome.ack)  # a message queued meanwhile is sent now
         if outcome.kind == "workflow":
@@ -1060,7 +1183,7 @@ class AgentApp(App[None]):
             return
         self._show_queue()
         with contextlib.suppress(NoMatches):
-            self.query_one(StatusBar).busy = self.host.turn_active  # a turn sent meanwhile keeps it on
+            self.query_one(StatusBar).busy = self.port.turn_active  # a turn sent meanwhile keeps it on
 
     # turns
 
@@ -1073,24 +1196,33 @@ class AgentApp(App[None]):
 
     async def _submit(self, prompt: str, typed: str, label: str | None = None) -> None:
         """Send, queue or refuse a message; a refused one goes back in the box, with a notice."""
-        result = self._begin_turn(prompt, typed, label=label)
+        result = await self._send(prompt, typed, label=label)
         if result.status == "refused":
             self._restore_draft(typed)  # not accepted: the message stays in the box
             await self.query_one(Transcript).add_notice("warn", result.reason)
 
     async def _refuse_if_busy(self, text: str) -> bool:
         """A message cannot start now: it goes back in the box, with a notice. True when it was refused."""
-        reason = self.host.message_refusal()
+        reason = self.port.message_refusal()
         if reason is None:
             return False
         self._restore_draft(text)  # not accepted: the message stays in the box
         await self.query_one(Transcript).add_notice("warn", reason)
         return True
 
+    async def _send(self, text: str, draft: str, init: bool = False, label: str | None = None) -> SendResult:
+        """`_begin_turn` for either port: the local one takes it at once (no await before it), the daemon's over the
+        socket."""
+        if isinstance(self.port, LocalPort):
+            return self._begin_turn(text, draft, init=init, label=label)
+        return self._sent(await self.port.send_message(text, label=label, init=init, draft=draft))
+
     def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> SendResult:
         """Hand `text` to the host (a turn, or the queue while one runs); `draft` is what the box gets back if it
         never sends."""
-        result = self.port.send(text, label=label, init=init, draft=draft)
+        return self._sent(self._local().send(text, label=label, init=init, draft=draft))
+
+    def _sent(self, result: SendResult) -> SendResult:
         if result.status == "started":
             self._refresh_hints()
             self._cancel_diff()
@@ -1104,23 +1236,25 @@ class AgentApp(App[None]):
         found = _COMMAND.match(original.strip())
         name = f"/{found.group(1)}" if found else "/"
         rest = (found.group(2) or "") if found else ""
+        if self.shared and name in SHARED_INFO:  # the daemon's runtime has the rules, hooks, servers and skills
+            for level, text in await self._remote().info(name[1:]):
+                await transcript.add_notice(level, text)
+            return
         match name:
             case "/help":
                 await transcript.add_notice("info", self._help())
             case "/mcp":
-                await transcript.add_notice("info", self._mcp_summary())
+                await transcript.add_notice("info", info.mcp_summary(self.mcp))
             case "/permissions":
-                lines = self.permissions.listing()
-                await transcript.add_notice("info", "\n".join(lines) if lines else "no permission rules")
+                await transcript.add_notice("info", info.permissions_summary(self.permissions))
             case "/guardrails":
-                await transcript.add_notice("info", self._guardrails_summary())
+                await transcript.add_notice("info", info.guardrails_summary(self.guard, self.config_guard))
             case "/hooks":
-                lines = self.hooks.listing()
-                await transcript.add_notice("info", "\n".join(lines) if lines else "No hooks.")
+                await transcript.add_notice("info", info.hooks_summary(self.hooks))
             case "/skills":
-                await transcript.add_notice("info", self._skills_summary())
+                await transcript.add_notice("info", info.skills_summary(self.skills))
             case "/agents":
-                await transcript.add_notice("info", self._agents_summary())
+                await transcript.add_notice("info", info.agents_summary(self.agents))
             case "/quit":
                 self.exit()
             case "/sessions":
@@ -1137,7 +1271,7 @@ class AgentApp(App[None]):
                     return
                 handed = False  # the worker that runs the SessionStart hook releases the claim
                 try:
-                    self.query_one(TodoPanel).show(self.agent.todos)
+                    self.query_one(TodoPanel).show(self.port.todos)
                     self._pending.clear()  # pasted images belong to the old session
                     self._show_pending()
                     self._cancel_diff()
@@ -1145,21 +1279,26 @@ class AgentApp(App[None]):
                     status = self.query_one(StatusBar)
                     status.used = 0
                     status.estimated = False
-                    status.mode = self.agent.mode
+                    status.mode = self.port.mode
                     status.pending_mode = False
-                    self.agent.forget_instructions_notice()
+                    self.port.forget_instructions_notice()
                     await self._announce_instructions()
                     self.run_worker(self._finish_new_session(), group="new-session", exit_on_error=False)
                     handed = True
                 finally:
                     if not handed:
-                        self.host.end_switch()
+                        self.port.end_switch()
             case "/init":
-                if (reason := self.host.refusal("/init")) is not None:
+                if (reason := self.port.refusal("/init")) is not None:
                     await transcript.add_notice("warn", reason)
                     return
-                if self.agent.mode is Mode.PLAN:
+                if self.port.mode is Mode.PLAN:
                     await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
+                    return
+                if self.shared:  # the daemon builds the prompt from its own scan
+                    result = await self._send("/init", draft="/init", init=True)
+                    if result.status == "refused":
+                        await transcript.add_notice("warn", result.reason)
                     return
                 try:
                     prompt = await asyncio.to_thread(self._init_prompt)
@@ -1167,16 +1306,16 @@ class AgentApp(App[None]):
                     await transcript.add_notice("error", f"Could not start /init: {error}")
                     return
                 # Keys and messages were handled while the prompt was built: check again, with no await before the start.
-                if (reason := self.host.refusal("/init")) is not None:
+                if (reason := self.port.refusal("/init")) is not None:
                     await transcript.add_notice("warn", reason)
                     return
-                if self.agent.mode is Mode.PLAN:
+                if self.port.mode is Mode.PLAN:
                     await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
                     return
-                self._begin_turn(prompt, draft="/init", init=True)
+                await self._send(prompt, draft="/init", init=True)
             case "/compact":
                 # Like a turn: Esc cancels it, and the same events reach the transcript.
-                result = self.port.compact()
+                result = await self.port.start_compact()
                 if result.status == "refused":
                     await transcript.add_notice("warn", result.reason)
                     return
@@ -1188,13 +1327,15 @@ class AgentApp(App[None]):
                 await self._diff_command(rest)
             case "/usage":
                 await self._usage_command(rest)
+            case "/images" | "/workflow" if self.shared:
+                await self._refuse_shared()
             case "/images":
                 await self._images_command(rest)
             case "/workflow":
                 await self._workflow_command(rest)
             case "/model":
                 if not rest.strip():
-                    if (reason := self.host.refusal("/model")) is not None:
+                    if (reason := self.port.refusal("/model")) is not None:
                         await transcript.add_notice("warn", reason)
                         return
                     if self._picking():
@@ -1208,6 +1349,9 @@ class AgentApp(App[None]):
                 self.run_worker(functools.partial(self._model_command, rest.strip()), group="model", exit_on_error=False)
             case _:
                 custom = self.commands.get(name[1:])
+                if custom is None and self.shared:
+                    await transcript.add_notice("warn", f"{name}: unknown, or a custom command (custom commands are {NOT_SHARED})")
+                    return
                 if custom is None:
                     await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
                     return
@@ -1228,7 +1372,7 @@ class AgentApp(App[None]):
     def _reindex(self) -> None:
         """Build the `@` index in a thread (once at mount, again after each turn). A request that arrives while a
         build runs makes it run once more when it ends, so files created meanwhile are not missed."""
-        if self._shutting_down:
+        if self._shutting_down or self.shared:  # the daemon keeps its own index
             return
         if self._indexing:
             self._reindex_pending = True
@@ -1261,7 +1405,7 @@ class AgentApp(App[None]):
         if box.paths is None:
             return
         token = None if box.suggestions is not None and box.suggestions.is_open else box.token_before_cursor()
-        box.paths.update_for(self.file_index.suggest(token) if token is not None else [])
+        box.paths.update_for(self.port.suggest_paths(token) if token is not None else [])
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if isinstance(event.text_area, ChatInput):
@@ -1343,7 +1487,7 @@ class AgentApp(App[None]):
             await transcript.add_notice("info", self._workflow_listing())
             return
         if sub == "cancel" and len(words) == 1:
-            if self.host.workflow_active:
+            if self.port.workflow_active:
                 self.interrupt_turn()
             else:
                 await transcript.add_notice("info", "no workflow is running")
@@ -1353,13 +1497,13 @@ class AgentApp(App[None]):
         if not valid:
             await transcript.add_notice("warn", WORKFLOW_USAGE)
             return
-        if self.host.workflow_active:
+        if self.port.workflow_active:
             await transcript.add_notice("warn", WORKFLOW_RUNNING)
             return
-        if (reason := self.host.refusal("/workflow")) is not None:
+        if (reason := self.port.refusal("/workflow")) is not None:
             await transcript.add_notice("warn", reason)
             return
-        if self.agent.mode is Mode.PLAN:
+        if self.port.mode is Mode.PLAN:
             await transcript.add_notice("warn", "workflows need build or edits mode — press Tab to switch")
             return
         if self.images is not None and self.images.busy:
@@ -1469,6 +1613,12 @@ class AgentApp(App[None]):
         if rest.strip():
             await self.query_one(Transcript).add_notice("warn", "/usage takes no arguments")
             return
+        if isinstance(self.port, RemotePort):
+            try:
+                await self.push_screen(UsageScreen(await self.port.usage()))
+            except Exception as error:
+                await self.query_one(Transcript).add_notice("warn", f"/usage: {escape(str(error))[:200]}")
+            return
         status = self.query_one(StatusBar)
         data = summary(
             self.agent.usage,
@@ -1507,7 +1657,7 @@ class AgentApp(App[None]):
         if roles is None:
             await transcript.add_notice("warn", "usage: /images [pull [gen|edit|upscale] | cancel]")
             return
-        if self.host.workflow_active:
+        if self.port.workflow_active:
             await transcript.add_notice("warn", "a workflow is running: /images pull waits until it ends (/images and /images cancel still work)")
             return
         if images.busy:
@@ -1547,7 +1697,7 @@ class AgentApp(App[None]):
         if rest.strip():
             await transcript.add_notice("warn", "/diff takes no arguments")
             return
-        if (reason := self.host.refusal("/diff")) is not None:
+        if (reason := self.port.refusal("/diff")) is not None:
             await transcript.add_notice("warn", reason)
             return
         self.run_worker(self._diff, group="diff", exclusive=True, exit_on_error=False)
@@ -1572,16 +1722,16 @@ class AgentApp(App[None]):
                 await transcript.add_notice("warn", BANNER)
             return
         # Keys and messages were handled while the list was built: look again, with no await before the push.
-        if (reason := self.host.refusal("/diff")) is not None:
+        if (reason := self.port.refusal("/diff")) is not None:
             await transcript.add_notice("warn", reason)
             return
-        if not self.agent.is_current_diff(diff):  # a newer turn, an undo or a reset: this is not the turn to show
+        if not self.port.is_current_diff(diff):  # a newer turn, an undo or a reset: this is not the turn to show
             return
         await self.push_screen(DiffScreen(diff, self.port.diff_file))
 
     async def _undo_command(self) -> None:
         transcript = self.query_one(Transcript)
-        if (reason := self.host.refusal("/undo")) is not None:
+        if (reason := self.port.refusal("/undo")) is not None:
             await transcript.add_notice("warn", reason)
             return
         status = self.query_one(StatusBar)
@@ -1595,9 +1745,9 @@ class AgentApp(App[None]):
         prompt, events = result.prompt, result.events
         if prompt is not None:
             await transcript.remove_last_turn()
-            self.query_one(TodoPanel).show(self.agent.todos)
+            self.query_one(TodoPanel).show(self.port.todos)
             self._restore_draft(prompt)
-            status.used = self.agent.estimate()
+            status.used = self.port.estimate()
             status.estimated = True
         for event in events:
             if isinstance(event, Notice):
@@ -1643,6 +1793,8 @@ class AgentApp(App[None]):
                 if problem is not None:
                     await self.query_one(Transcript).add_notice("error", problem)
             case UserEntry(text, label):
+                self.query_one(StatusBar).busy = True  # also a turn another client of the session sent
+                self._refresh_hints()
                 transcript = self.query_one(Transcript)
                 try:
                     await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
@@ -1666,11 +1818,34 @@ class AgentApp(App[None]):
                         transcript.end_turn(transcript.latest_turn)  # what follows is not part of the turn
             case TurnOutcome() as outcome:
                 self._apply_outcome(outcome)
+            case QueueChanged():
+                self._show_queue()
+                self._refresh_hints()
+            case ModeChanged(mode):  # also from another client of the session
+                self.query_one(StatusBar).mode = mode
+            case ModelChanged(model, window):  # in a daemon the provider is every session's
+                status = self.query_one(StatusBar)
+                status.model = escape_display(model)
+                status.window = window
+            case DaemonGone() as gone:
+                self.run_worker(self._daemon_gone(gone), group="daemon-gone", exclusive=True, exit_on_error=False)
+            case TurnUndone(client) if client != self.port.client_id:  # its own undo already redrew this client
+                transcript = self.query_one(Transcript)
+                await transcript.remove_last_turn()
+                self.query_one(StatusBar).used = self.port.estimate()
+                await transcript.add_notice("info", "the last turn was undone in another client")
+            case Reconnected(snapshot):
+                if snapshot is not None:  # the gap was too old to replay (or the daemon started over)
+                    await self._close_stale_dialogs()
+                    await self._show_snapshot(snapshot)
+                await self.query_one(Transcript).add_notice("info", "reconnected to the agent daemon")
+                for ask in self.port.pending_asks():  # still open: shown again (one already shown is skipped)
+                    self._on_ask(ask)
             case AskResolved(ask_id, by, _):
                 screen = self._ask_screens.pop(ask_id, None)
                 if screen is not None:
                     await self._close_dialog(screen)
-                    if by and by != LOCAL_CLIENT:  # answered elsewhere (a client of the same session); unreachable with the local port alone
+                    if by and by != self.port.client_id:  # answered in another client of the same session
                         await self.query_one(Transcript).add_notice("info", "answered in another client")
             case _:
                 await self._on_agent_event(event)  # ty: ignore[invalid-argument-type]
@@ -1679,15 +1854,43 @@ class AgentApp(App[None]):
         """An approval for the user: the dialog opens over whatever is shown, and its choice answers the ask. Esc denies
         and interrupts the turn."""
         request = event.request
-        if not isinstance(request, ApprovalRequest):  # the trust prompts are still asked in-process (`_ask_trust`)
+        if event.ask_id in self._ask_screens:  # already shown (it was in the snapshot and in the stream)
+            return
+        if not isinstance(request, ApprovalRequest):
+            if self.shared:  # the daemon's launch trust prompts; in-process they are asked by `_ask_trust`
+                self._on_trust_ask(event.ask_id, request)
             return
         if self._shutting_down:  # the screens are going away: no dialog, and the ask must not wait for one
-            self.port.answer(event.ask_id, Decision(Choice.DENY, "shutting down"))
+            if not self.shared:  # in a daemon another client (or the next one) answers it
+                self.port.answer(event.ask_id, Decision(Choice.DENY, "shutting down"))
             return
         screen = ApprovalScreen(request)
         self.guard_keys()  # before the dialog is shown: keys typed from now on are not meant for it
         self._ask_screens[event.ask_id] = screen
         self.push_screen(screen, callback=functools.partial(self._approval_answered, event.ask_id))
+
+    async def _close_stale_dialogs(self) -> None:
+        """Close the ask dialogs whose ask the daemon no longer has (answered or withdrawn while this client was away,
+        or of the session it left)."""
+        pending = {ask.ask_id for ask in self.port.pending_asks()}
+        for ask_id in [a for a in self._ask_screens if a not in pending]:
+            screen = self._ask_screens.pop(ask_id)
+            await self._close_dialog(screen)
+
+    def _on_trust_ask(self, ask_id: str, ask: TrustAsk) -> None:
+        """One of the daemon's trust prompts (its texts are built there); only a yes trusts. A stray key is ignored for
+        a moment, as for the in-process prompts."""
+        if self._shutting_down:
+            return  # left open in the daemon: another client (or the next one) answers it
+        screen = PermissionTrustScreen(ask=ask)
+        self._keys_ignored_until = time.monotonic() + KEY_GUARD
+        self._ask_screens[ask_id] = screen
+        self.push_screen(screen, callback=functools.partial(self._trust_answered, ask_id))
+
+    def _trust_answered(self, ask_id: str, trusted: bool | None) -> None:
+        if self._ask_screens.pop(ask_id, None) is None:
+            return  # answered in another client meanwhile
+        self._answered(ask_id, self.port.answer(ask_id, bool(trusted)))
 
     def _approval_answered(self, ask_id: str, result: Decision | None) -> None:
         if self._ask_screens.pop(ask_id, None) is None:
@@ -1704,7 +1907,7 @@ class AgentApp(App[None]):
             return
         self.call_later(self._report_answer, result)
         if result == "invalid":
-            for event in self.host.asks.pending():
+            for event in self.port.pending_asks():
                 if event.ask_id == ask_id:
                     self._on_ask(event)
 
@@ -1712,7 +1915,7 @@ class AgentApp(App[None]):
         with contextlib.suppress(NoMatches):
             await self.query_one(Transcript).add_notice("warn", f"could not answer the approval ({result})")
 
-    async def _close_dialog(self, screen: ApprovalScreen) -> None:
+    async def _close_dialog(self, screen: ApprovalScreen | PermissionTrustScreen) -> None:
         """Take a withdrawn dialog off the stack even when another screen sits above it."""
         try:
             while screen in (stack := self.screen_stack) and len(stack) > 1:

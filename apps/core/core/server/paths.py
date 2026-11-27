@@ -61,6 +61,21 @@ def run_dir() -> Path:
     return _private(_base())
 
 
+def existing_run_dir() -> Path | None:
+    """The run folder when it exists (checked like `run_dir`), never made: None when there is none (no daemon ever ran
+    here, so none runs now). `RunDirError` when it is not ours alone."""
+    folder = _base()
+    if not os.path.lexists(folder):
+        return None
+    return _private(folder)
+
+
+def existing_socket_path(workspace: Path) -> Path | None:
+    """Where the socket of `workspace`'s daemon is, without making the run folder; None when there is no run folder."""
+    folder = existing_run_dir()
+    return None if folder is None else folder / f"{workspace_hash(workspace)}.sock"
+
+
 def socket_path(workspace: Path) -> Path:
     return run_dir() / f"{workspace_hash(workspace)}.sock"
 

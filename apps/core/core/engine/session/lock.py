@@ -14,19 +14,30 @@ import fcntl
 import os
 import stat
 import threading
+import time
 from pathlib import Path
 
 from core.engine.session.store import SessionError
 
 FILE_MODE = 0o600
 ATTEMPTS = 5  # a lock file removed under us between open and flock is retried this often
+BUSY_TRIES = 5  # a lock that is busy is tried this often (another process's `held_elsewhere` probe holds it briefly)
+BUSY_PAUSE = 0.01  # seconds between two of those tries
+UNSUPPORTED = frozenset({errno.ENOLCK, errno.EOPNOTSUPP, errno.ENOTSUP})  # a filesystem with no `flock`
 
 _held: dict[Path, SessionLock] = {}  # this process's locks, by lock file path
 _registry = threading.Lock()
 
 
+LOCKED_HINT = " (if it is a --shared session no client has open, run agent stop)"
+
+
 class SessionLocked(SessionError):
     """Another process has the session open."""
+
+
+class LockUnsupported(OSError):
+    """The sessions folder's filesystem has no `flock` (some network mounts)."""
 
 
 def lock_path(directory: Path, session_id: str) -> Path:
@@ -49,7 +60,7 @@ def _open(path: Path, *, create: bool) -> int:
     return fd
 
 
-def _same_file(fd: int, path: Path) -> bool:
+def same_file(fd: int, path: Path) -> bool:
     try:
         now = os.lstat(path)
     except FileNotFoundError:
@@ -70,27 +81,43 @@ class SessionLock:
         """Lock `session_id` in `directory` (created 0600, never through a symlink). `SessionLocked` when another
         process holds it; `OSError` when the file cannot be used. In this process the lock is shared."""
         path = lock_path(directory, session_id)
-        with _registry:
-            mine = _held.get(path)
-            if mine is not None:
-                mine._count += 1
-                return mine
-            for _ in range(ATTEMPTS):
-                fd = _open(path, create=True)
-                try:
-                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                except BlockingIOError:
-                    os.close(fd)
-                    raise SessionLocked(f"session {session_id} is open in another agent process") from None
-                except OSError:
-                    os.close(fd)
-                    raise
-                if _same_file(fd, path):
-                    lock = cls(path, fd, session_id)
-                    _held[path] = lock
+        for busy in range(BUSY_TRIES):
+            if busy:
+                time.sleep(BUSY_PAUSE)  # outside the registry: this process's other locks and probes go on meanwhile
+            with _registry:
+                mine = _held.get(path)
+                if mine is not None:
+                    mine._count += 1
+                    return mine
+                lock = cls._try(path, session_id, last=busy == BUSY_TRIES - 1)
+                if lock is not None:
                     return lock
-                os.close(fd)  # the file was removed by its last holder meanwhile: lock the new one
-            raise OSError(errno.EAGAIN, f"could not lock {path}")
+        raise SessionLocked(f"session {session_id} is open in another agent process{LOCKED_HINT}")
+
+    @classmethod
+    def _try(cls, path: Path, session_id: str, *, last: bool) -> SessionLock | None:
+        """One attempt, under the registry: the lock, or None when it is busy (another process's probe holds it for an
+        instant; `last`: a holder that is still there is a real one, `SessionLocked`)."""
+        for _ in range(ATTEMPTS):
+            fd = _open(path, create=True)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                os.close(fd)
+                if last:
+                    raise SessionLocked(f"session {session_id} is open in another agent process{LOCKED_HINT}") from None
+                return None
+            except OSError as error:
+                os.close(fd)
+                if error.errno in UNSUPPORTED:
+                    raise LockUnsupported(error.errno, f"{path.parent} does not support file locks") from error
+                raise
+            if same_file(fd, path):
+                lock = cls(path, fd, session_id)
+                _held[path] = lock
+                return lock
+            os.close(fd)  # the file was removed by its last holder meanwhile: lock the new one
+        raise OSError(errno.EAGAIN, f"could not lock {path}")
 
     def release(self) -> None:
         """Give up this hold; the last one removes the file and unlocks. Never raises."""
@@ -104,7 +131,7 @@ class SessionLock:
             if _held.get(self.path) is self:
                 del _held[self.path]
             with contextlib.suppress(OSError):
-                if _same_file(fd, self.path):
+                if same_file(fd, self.path):
                     os.unlink(self.path)  # while still locked: whoever opens it now finds no file or a new one
             with contextlib.suppress(OSError):
                 os.close(fd)  # unlocks
@@ -118,19 +145,20 @@ class SessionLock:
     def held_elsewhere(directory: Path, session_id: str) -> bool:
         """Another process has the session open (a lock this process holds does not count). Never raises."""
         path = lock_path(directory, session_id)
-        with _registry:
+        with _registry:  # so no `acquire` of this process runs while the probe holds the file
             if path in _held:
                 return False
-        try:
-            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
-        except OSError:
-            return False  # no lock file: nobody has it open
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return True
-        except OSError:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+            except OSError:
+                return False  # no lock file: nobody has it open
+            try:
+                # Shared: two probes never conflict, and another process's `acquire` waits this instant out.
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return True
+            except OSError:
+                return False
+            finally:
+                os.close(fd)  # also unlocks what this probe took
             return False
-        finally:
-            os.close(fd)  # also unlocks what this probe took
-        return False

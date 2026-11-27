@@ -47,6 +47,8 @@ def describe(info: SessionInfo, now: datetime | None = None) -> Text:
     row = session_row(info.title, relative(info.updated_at, now), info.message_count, TITLE_WIDTH)
     if info.open_elsewhere:
         row.append("  (open elsewhere)", "dim")
+    elif info.live:
+        row.append("  (live)", "dim")
     return row
 
 

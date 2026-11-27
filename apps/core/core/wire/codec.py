@@ -9,14 +9,28 @@ from pydantic import TypeAdapter, ValidationError
 
 from core.engine import events as ev
 from core.engine.approval import Choice
+from core.engine.mode import Mode
 from core.engine.todo import TodoItem
 from core.engine.tools.base import Preview, ToolResult
 from core.host import events as hev
+from core.host.queue import Queued
 from core.trust import TrustAsk
 from core.wire import models as wm
 
 # What crosses the wire as an event: the engine's events and the host's turn steps.
-WireEvent = ev.AgentEvent | hev.ProviderState | hev.UserEntry | hev.Delivering | hev.JobEventsDone | hev.EntryEnd | hev.TurnOutcome
+WireEvent = (
+    ev.AgentEvent
+    | hev.ProviderState
+    | hev.ModelChanged
+    | hev.QueueChanged
+    | hev.ModeChanged
+    | hev.TurnUndone
+    | hev.UserEntry
+    | hev.Delivering
+    | hev.JobEventsDone
+    | hev.EntryEnd
+    | hev.TurnOutcome
+)
 
 _ADAPTER: TypeAdapter[Any] = TypeAdapter(wm.WireMessage)
 _KNOWN: frozenset[str] = frozenset(
@@ -48,6 +62,15 @@ def _build(event: WireEvent, head: dict[str, Any], redact: Callable[[str], str])
     match event:
         case hev.ProviderState():
             return wm.ProviderState(**head, problem=None if event.problem is None else redact(event.problem))
+        case hev.ModelChanged():
+            return wm.ModelChanged(**head, model=redact(event.model), window=event.window)
+        case hev.QueueChanged():
+            entries = [wm.QueueEntry(typed=redact(q.typed), label=redact(q.label or ""), client=q.client) for q in event.entries]
+            return wm.QueueChanged(**head, entries=entries)
+        case hev.ModeChanged():
+            return wm.ModeChanged(**head, mode=event.mode.value)
+        case hev.TurnUndone():
+            return wm.TurnUndone(**head, client=event.client)
         case hev.UserEntry():
             label = None if event.label is None else redact(event.label)
             return wm.UserEntry(**head, text=redact(event.text), label=label, client=event.client)
@@ -152,6 +175,15 @@ def _event(message: wm.Message) -> WireEvent:
     match message:
         case wm.ProviderState():
             return hev.ProviderState(message.problem)
+        case wm.ModelChanged():
+            return hev.ModelChanged(message.model, message.window)
+        case wm.QueueChanged():
+            # A remote client shows the typed text; what is sent stays on the daemon's side.
+            return hev.QueueChanged(tuple(Queued(e.typed, e.typed, e.label or None, e.client) for e in message.entries))
+        case wm.ModeChanged():
+            return hev.ModeChanged(Mode(message.mode))
+        case wm.TurnUndone():
+            return hev.TurnUndone(message.client)
         case wm.UserEntry():
             return hev.UserEntry(message.text, message.label, message.client)
         case wm.Delivering():

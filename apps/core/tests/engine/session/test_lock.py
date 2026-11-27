@@ -64,3 +64,36 @@ def test_a_symlinked_lock_file_is_refused(tmp_path: Path) -> None:
     (folder / f"{session_id}.lock").symlink_to(tmp_path / "elsewhere")
     with pytest.raises(OSError):
         SessionLock.acquire(folder, session_id)
+
+
+def test_a_probe_of_another_process_does_not_make_acquire_fail(tmp_path: Path) -> None:
+    """`held_elsewhere` in another process holds the lock file for an instant; an `acquire` meanwhile waits it out."""
+    import fcntl
+    import threading
+
+    folder, session_id = _saved_session(tmp_path)
+    probe = os.open(folder / f"{session_id}.lock", os.O_RDONLY | os.O_CREAT, 0o600)
+    fcntl.flock(probe, fcntl.LOCK_SH | fcntl.LOCK_NB)  # another open file: conflicts like another process's probe
+    threading.Timer(0.03, os.close, (probe,)).start()
+
+    lock = SessionLock.acquire(folder, session_id)
+    lock.release()
+
+
+def test_held_elsewhere_probes_with_a_shared_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import fcntl
+
+    from core.engine.session import lock as lock_module
+
+    folder, session_id = _saved_session(tmp_path)
+    (folder / f"{session_id}.lock").touch()
+    taken: list[int] = []
+    real = fcntl.flock
+
+    def spy(fd: int, op: int) -> None:
+        taken.append(op)
+        real(fd, op)
+
+    monkeypatch.setattr(lock_module.fcntl, "flock", spy)
+    assert not SessionLock.held_elsewhere(folder, session_id)
+    assert taken == [fcntl.LOCK_SH | fcntl.LOCK_NB]

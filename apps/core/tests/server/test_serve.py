@@ -17,6 +17,7 @@ import pytest
 from core.engine.commands.builtins import BUILTINS
 from core.runtime import build_runtime
 from core.server import serve as served
+from core.server import serve as served_module
 from core.server.daemon import Daemon
 from core.server.files import PidLock
 from core.server.paths import log_path, pid_path, socket_path
@@ -169,3 +170,37 @@ def test_a_signal_during_shutdown_does_not_cut_the_cleanup_short(
     assert built and kills  # the runtime's processes were stopped
     assert not pid_path(ws).exists() and not socket_path(ws).exists()
     assert (signal.getsignal(signal.SIGTERM), signal.getsignal(signal.SIGINT)) == before
+
+
+def test_stop_with_no_run_folder_creates_none(data_home: Path, tmp_path: Path) -> None:
+    from core.server.paths import _base
+
+    assert not served.stop(tmp_path)
+    assert not _base().exists()
+
+
+def test_the_config_warnings_nobody_heard_are_logged(caplog: pytest.LogCaptureFixture) -> None:
+    class Guard:
+        def undelivered(self) -> list[str]:
+            return ["config changed by bash (x): .agent/settings.json"]
+
+    with caplog.at_level("WARNING", logger="agent.daemon"):
+        served.log_undelivered(Guard())
+    assert [r.getMessage() for r in caplog.records] == ["warning: config changed by bash (x): .agent/settings.json"]
+
+
+async def test_ensure_daemon_uses_the_running_daemon_and_starts_one_when_none_runs(serve, tmp_path, monkeypatch) -> None:
+    served = await serve()
+    started: list[Path] = []
+
+    def fake_start(workspace: Path) -> Path:
+        started.append(workspace)
+        return workspace / "new.sock"
+
+    monkeypatch.setattr(served_module, "start_background", fake_start)
+    assert await asyncio.to_thread(served_module.ensure_daemon, served.workspace) == served.socket
+    assert started == []
+    other = tmp_path / "other"
+    other.mkdir()
+    assert await asyncio.to_thread(served_module.ensure_daemon, other) == other.resolve() / "new.sock"
+    assert started == [other.resolve()]

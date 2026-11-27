@@ -38,3 +38,25 @@ def test_records_carry_image_metadata_only_and_redacted_text(tmp_path: Path) -> 
     assert user["images"] == [{"format": "png", "name": "a.png", "size": 10}]
     assert user["content"] == "look [redacted:env:X]" and reply["content"] == "seen [redacted:env:X]"
     assert data["seq"] == 3 and data["claims"]["turn_active"] is False
+
+
+def test_a_client_draws_the_snapshot_records_as_the_store_would_with_image_lines(tmp_path: Path) -> None:
+    from core.engine.session.store import TranscriptItem
+    from core.host.replay import snapshot_items
+
+    root = tmp_path.resolve()
+    provider = ScriptedProvider([])
+
+    def factory(approver: Approver) -> Agent:
+        return Agent(provider, [], approver, ToolContext(root, 5.0), 5)
+
+    host = SessionHost(factory, provider, root, window_cap=8192)
+    host.agent.history.append(Message("user", "look", images=(Image("png", b"PIXELBYTES", "a.png"),)))
+    host.agent.history.append(Message("assistant", "seen"))
+    records = snapshot(host, seq=0, redact=mask).model_dump(mode="json")["records"]
+
+    assert snapshot_items(records) == [
+        TranscriptItem("user", "look"),
+        TranscriptItem("notice", "image a.png (PNG, 1 KB)"),
+        TranscriptItem("assistant", "seen"),
+    ]

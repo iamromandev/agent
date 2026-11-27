@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from collections.abc import Awaitable, Callable, Sequence
+from pathlib import Path
 from typing import Any, Protocol
 
 from core.engine.approval import ApprovalRequest, Choice, Decision
@@ -15,9 +16,11 @@ from core.engine.provider.base import Image
 from core.engine.provider.models import ModelInfo
 from core.engine.session import SessionInfo
 from core.engine.text import one_line
+from core.engine.todo import TodoItem
 from core.engine.turn_diff import DiffItem, FileDiff, TurnDiff
 from core.host.asks import Answer, AnswerResult, AskEvent
 from core.host.bus import Subscriber
+from core.host.queue import Queued
 from core.host.session import (
     LOCAL_CLIENT,
     Attachments,
@@ -195,6 +198,101 @@ class LocalPort:
 
     def suggest_paths(self, token: str) -> list[Any]:
         return self.file_index.suggest(token)
+
+    # What the app asks about the session (the same members as `RemotePort`'s, which keeps them from the stream).
+
+    client_id = LOCAL_CLIENT
+
+    @property
+    def workspace(self) -> Path:
+        return self.host.workspace
+
+    @property
+    def window(self) -> int:
+        return self.host.provider.context_window
+
+    @property
+    def turn_active(self) -> bool:
+        return self.host.turn_active
+
+    @property
+    def undoing(self) -> bool:
+        return self.host.undoing
+
+    @property
+    def switching(self) -> bool:
+        return self.host.switching
+
+    @property
+    def queueing(self) -> bool:
+        return self.host.queueing
+
+    @property
+    def workflow_active(self) -> bool:
+        return self.host.workflow_active
+
+    @property
+    def session_starting(self) -> bool:
+        return self.host.session_starting
+
+    @property
+    def queue_entries(self) -> tuple[Queued, ...]:
+        return self.host.queue.entries
+
+    @property
+    def todos(self) -> tuple[TodoItem, ...]:
+        return self.host.agent.todos
+
+    def estimate(self) -> int:
+        return self.host.agent.estimate()
+
+    def busy_text(self, command: str) -> str:
+        return self.host.busy_text(command)
+
+    def refusal(self, command: str) -> str | None:
+        return self.host.refusal(command)
+
+    def message_refusal(self) -> str | None:
+        return self.host.message_refusal()
+
+    def begin_switch(self) -> bool:
+        return self.host.begin_switch()
+
+    def end_switch(self) -> None:
+        self.host.end_switch()
+
+    def begin_close(self) -> None:
+        self.host.begin_close()
+
+    def instructions_notice(self) -> Notice | None:
+        return self.host.agent.instructions_notice()
+
+    def forget_instructions_notice(self) -> None:
+        self.host.agent.forget_instructions_notice()
+
+    def is_current_diff(self, diff: TurnDiff) -> bool:
+        return self.host.agent.is_current_diff(diff)
+
+    def pending_asks(self) -> list[AskEvent]:
+        return self.host.asks.pending()
+
+    async def check(self) -> bool:
+        return await self.host.check()
+
+    async def send_message(
+        self,
+        text: str,
+        *,
+        label: str | None = None,
+        init: bool = False,
+        draft: str | None = None,
+        pasted: Sequence[Image] | None = None,
+    ) -> SendResult:
+        """`send` for a caller that also drives a remote port (whose send is a request)."""
+        return self.send(text, label=label, init=init, draft=draft, pasted=pasted)
+
+    async def start_compact(self) -> SendResult:
+        return self.compact()
 
     def answer(self, ask_id: str, answer: Answer) -> AnswerResult:
         return self.host.asks.answer(ask_id, answer, LOCAL_CLIENT)

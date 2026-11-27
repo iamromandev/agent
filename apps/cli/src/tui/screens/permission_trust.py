@@ -7,7 +7,7 @@ from typing import ClassVar
 
 from core.engine.hooks.config import HookEntry
 from core.engine.permissions.rules import Rule
-from core.trust import sort_rules, trust_lines
+from core.trust import TrustAsk, sort_rules, trust_lines
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -37,14 +37,17 @@ class PermissionTrustScreen(ModalScreen[bool]):
     BINDINGS: ClassVar[list[BindingType]] = [Binding("escape", "decline", "Don't trust", show=False)]
     AUTO_FOCUS = "OptionList"
 
-    def __init__(self, rules: Sequence[Rule], hooks: Sequence[HookEntry] = ()) -> None:
+    def __init__(self, rules: Sequence[Rule] = (), hooks: Sequence[HookEntry] = (), *, ask: TrustAsk | None = None) -> None:
+        """The project's rules and hooks, or (`ask`) a prompt whose texts were built elsewhere: the daemon's trust
+        prompts in `--shared` mode, of any kind."""
         super().__init__()
         self.hooks = list(hooks)
         # What allows the most comes first: a bare tool, a prefix; then the exact calls, in the file's order.
         self.rules = sort_rules(rules)
+        self.ask = ask
 
     def compose(self) -> ComposeResult:
-        ask = trust_lines("permission_trust", rules=self.rules, hooks=self.hooks)
+        ask = self.ask or trust_lines("permission_trust", rules=self.rules, hooks=self.hooks)
         with Vertical():
             yield Label(Text(ask.title, "bold"), id="title")
             for line in ask.header:
