@@ -10,6 +10,8 @@ from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from core.engine.terminal.manager import Event, Terminal, TerminalManager
+from core.engine.terminal.pty import WriteOverflow
 from textual import events
 from textual.app import ComposeResult
 from textual.containers import Vertical
@@ -18,8 +20,6 @@ from textual.strip import Strip
 from textual.widget import Widget
 from textual.widgets import TabbedContent, TabPane
 
-from src.engine.terminal.manager import Event, Terminal, TerminalManager
-from src.engine.terminal.pty import WriteOverflow
 from src.tui.keys import encode
 from src.tui.terminal_render import line_strip
 from src.tui.terminal_screen import TerminalScreen, TerminalStream

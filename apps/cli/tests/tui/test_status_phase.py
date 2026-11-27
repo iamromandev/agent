@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from src.engine.events import Phase
+from core.engine.events import Phase
 from src.tui.widgets.status import MAX_ACTIVITY, StatusBar, format_elapsed, format_phase, format_phase_text
 from textual.app import App, ComposeResult
 

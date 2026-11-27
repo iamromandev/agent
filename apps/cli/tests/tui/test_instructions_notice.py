@@ -6,8 +6,8 @@ import threading
 from pathlib import Path
 
 import pytest
-from src.engine.loop import Agent
-from src.engine.provider.base import Done, TextDelta
+from core.engine.loop import Agent
+from core.engine.provider.base import Done, TextDelta
 from src.tui.widgets.transcript import NoticeEntry
 
 from tests.tui.conftest import AppFactory, settled, type_and_send

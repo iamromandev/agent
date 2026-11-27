@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.engine.session import TranscriptItem
+from core.engine.session import TranscriptItem
 from src.tui.styles import ICONS
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry, Transcript, UserEntry
 from textual.widgets._collapsible import CollapsibleTitle

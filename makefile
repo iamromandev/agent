@@ -11,16 +11,17 @@ UI_PORT := 3000
 .PHONY: check test setup down restart clean help \
 	api-check api-check-ci api-test api-run api-up api-down api-build api-build-prod api-push-prod api-restart api-ps api-logs \
 	api-migrate api-install api-install-dev api-export api-clean-all api-clean-volumes api-clean-host \
+	core-sync core-check core-check-ci core-test \
 	cli-sync cli-install cli-check cli-check-ci cli-test cli-run cli-eval cli-image-eval cli-uninstall cli-clean \
 	ui-install ui-dev ui-down ui-restart ui-build ui-check ui-format \
 	infra-init infra-validate infra-plan infra-apply infra-fmt
 
 ## both stacks
 check: # Lint + typecheck every stack
-	$(MOON) run api:check cli:check ui:check
+	$(MOON) run api:check core:check cli:check ui:check
 
-test: # Run the API and CLI test suites
-	$(MOON) run api:test cli:test
+test: # Run the API, core and CLI test suites
+	$(MOON) run api:test core:test cli:test
 
 setup: # Run API migrations (containers must be up)
 	$(MOON) run api:migrate
@@ -92,6 +93,19 @@ api-clean-volumes: # Remove the project's volumes (db)
 
 api-clean-host: # Prune all unused Docker data on the host
 	$(MOON) run api:clean-host
+
+## core — delegates to apps/core/moon.yml
+core-sync: # Install the core dependencies into apps/core/.venv
+	$(MOON) run core:sync
+
+core-check: # Lint + typecheck core
+	$(MOON) run core:check
+
+core-check-ci: # Lint + typecheck core without fixing anything (what CI runs)
+	$(MOON) run core:check-ci
+
+core-test: # Run the core test suite
+	$(MOON) run core:test
 
 ## cli — delegates to apps/cli/moon.yml
 cli-sync: # Install the CLI dependencies into apps/cli/.venv

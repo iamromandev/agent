@@ -9,6 +9,8 @@ import asyncio
 from collections.abc import Awaitable, Callable
 from typing import ClassVar
 
+from core.engine.text import escape, escape_display
+from core.engine.turn_diff import BANNER, DiffItem, FileDiff, LineKind, TurnDiff, render_lines
 from rich.style import Style
 from rich.text import Text
 from textual import on
@@ -20,8 +22,6 @@ from textual.screen import Screen
 from textual.widgets import Label, OptionList, Static
 from textual.widgets.option_list import Option
 
-from src.engine.text import escape, escape_display
-from src.engine.turn_diff import BANNER, DiffItem, FileDiff, LineKind, TurnDiff, render_lines
 from src.tui.styles import DIM, ERROR, MODIFIED, OK, PLAIN, TYPE_CHANGED
 
 Loader = Callable[[TurnDiff, DiffItem], Awaitable[FileDiff]]

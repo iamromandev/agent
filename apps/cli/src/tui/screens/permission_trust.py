@@ -6,6 +6,9 @@ import re
 from collections.abc import Sequence
 from typing import ClassVar
 
+from core.engine.hooks.config import HookEntry
+from core.engine.permissions.rules import Rule
+from core.engine.text import escape
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -14,10 +17,6 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
-
-from src.engine.hooks.config import HookEntry
-from src.engine.permissions.rules import Rule
-from src.engine.text import escape
 
 _SPACES = re.compile(r" {2,}")
 

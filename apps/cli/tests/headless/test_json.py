@@ -8,12 +8,11 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from src.config.settings import get_settings
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.config.settings import get_settings
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import ScriptedProvider
 from src.headless import EXIT_FAIL, EXIT_OK, HeadlessOptions
 from src.headless.run import run_headless
-
-from tests.fakes import ScriptedProvider
 
 TOKEN = "ghp_" + "b" * 36
 
@@ -116,7 +115,7 @@ def test_an_internal_error_is_exit_1_error(ws: Path, monkeypatch: pytest.MonkeyP
 
 
 def test_a_failure_inside_the_turn_is_exit_1_error(ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from src.engine import Agent
+    from core.engine import Agent
 
     async def boom(self: Agent, *_: object, **__: object) -> None:
         raise RuntimeError("turn broke")

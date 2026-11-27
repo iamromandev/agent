@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from core.engine.text import escape
 from rich.text import Text
 from textual.message import Message
 from textual.widgets import OptionList
 from textual.widgets.option_list import Option
-
-from src.engine.text import escape
 
 
 class CommandSuggestions(OptionList, can_focus=False):

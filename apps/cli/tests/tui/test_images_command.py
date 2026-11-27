@@ -8,17 +8,17 @@ import time
 from pathlib import Path
 
 import pytest
-from src.engine.commands.builtins import BUILTINS
-from src.engine.guardrails.setup import Guardrails
-from src.engine.image_pull import NOT_INSTALLED, ImagePuller, Role
-from src.engine.imagegen import EDIT_EXTRA, UPSCALE_EXTRA, MfluxGenerator
-from src.engine.provider.base import Done, TextDelta
+from core.engine.commands.builtins import BUILTINS
+from core.engine.guardrails.setup import Guardrails
+from core.engine.image_pull import NOT_INSTALLED, ImagePuller, Role
+from core.engine.imagegen import EDIT_EXTRA, UPSCALE_EXTRA, MfluxGenerator
+from core.engine.provider.base import Done, TextDelta
+from core.testing.image_fakes import fake_mflux
 from src.tui.app import HELP
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.image_fakes import fake_mflux
 from tests.tui.conftest import AppFactory, type_and_send, until
 
 

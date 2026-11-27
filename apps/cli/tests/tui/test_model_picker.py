@@ -5,14 +5,14 @@ from __future__ import annotations
 import asyncio
 
 import pytest
-from src.engine.provider.models import ModelInfo
+from core.engine.provider.models import ModelInfo
+from core.testing.fakes import FakeCatalog
 from src.tui.screens.models import ModelPicker
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 from textual.screen import ModalScreen
 from textual.widgets import OptionList
 
-from tests.fakes import FakeCatalog
 from tests.tui.conftest import AppFactory, type_and_send, until
 
 GIB = 1024**3

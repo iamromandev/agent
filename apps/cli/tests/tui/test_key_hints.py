@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import asyncio
 
-from src.engine.provider.base import Done, TextDelta
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import Gate
 from src.tui import StartChoice
 from src.tui.app import AgentApp
 from src.tui.hints import BUSY as BUSY_ENTRIES
@@ -20,7 +21,6 @@ from textual.binding import Binding
 from textual.color import Color
 from textual.widget import Widget
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, chat, reached, settled, type_and_send, until
 
 IDLE = "enter send · ctrl+j newline · tab mode · / commands · @ files · ctrl+t terminal"

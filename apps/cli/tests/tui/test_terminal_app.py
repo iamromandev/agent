@@ -11,8 +11,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.terminal.manager import Terminal, TerminalManager
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.terminal.manager import Terminal, TerminalManager
+from core.testing.fakes import Gate
+from core.testing.helpers import assert_all_gone, wait_for_pids
 from src.tui.app import AgentApp
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
@@ -20,8 +22,6 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import NoticeEntry
 from textual.pilot import Pilot
 
-from tests.fakes import Gate
-from tests.helpers import assert_all_gone, wait_for_pids
 from tests.tui.conftest import AppFactory, settled, type_and_send, until
 
 

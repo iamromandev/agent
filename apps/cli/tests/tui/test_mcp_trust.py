@@ -8,17 +8,17 @@ import time
 from pathlib import Path
 
 import pytest
-from src.engine.mcp.config import ServerConfig
-from src.engine.mcp.contract import McpError, ToolInfo
-from src.engine.mcp.hub import McpHub
-from src.engine.mcp.setup import McpSetup, prepare
-from src.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.mcp.config import ServerConfig
+from core.engine.mcp.contract import McpError, ToolInfo
+from core.engine.mcp.hub import McpHub
+from core.engine.mcp.setup import McpSetup, prepare
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.testing.fakes import FakeConnection, FakeConnector
 from src.tui.app import AgentApp
 from src.tui.screens.mcp_trust import McpTrustScreen, describe
 from src.tui.widgets.transcript import NoticeEntry
 from textual.widgets import Label, OptionList
 
-from tests.fakes import FakeConnection, FakeConnector
 from tests.tui.conftest import AppFactory, type_and_send, until
 
 ECHO = ToolInfo("echo", "Echo it", {"type": "object"})

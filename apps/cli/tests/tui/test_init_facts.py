@@ -7,12 +7,12 @@ import threading
 from pathlib import Path
 
 import src.tui.app as app_module
-from src.engine.mode import Mode
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.mode import Mode
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.facts_fixtures import CI_YML, ROOT_MAKEFILE
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.engine.facts_fixtures import CI_YML, ROOT_MAKEFILE
 from tests.tui.conftest import AppFactory, choose, scripted, settled, type_and_send, until
 
 REPLY = [TextDelta("ok"), Done(1, 1)]

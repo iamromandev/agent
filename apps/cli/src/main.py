@@ -83,7 +83,7 @@ def root(
 ) -> None:
     """Agent command-line client. Run without a command to open the coding agent."""
     if ctx.invoked_subcommand is None:
-        from src.runtime import StartChoice  # UI-free: Textual is not needed for `health`, `--help` or `-p`
+        from core.runtime import StartChoice  # UI-free: Textual is not needed for `health`, `--help` or `-p`
 
         if model is not None and not model.strip():
             raise typer.BadParameter("give a model name", param_hint="--model")

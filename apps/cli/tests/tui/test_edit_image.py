@@ -7,18 +7,18 @@ import json
 from pathlib import Path
 
 import pytest
-from src.client import clipboard
-from src.engine.guardrails.setup import Guardrails
-from src.engine.imagegen import EDIT_COMMAND, EDIT_EXTRA, MfluxGenerator, png_size
-from src.engine.loop import PASTED_NOTE
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.client import clipboard
+from core.engine.guardrails.setup import Guardrails
+from core.engine.imagegen import EDIT_COMMAND, EDIT_EXTRA, MfluxGenerator, png_size
+from core.engine.loop import PASTED_NOTE
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import FakeCatalog
+from core.testing.image_fakes import fake_mflux, png
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import Transcript, UserEntry
 
-from tests.fakes import FakeCatalog
-from tests.image_fakes import fake_mflux, png
 from tests.tui.conftest import AppFactory, choose, scripted, settled, type_and_send, until
 
 PASTED = png(40, 30) + b"clip"
@@ -120,7 +120,8 @@ def _user_contents(app) -> list[str]:
 async def test_a_merged_queue_turn_labels_the_images_that_turn_took(
     make_app: AppFactory, clip: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from tests.fakes import Gate
+    from core.testing.fakes import Gate
+
     from tests.tui.conftest import reached
 
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
@@ -142,7 +143,7 @@ async def test_a_merged_queue_turn_labels_the_images_that_turn_took(
 async def test_a_blocked_prompt_gives_the_chips_back_and_no_label_leaks_into_the_resend(
     make_app: AppFactory, clip: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from src.engine.hooks.setup import HookDecision
+    from core.engine.hooks.setup import HookDecision
 
     monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hub"))
     workspace = tmp_path / "ws"

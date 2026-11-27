@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from core.config.settings import Settings
+from core.testing.fakes import ScriptedProvider
 from evals.runner import Options, run_all, run_task
 from evals.tasks import Task
-from src.config.settings import Settings
 
 from tests.evals.conftest import call, say
-from tests.fakes import ScriptedProvider
 
 FIND_ANSWER = "parse_config is in app/config.py, called by run and reload"
 

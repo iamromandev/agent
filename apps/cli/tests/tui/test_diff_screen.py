@@ -8,11 +8,11 @@ import shutil
 from pathlib import Path
 
 import pytest
+from core.engine.checkpoints.store import CheckpointStore
+from core.engine.guardrails.setup import Guardrails
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.turn_diff import DiffItem
 from rich.text import Text
-from src.engine.checkpoints.store import CheckpointStore
-from src.engine.guardrails.setup import Guardrails
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.turn_diff import DiffItem
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.diff import DiffScreen, describe
 from src.tui.widgets.chat_input import ChatInput

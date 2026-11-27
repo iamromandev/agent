@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import io
 
-from src.engine.events import Compacting, Notice, ToolFinished, ToolStarted
-from src.engine.tools.base import ToolResult
+from core.engine.events import Compacting, Notice, ToolFinished, ToolStarted
+from core.engine.tools.base import ToolResult
 from src.headless.output import StderrSink
 
 

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from core.engine.text import escape_display
 from rich.text import Text
 from textual.widgets import Static
-
-from src.engine.text import escape_display
 
 
 class AttachmentPanel(Static):

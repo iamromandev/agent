@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from typing import ClassVar
 
+from core.engine.session import SessionInfo
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -15,7 +16,6 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
-from src.engine.session import SessionInfo
 from src.tui.styles import session_row
 
 TITLE_WIDTH = 40

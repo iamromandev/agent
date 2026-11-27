@@ -1,4 +1,4 @@
-"""AC16: the image extra is opt-in and limited to Apple Silicon; the lock can resolve it."""
+"""The CLI's image and media extras only forward to agent-core, which owns the Apple Silicon pins."""
 
 from __future__ import annotations
 
@@ -12,11 +12,10 @@ def _data() -> dict:
     return tomllib.loads(PYPROJECT.read_text())
 
 
-def test_the_image_extra_pins_mflux_for_apple_silicon_only() -> None:
-    extra = _data()["project"]["optional-dependencies"]["image"]
-    marker = "; sys_platform == 'darwin' and platform_machine == 'arm64'"
-    # mflux, plus Pillow and numpy for the masked edit's compositing helper (a separate process)
-    assert extra == [f"mflux==0.24.0{marker}", f"pillow==13.0.0{marker}", f"numpy==2.5.5{marker}"]
+def test_the_extras_forward_to_agent_core() -> None:
+    extras = _data()["project"]["optional-dependencies"]
+    assert extras["image"] == ["agent-core[image]"]
+    assert extras["media"] == ["agent-core[media]"]
 
 
 def test_mflux_is_not_a_default_dependency() -> None:

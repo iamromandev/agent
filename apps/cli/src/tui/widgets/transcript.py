@@ -5,6 +5,9 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import Any, Literal, cast
 
+from core.engine.session import TranscriptItem
+from core.engine.text import escape
+from core.engine.tools.base import Preview, ToolResult
 from rich.cells import cell_len
 from rich.color import Color as RichColor
 from rich.color import ColorType
@@ -22,9 +25,6 @@ from textual.widget import Widget
 from textual.widgets import Collapsible, Markdown, Static
 from textual.widgets.markdown import MarkdownStream
 
-from src.engine.session import TranscriptItem
-from src.engine.text import escape
-from src.engine.tools.base import Preview, ToolResult
 from src.tui.styles import (
     ACCENT,
     ICONS,

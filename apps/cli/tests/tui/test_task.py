@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.web import FetchResponse
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.web import FetchResponse
+from core.testing.fakes import FakeFetcher
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry
 from textual.widgets import Collapsible, Static
 
-from tests.fakes import FakeFetcher
 from tests.tui.conftest import AppFactory, settled, type_and_send, until
 
 

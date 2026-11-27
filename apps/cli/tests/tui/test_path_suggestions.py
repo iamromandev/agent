@@ -6,7 +6,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from src.engine.provider.base import Done, TextDelta
+from core.engine.provider.base import Done, TextDelta
 from src.tui.app import AgentApp
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.path_suggestions import PathSuggestions

@@ -6,6 +6,8 @@ import shlex
 from collections.abc import Sequence
 from typing import ClassVar
 
+from core.engine.mcp.config import ServerConfig
+from core.engine.text import escape
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -14,9 +16,6 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
-
-from src.engine.mcp.config import ServerConfig
-from src.engine.text import escape
 
 
 def command_line(server: ServerConfig) -> str:

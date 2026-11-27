@@ -6,15 +6,15 @@ import json
 import time
 from pathlib import Path
 
-from src.engine.mcp.trust import TrustStore, trust_store_path
-from src.engine.permissions.config import project_settings_path
-from src.engine.permissions.setup import prepare
-from src.engine.provider.base import Done, TextDelta
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.permissions.config import project_settings_path
+from core.engine.permissions.setup import prepare
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import FakeCatalog, Gate
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.fakes import FakeCatalog, Gate
 from tests.tui.conftest import AppFactory, reached, scripted, settled, type_and_send, until
 
 

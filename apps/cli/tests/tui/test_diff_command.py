@@ -8,16 +8,16 @@ import shutil
 from pathlib import Path
 
 import pytest
-from src.engine.checkpoints.git import GitError
-from src.engine.checkpoints.store import CheckpointStore
-from src.engine.guardrails.setup import Guardrails
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.engine.session import NullRecorder
+from core.engine.checkpoints.git import GitError
+from core.engine.checkpoints.store import CheckpointStore
+from core.engine.guardrails.setup import Guardrails
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import NullRecorder
+from core.testing.fakes import Gate
 from src.tui.screens.diff import DiffScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
 
 REPLY = [TextDelta("ok"), Done(1, 1)]

@@ -5,12 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import Gate
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.status import StatusBar
 from textual.pilot import Pilot
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
 
 
@@ -155,7 +155,7 @@ async def test_a_task_child_does_not_change_the_phase_line(
 
 
 async def test_compacting_wins_then_the_phase_line_returns(make_app: AppFactory) -> None:
-    from src.engine.events import Compacting, Phase
+    from core.engine.events import Compacting, Phase
 
     app = make_app([[TextDelta("ok"), Done(1, 1)]])
     async with app.run_test():

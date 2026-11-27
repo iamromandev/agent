@@ -7,7 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from src.engine.session import FileRecorder, SessionError, SessionStore, SessionWriteError, sessions_root
+from core.engine.session import FileRecorder, SessionError, SessionStore, SessionWriteError, sessions_root
 from src.tui import StartChoice
 from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
@@ -32,7 +32,7 @@ async def test_resume_by_a_unique_id_prefix(
     make_app: AppFactory, save_session: SaveSession, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     ids = iter(["01JF3KAAAAAAAAAAAAAAAAAAAA", "01JF3MBBBBBBBBBBBBBBBBBBBB"])
-    monkeypatch.setattr("src.engine.session.recorder.new_ulid", lambda: next(ids))
+    monkeypatch.setattr("core.engine.session.recorder.new_ulid", lambda: next(ids))
     save_session(chat("other", "other"), age=100)
     save_session(chat("wanted", "reply"), age=200)
     app = make_app(start=StartChoice("resume", "01jf3m"))  # any case, a prefix of one id only

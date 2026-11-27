@@ -7,17 +7,17 @@ import time
 from pathlib import Path
 
 import pytest
-from src.engine.mcp.trust import TrustStore, trust_store_path
-from src.engine.permissions.config import RuleFile, project_settings_path
-from src.engine.permissions.rules import parse_rule
-from src.engine.permissions.setup import PermissionSetup, Rules, prepare
-from src.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from core.engine.mcp.trust import TrustStore, trust_store_path
+from core.engine.permissions.config import RuleFile, project_settings_path
+from core.engine.permissions.rules import parse_rule
+from core.engine.permissions.setup import PermissionSetup, Rules, prepare
+from core.engine.provider.base import Done, ProviderEvent, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import Gate
 from src.tui.app import AgentApp
 from src.tui.screens.permission_trust import PermissionTrustScreen
 from src.tui.widgets.transcript import NoticeEntry
 from textual.widgets import Label, OptionList
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, type_and_send, until
 
 Script = list[list[ProviderEvent | Gate]]
@@ -99,7 +99,7 @@ async def _answer(pilot, option_id: str) -> None:
 
 
 def _tool_results(app: AgentApp) -> list[str]:
-    from src.engine.provider.base import Message
+    from core.engine.provider.base import Message
 
     return [m.content for m in app.agent.history if isinstance(m, Message) and m.role == "tool"]
 

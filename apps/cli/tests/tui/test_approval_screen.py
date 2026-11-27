@@ -5,7 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.styles import diff_theme
 from src.tui.widgets.status import StatusBar
@@ -171,8 +171,8 @@ def _record_diff_themes(monkeypatch: pytest.MonkeyPatch, module: str) -> list[bo
 
 
 def _rules(tmp_path: Path):
-    from src.engine.mcp.trust import TrustStore
-    from src.engine.permissions.setup import prepare
+    from core.engine.mcp.trust import TrustStore
+    from core.engine.permissions.setup import prepare
 
     workspace = tmp_path.resolve()
     return prepare(workspace, tmp_path / "global.json", TrustStore(tmp_path.parent / f"{tmp_path.name}-store.json")).rules
@@ -208,7 +208,7 @@ def _bash_script(command: str) -> list[list]:
 async def test_a_protected_read_dialog_names_the_path_and_offers_only_allow_once_and_deny(
     make_app: AppFactory, tmp_path: Path
 ) -> None:
-    from src.engine.guardrails.setup import prepare as prepare_guard
+    from core.engine.guardrails.setup import prepare as prepare_guard
 
     home = tmp_path / "home"
     (home / ".ssh").mkdir(parents=True)

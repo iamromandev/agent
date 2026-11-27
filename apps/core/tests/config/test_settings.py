@@ -1,0 +1,167 @@
+from __future__ import annotations
+
+from collections.abc import Iterator
+
+import pytest
+from core.config import Settings, get_settings
+from pydantic import ValidationError
+
+
+@pytest.fixture(autouse=True)
+def _fresh_settings() -> Iterator[None]:
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+def test_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_MODEL", "foo")
+    monkeypatch.setenv("AGENT_NUM_CTX", "4096")
+    settings = get_settings()
+    assert settings.model == "foo"
+    assert settings.num_ctx == 4096
+
+
+@pytest.mark.parametrize("name", ["AGENT_NUM_CTX", "AGENT_BASH_TIMEOUT", "AGENT_MAX_STEPS", "AGENT_TASK_MAX_STEPS", "AGENT_MCP_TIMEOUT", "AGENT_MCP_START_TIMEOUT"])
+def test_non_positive_values_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str) -> None:
+    monkeypatch.setenv(name, "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_session_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AGENT_SESSIONS_DIR")
+    settings = Settings(_env_file=None)
+    assert settings.sessions_dir is None
+    assert settings.compact_at == 0.8
+    assert settings.compact_keep_turns == 2
+
+
+def test_session_env_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_SESSIONS_DIR", "/somewhere")
+    monkeypatch.setenv("AGENT_COMPACT_AT", "0.5")
+    monkeypatch.setenv("AGENT_COMPACT_KEEP_TURNS", "4")
+    settings = Settings(_env_file=None)
+    assert settings.sessions_dir == "/somewhere"
+    assert settings.compact_at == 0.5
+    assert settings.compact_keep_turns == 4
+
+
+@pytest.mark.parametrize("value", ["0", "1.5", "-0.1"])
+def test_compact_at_outside_the_range_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AGENT_COMPACT_AT", value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_compact_at_of_one_is_accepted(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_COMPACT_AT", "1")
+    assert Settings(_env_file=None).compact_at == 1.0
+
+
+def test_compact_keep_turns_of_zero_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_COMPACT_KEEP_TURNS", "0")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_instructions_share_defaults_to_a_quarter() -> None:
+    assert Settings(_env_file=None).instructions_share == 0.25
+
+
+def test_instructions_share_is_read_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_INSTRUCTIONS_SHARE", "0.1")
+    share = Settings(_env_file=None).instructions_share
+    assert share == 0.1
+    assert int(share * 8192) == 819
+
+
+@pytest.mark.parametrize("value", ["0", "0.6", "abc"])
+def test_instructions_share_outside_the_range_is_rejected(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
+    monkeypatch.setenv("AGENT_INSTRUCTIONS_SHARE", value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_env_example_lists_the_instructions_share() -> None:
+    from pathlib import Path
+
+    example = (Path(__file__).parents[2] / ".env.example").read_text()
+    assert "AGENT_INSTRUCTIONS_SHARE=0.25" in example.splitlines()
+
+
+def test_fetch_defaults_and_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.fetch_timeout == 15.0
+    assert settings.fetch_max_bytes == 2_000_000
+    monkeypatch.setenv("AGENT_FETCH_TIMEOUT", "3")
+    monkeypatch.setenv("AGENT_FETCH_MAX_BYTES", "100")
+    settings = Settings(_env_file=None)
+    assert (settings.fetch_timeout, settings.fetch_max_bytes) == (3.0, 100)
+
+
+def test_the_two_mcp_timeouts_are_separate_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_MCP_TIMEOUT", "5")
+    monkeypatch.setenv("AGENT_MCP_START_TIMEOUT", "300")
+    settings = Settings(_env_file=None)
+    assert (settings.mcp_timeout, settings.mcp_start_timeout) == (5.0, 300.0)
+
+
+@pytest.mark.parametrize("value", ["searx.local:8888", "ftp://searx.local", "file:///etc/passwd", "not a url"])
+def test_search_url_needs_an_http_scheme_and_a_host(value: str) -> None:
+    with pytest.raises(ValidationError, match="AGENT_SEARCH_URL"):
+        Settings(_env_file=None, search_url=value)
+
+
+def test_search_url_accepts_http_and_https() -> None:
+    assert Settings(_env_file=None, search_url="https://searx.local/base").search_url == "https://searx.local/base"
+
+
+def test_image_settings_defaults() -> None:
+    settings = Settings(_env_file=None)
+    assert settings.image_model == "filipstrand/Z-Image-Turbo-mflux-4bit"
+    assert settings.image_timeout == 900.0
+    assert settings.image_edit_model == "black-forest-labs/FLUX.2-klein-4B"
+
+
+def test_image_settings_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AGENT_IMAGE_MODEL", "x/y")
+    monkeypatch.setenv("AGENT_IMAGE_TIMEOUT", "30")
+    settings = Settings(_env_file=None)
+    assert (settings.image_model, settings.image_timeout) == ("x/y", 30.0)
+    monkeypatch.setenv("AGENT_IMAGE_EDIT_MODEL", "e/m")
+    assert Settings(_env_file=None).image_edit_model == "e/m"
+
+
+@pytest.mark.parametrize("name, value", [("AGENT_IMAGE_TIMEOUT", "0"), ("AGENT_IMAGE_MODEL", ""), ("AGENT_IMAGE_EDIT_MODEL", "")])
+def test_invalid_image_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_image_upscale_model_defaults_and_reads_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert Settings(_env_file=None).image_upscale_model == "seedvr2-3b"
+    monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "u/m")
+    assert Settings(_env_file=None).image_upscale_model == "u/m"
+    monkeypatch.setenv("AGENT_IMAGE_UPSCALE_MODEL", "")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
+def test_media_settings_defaults_and_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(_env_file=None)
+    assert settings.speech_model == "mlx-community/Kokoro-82M-bf16"
+    assert (settings.speech_timeout, settings.video_timeout) == (300.0, 900.0)
+    monkeypatch.setenv("AGENT_SPEECH_MODEL", "s/m")
+    monkeypatch.setenv("AGENT_SPEECH_TIMEOUT", "30")
+    monkeypatch.setenv("AGENT_VIDEO_TIMEOUT", "40")
+    settings = Settings(_env_file=None)
+    assert (settings.speech_model, settings.speech_timeout, settings.video_timeout) == ("s/m", 30.0, 40.0)
+
+
+@pytest.mark.parametrize("name, value", [("AGENT_SPEECH_MODEL", ""), ("AGENT_SPEECH_TIMEOUT", "0"), ("AGENT_VIDEO_TIMEOUT", "0")])
+def test_invalid_media_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, name: str, value: str) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)

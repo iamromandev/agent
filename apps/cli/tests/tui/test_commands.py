@@ -3,15 +3,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from src.engine.commands.loader import Command, Commands
-from src.engine.mode import Mode
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.commands.loader import Command, Commands
+from core.engine.mode import Mode
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import Gate
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.queue_panel import QueuePanel
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, scripted, settled, type_and_send, until
 
 

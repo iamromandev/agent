@@ -7,9 +7,12 @@ import json
 from pathlib import Path
 
 import pytest
-from src.engine.commands.builtins import BUILTINS
-from src.engine.workflows.loader import Workflows
-from src.engine.workflows.runs import RunIndex
+from core.engine.commands.builtins import BUILTINS
+from core.engine.workflows.loader import Workflows
+from core.engine.workflows.runs import RunIndex
+from core.testing.fakes import Gate
+from core.testing.workflow_data import answer, reel_data, scenes, workflow
+from core.testing.workflow_fakes import AssembleVideo, GenerateImage, SlowTool, Speak
 from src.tui.app import HELP
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
@@ -17,9 +20,6 @@ from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 from textual.widgets import OptionList
 
-from tests.engine.workflows.fakes import AssembleVideo, GenerateImage, SlowTool, Speak
-from tests.engine.workflows.test_runner import answer, reel_data, scenes, workflow
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, choose, type_and_send, until
 
 RUN_GLOB = "workflows/reel/*"
@@ -250,7 +250,7 @@ async def _finish_reel(pilot, app) -> None:
 async def test_redo_shows_the_note_the_reused_calls_and_the_estimate_source_and_undo_reverts_it(
     make_app: AppFactory, tmp_path: Path
 ) -> None:
-    from tests.engine.workflows.test_runner_retry import scenes_with
+    from core.testing.workflow_data import scenes_with
 
     app, _ = _make(make_app, tmp_path, [answer(scenes(2)), answer(scenes_with(["n1", "different"]))])
     async with app.run_test() as pilot:
@@ -336,7 +336,7 @@ async def test_image_pull_is_refused_during_a_run_but_status_and_cancel_work(
 async def test_session_commands_and_custom_commands_are_refused_during_a_run(
     make_app: AppFactory, tmp_path: Path, command: str
 ) -> None:
-    from src.engine.commands.loader import Command, Commands
+    from core.engine.commands.loader import Command, Commands
 
     gate = Gate()
     app, _ = _held_app(

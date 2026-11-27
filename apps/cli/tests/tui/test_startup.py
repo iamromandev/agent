@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-from src.engine.provider.base import Done, TextDelta
+from core.engine.provider.base import Done, TextDelta
+from core.testing.fakes import Gate
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry, UserEntry
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, scripted, settled, type_and_send, until
 
 UNREACHABLE = "Cannot reach Ollama at http://localhost:11434 — start it with `ollama serve`"

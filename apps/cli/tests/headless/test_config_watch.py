@@ -8,13 +8,12 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
-from src.config.settings import get_settings
-from src.engine.configguard import GlobalMarker, marker_path
-from src.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.config.settings import get_settings
+from core.engine.configguard import GlobalMarker, marker_path
+from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.testing.fakes import ScriptedProvider
 from src.headless import EXIT_OK, HeadlessOptions
 from src.headless.run import run_headless
-
-from tests.fakes import ScriptedProvider
 
 MARKER_WARNING = (
     "global config was changed by a command in an earlier run; until you trust it in the app, global allow rules, "

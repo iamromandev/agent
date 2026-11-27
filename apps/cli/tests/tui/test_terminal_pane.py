@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from src.engine.terminal.manager import TerminalManager
+from core.engine.terminal.manager import TerminalManager
 from src.tui.widgets.terminal import FEED_SLICE, MAX_PENDING, TerminalPane, TerminalView, _Tab, _title
 from textual import events
 from textual.app import App, ComposeResult

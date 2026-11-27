@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from typing import ClassVar
 
+from core.engine.usage import EMPTY_TEXT, UsageSummary
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.binding import Binding, BindingType
@@ -14,7 +15,6 @@ from textual.containers import Vertical
 from textual.screen import ModalScreen
 from textual.widgets import Label, Static
 
-from src.engine.usage import EMPTY_TEXT, UsageSummary
 from src.tui.styles import ACCENT, DIM, MODIFIED
 
 LABEL_WIDTH = 20

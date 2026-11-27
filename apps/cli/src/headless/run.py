@@ -14,28 +14,29 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import BinaryIO, Literal
 
-from src.engine import Agent
-from src.engine.commands.builtins import BUILTINS
-from src.engine.compaction import STOP_NOTE_PREFIX
-from src.engine.configguard import held_warning
-from src.engine.configwatch import Cause
-from src.engine.events import AgentEvent, Notice, TurnEnded
-from src.engine.loop import close_recorder
-from src.engine.mcp.contract import McpConnector
-from src.engine.mcp.hub import HubEvent
-from src.engine.mentions import Expansion, MentionNote, apply_vision, expand_mentions, note_text
-from src.engine.permissions.rules import Rule, RuleError, parse_rule
-from src.engine.permissions.setup import run_rule_warnings, tool_keys
-from src.engine.provider.base import Image, SwitchableProvider
-from src.engine.provider.models import ModelCatalog
-from src.engine.session import FileRecorder, SessionError, SessionWriteError
-from src.engine.text import escape_display
-from src.engine.tools import default_tools
+from core.engine import Agent
+from core.engine.commands.builtins import BUILTINS
+from core.engine.compaction import STOP_NOTE_PREFIX
+from core.engine.configguard import held_warning
+from core.engine.configwatch import Cause
+from core.engine.events import AgentEvent, Notice, TurnEnded
+from core.engine.loop import close_recorder
+from core.engine.mcp.contract import McpConnector
+from core.engine.mcp.hub import HubEvent
+from core.engine.mentions import Expansion, MentionNote, apply_vision, expand_mentions, note_text
+from core.engine.permissions.rules import Rule, RuleError, parse_rule
+from core.engine.permissions.setup import run_rule_warnings, tool_keys
+from core.engine.provider.base import Image, SwitchableProvider
+from core.engine.provider.models import ModelCatalog
+from core.engine.session import FileRecorder, SessionError, SessionWriteError
+from core.engine.text import escape_display
+from core.engine.tools import default_tools
+from core.runtime import Runtime, build_runtime
+
 from src.headless import EXIT_FAIL, EXIT_INT, EXIT_OK, EXIT_TERM, EXIT_USAGE, HeadlessOptions, UsageError
 from src.headless.approver import HeadlessApprover
 from src.headless.output import JsonCollector, Outcome, StderrSink, StopReason, json_line, want_color, write_stdout
 from src.headless.prompt import build_prompt
-from src.runtime import Runtime, build_runtime
 
 
 class _Terminated(BaseException):

@@ -6,14 +6,14 @@ import re
 from collections.abc import Callable
 from pathlib import Path
 
-from src.engine.provider.base import Done, Message, TextDelta, ToolCall
-from src.engine.session import ToolMeta
+from core.engine.provider.base import Done, Message, TextDelta, ToolCall
+from core.engine.session import ToolMeta
+from core.testing.fakes import Gate
 from src.tui import StartChoice
 from src.tui.styles import ICONS
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.fakes import Gate
 from tests.tui.conftest import AppFactory, reached, settled, type_and_send, until
 
 SaveSession = Callable[..., Path]

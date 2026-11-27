@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.engine.approval import ApprovalRequest, Choice, Decision
+from core.engine.approval import ApprovalRequest, Choice, Decision
 
 HEADLESS_DENY = "no approval in headless mode (use --allow)"
 

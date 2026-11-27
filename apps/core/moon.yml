@@ -1,0 +1,29 @@
+id: "core"
+language: "python"
+layer: "library"
+
+fileGroups:
+  sources: ["core/**/*"]
+  configs: ["pyproject.toml", "ruff.toml", ".python-version"]
+
+# Apple Silicon Macs also get the `image` and `media` extras (mflux, mlx-audio, ...); elsewhere they are not installed.
+tasks:
+  sync:
+    # The dependencies into apps/core/.venv
+    script: "if [ \"$(uname -s)\" = Darwin ] && [ \"$(uname -m)\" = arm64 ]; then uv sync --extra image --extra media; else uv sync; fi"
+    options:
+      cache: false
+  check:
+    # Fixes what ruff can, so it edits sources and is never cached.
+    script: "uvx ruff check --fix && uv run ty check"
+    deps: ["sync"]
+    options:
+      cache: false
+  check-ci:
+    # Same checks without fixing anything. For CI.
+    script: "uvx ruff check && uv run ty check"
+    deps: ["sync"]
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
+  test:
+    command: "uv run pytest"
+    inputs: ["@group(sources)", "@group(configs)", "tests/**/*"]
