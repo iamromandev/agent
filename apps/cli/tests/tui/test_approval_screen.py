@@ -13,7 +13,7 @@ from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry
 from textual.screen import ModalScreen
 from textual.widgets import OptionList, Static
 
-from tests.tui.conftest import AppFactory, scripted, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, dialog, scripted, settled, type_and_send, until
 
 
 def _edit_script() -> list[list]:
@@ -28,7 +28,7 @@ def _option_ids(screen: ApprovalScreen) -> list[str | None]:
 
 async def _open_dialog(app, pilot) -> ApprovalScreen:
     await type_and_send(pilot, "go")
-    await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+    await dialog(pilot)
     assert isinstance(app.screen, ApprovalScreen)
     return app.screen
 
@@ -125,6 +125,86 @@ def _highlighted_id(screen: ApprovalScreen) -> str | None:
     options = screen.query_one(OptionList)
     assert options.highlighted is not None
     return options.get_option_at_index(options.highlighted).id
+
+
+async def test_deny_is_highlighted_when_the_dialog_is_built_not_only_once_it_is_mounted(
+    make_app: AppFactory, tmp_path: Path
+) -> None:
+    # A highlight set between compose and mount (a fast key, a test's `choose`) must not be reset to Deny afterwards.
+    from textual.compose import compose
+
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    async with app.run_test() as pilot:
+        screen = await _open_dialog(app, pilot)
+        fresh = ApprovalScreen(screen.request)
+        built = compose(fresh)  # what is yielded, not yet mounted: children wait in `_pending_children`
+        found: list[OptionList] = []
+        while built:
+            widget = built.pop()
+            found += [widget] if isinstance(widget, OptionList) else []
+            built += widget._pending_children
+        (options,) = found
+        assert options.highlighted is not None
+        assert options.get_option_at_index(options.highlighted).id == "deny"
+
+
+async def test_an_answer_the_host_finds_invalid_is_reported_and_the_dialog_opens_again(
+    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.tui.conftest import choose
+
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    real = app.port.answer
+    results = iter(["invalid"])
+    monkeypatch.setattr(app.port, "answer", lambda ask_id, answer: next(results, None) or real(ask_id, answer))
+    async with app.run_test() as pilot:
+        await _open_dialog(app, pilot)
+        await choose(pilot, "once")  # refused once: the ask is still open
+        await until(pilot, lambda: any("could not answer the approval (invalid)" in e.text for e in app.query(NoticeEntry)))
+        await choose(pilot, "once")  # the dialog is back for the same ask
+        await settled(app)
+
+        assert (tmp_path / "a.py").read_text() == "new\n"
+        warn = [e for e in app.query(NoticeEntry) if "could not answer" in e.text]
+        assert len(warn) == 1
+
+
+async def test_an_answer_for_an_unknown_ask_is_reported(
+    make_app: AppFactory, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from tests.tui.conftest import choose
+
+    (tmp_path / "a.py").write_text("old\n")
+    app = make_app(_edit_script())
+    real = app.port.answer
+    monkeypatch.setattr(app.port, "answer", lambda ask_id, answer: (real(ask_id, answer), "unknown")[1])
+    async with app.run_test() as pilot:
+        await _open_dialog(app, pilot)
+        await choose(pilot, "once")
+        await settled(app)
+
+        assert any("could not answer the approval (unknown)" in e.text for e in app.query(NoticeEntry))
+        assert not isinstance(app.screen, ApprovalScreen)
+
+
+async def test_an_ask_that_arrives_while_the_app_shuts_down_is_denied_without_a_dialog(make_app: AppFactory) -> None:
+    import asyncio
+
+    from core.engine.approval import ApprovalRequest, Choice, Decision
+
+    app = make_app([])
+    async with app.run_test() as pilot:
+        app._shutting_down = True
+        try:
+            answer = await asyncio.wait_for(app.host.asks.ask("approval", ApprovalRequest("bash", "bash ls", None, False)), 2)
+        finally:
+            app._shutting_down = False
+        await pilot.pause()
+
+        assert answer == Decision(Choice.DENY, "shutting down")
+        assert not any(isinstance(s, ApprovalScreen) for s in app.screen_stack)
 
 
 class _Overlay(ModalScreen[None]):

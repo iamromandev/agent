@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from core.engine.todo import TodoItem
-from src.tui.queue import Queued
+from core.host.queue import Queued
 from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import InputRow
 from src.tui.widgets.command_suggestions import CommandSuggestions

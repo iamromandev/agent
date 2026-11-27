@@ -35,14 +35,13 @@ from core.engine import (
     UsageUpdate,
 )
 from core.engine.agents.loader import READ_ONLY_TOOLS, Agents
-from core.engine.approval import ApprovalRequest, Approver, Choice
+from core.engine.approval import ApprovalRequest, Choice, Decision
 from core.engine.commands.builtins import BUILTINS
 from core.engine.commands.loader import Commands
-from core.engine.compaction import CHARS_PER_TOKEN, turn_starts
+from core.engine.compaction import turn_starts
 from core.engine.configguard import ConfigGuard, HeldGlobal
 from core.engine.configwatch import Cause
 from core.engine.events import WorkflowLine, WorkflowProgress
-from core.engine.facts import FACTS_SHARE, init_check, render_facts, scan
 from core.engine.guardrails.paths import (
     BUILTIN_HOME,
     BUILTIN_NAMES,
@@ -50,40 +49,23 @@ from core.engine.guardrails.paths import (
     MAX_TRACKED_DIRS,
     MAX_TRACKED_FILES,
 )
-from core.engine.guardrails.setup import Guardrails
-from core.engine.hooks.setup import Hooks, hook_failed
 from core.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
-from core.engine.instructions import fingerprint, levels
-from core.engine.loop import NOT_SUMMARIZED, close_recorder
 from core.engine.mcp.hub import HubEvent, McpHub
 from core.engine.mcp.names import tool_name
-from core.engine.mentions import MentionNote, apply_vision, expand_mentions, note_text
-from core.engine.mentions_index import FileIndex
 from core.engine.mode import Mode
-from core.engine.permissions.setup import Rules, RuleSavedNotTrusted
-from core.engine.prompt import build_init_prompt
-from core.engine.provider.base import Image, SwitchableProvider
-from core.engine.provider.images import MAX_IMAGES, ImageError, describe, read_image_fd, size_text, sniff
+from core.engine.provider.base import Image
+from core.engine.provider.images import MAX_IMAGES, ImageError, read_image_fd, size_text, sniff
 from core.engine.provider.models import (
     SHOW_TIMEOUT,
     CatalogError,
-    ModelCatalog,
     ModelInfo,
     installed_name,
-    resolve_window,
-    shown_name,
 )
-from core.engine.provider.vision import VisionCheck
 from core.engine.session import (
-    FileRecorder,
-    NullRecorder,
-    Recorder,
     SessionError,
     SessionInfo,
     SessionStore,
-    SessionWriteError,
 )
-from core.engine.session.records import model_notice
 from core.engine.skills.loader import Skills
 from core.engine.terminal.manager import TerminalError, TerminalManager
 from core.engine.text import escape, escape_display, one_line
@@ -95,6 +77,10 @@ from core.engine.workflows.model import PlanSummary, RunResult
 from core.engine.workflows.runner import WorkflowRunner
 from core.engine.workflows.runs import RunIndex
 from core.engine.workflows.timings import TimingStore
+from core.host.asks import AnswerResult, AskEvent, AskResolved
+from core.host.events import Delivering, EntryEnd, JobEventsDone, ProviderState, TurnOutcome, UserEntry
+from core.host.port import LOCAL_CLIENT, LocalPort
+from core.host.session import WORKFLOW_RUNNING, SendResult, SessionHost, uninterrupted
 from core.trust import TrustOutcome, apply_trust
 from textual import events
 from textual.app import App, ComposeResult, ScreenStackError
@@ -102,12 +88,9 @@ from textual.binding import Binding, BindingType
 from textual.css.query import NoMatches
 from textual.message import Message
 from textual.widgets import OptionList, Tabs, TextArea
-from textual.worker import WorkerCancelled
 
 from src.tui import NEW, StartChoice
-from src.tui.approver import TuiApprover
 from src.tui.hints import MIN_ROWS, hint_text
-from src.tui.queue import MessageQueue, Queued, merge
 from src.tui.screens.approval import ApprovalScreen
 from src.tui.screens.diff import DiffScreen
 from src.tui.screens.global_trust import GlobalTrustScreen
@@ -131,22 +114,6 @@ DIALOGS = (ApprovalScreen, SessionPicker, ModelPicker, McpTrustScreen, Permissio
 KEY_GUARD = 0.5  # seconds an approval dialog that opens over a terminal ignores keys: they were meant for it
 
 
-async def _uninterrupted(work: Awaitable[None]) -> None:
-    """Run `work` to the end even if this task is cancelled meanwhile; the cancel is re-raised after."""
-    task = asyncio.ensure_future(work)
-    cancel: asyncio.CancelledError | None = None
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError as exc:
-            cancel = cancel or exc  # a repeated cancel must not abandon the work
-        except Exception:
-            break  # the task holds it; read below
-    task.result()
-    if cancel is not None:
-        raise cancel
-
-
 HELP = (
     "Enter send · ctrl+j / shift+enter new line · ctrl+v paste an image (macOS) · Esc on an empty input clears pasted images · Tab switch BUILD/PLAN · Enter during a turn queues the message (sent when it ends; Esc puts it back) · Esc interrupt · "
     "ctrl+c interrupt (quit when idle) · ctrl+t terminal pane (show, hide, back to chat) · "
@@ -156,7 +123,6 @@ HELP = (
     "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
 
-WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
 WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] [--redo <step>] | cancel]"
 PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
 FAILED_SHOWN = 200
@@ -186,27 +152,17 @@ class AgentApp(App[None]):
 
     def __init__(
         self,
-        agent_factory: Callable[[Approver], Agent],
-        provider: SwitchableProvider,
-        workspace: Path,
+        port: LocalPort,
         *,
-        store: SessionStore | None = None,
         start: StartChoice = NEW,
-        recorder_factory: Callable[[], Recorder] | None = None,
         on_close: Callable[[], Awaitable[None]] | None = None,
         terminals: TerminalManager | None = None,
         mcp: McpHub | None = None,
         mcp_trust: Callable[[], None] | None = None,
-        permissions: Rules | None = None,
         permission_warnings: Sequence[str] = (),
         commands: Commands | None = None,
         skills: Skills | None = None,
         agents: Agents | None = None,
-        guard: Guardrails | None = None,
-        hooks: Hooks | None = None,
-        catalog: ModelCatalog | None = None,
-        vision: VisionCheck | None = None,
-        window_cap: int,
         launch_notices: Sequence[str] = (),
         paste: PasteFolder | None = None,
         images: ImagePuller | None = None,
@@ -217,6 +173,11 @@ class AgentApp(App[None]):
         held: HeldGlobal | None = None,
     ) -> None:
         super().__init__()
+        # The live session: its turn pipeline, claims and queue are the host's; this app draws them and keeps the
+        # input box, the pasted images, the terminals, the workflows and the image pull.
+        self.port = port
+        host: SessionHost = port.host
+        host.attachments = self._attachments
         # What the marker holds until the next launch besides the allow rules, hooks and servers (shown and asked about
         # with them): the global keepEnv and the global commands, skills, agents and workflows.
         self._held = held if held is not None else HeldGlobal()
@@ -227,48 +188,49 @@ class AgentApp(App[None]):
         self.workflows = workflows if workflows is not None else Workflows()
         self._run_index = run_index
         self._timings = timings  # None: the machine's own file, made on the first workflow command
-        self._workflow_active = False  # a `/workflow` run (or resume) is going: it holds the turn claim
         self.images = images  # `/images`: the models' state and the background warm-up (None: no image tools in this run)
         self._on_close = on_close
         self.terminals = terminals
         self.mcp = mcp
         self._mcp_trust = mcp_trust  # remembers that the user trusted the project's servers
-        self.permissions = permissions if permissions is not None else Rules.empty()
         self._permission_warnings = tuple(permission_warnings)
         self.commands = commands if commands is not None else Commands({}, ())
         self.skills = skills if skills is not None else Skills({}, ())
         self.agents = agents if agents is not None else Agents.empty()
-        self.guard = guard if guard is not None else Guardrails.off(workspace)
-        self.hooks = hooks if hooks is not None else Hooks.empty()
-        self.store = store
+        # The host's own, under the names the app has always used for them.
+        self.permissions = host.permissions
+        self.guard = host.guard
+        self.hooks = host.hooks
+        self.store: SessionStore | None = host.store
+        self.recorder_factory = host.recorder_factory
+        self.provider = host.provider
+        self.catalog = host.catalog
+        self.vision = host.vision
+        self.window_cap = host.window_cap
+        self.workspace = host.workspace
         self.start = start
-        self.recorder_factory: Callable[[], Recorder] = recorder_factory or NullRecorder
-        self.provider = provider
-        self.catalog = catalog
-        self.vision = vision if vision is not None else VisionCheck(catalog)  # one answer per model per run
-        self.window_cap = window_cap  # AGENT_NUM_CTX: caps every window
         self._launch_notices = tuple(launch_notices)  # info lines for the transcript, already escaped
-        self.workspace = workspace
-        self.file_index = FileIndex(workspace, self.guard)
+        self.file_index = port.file_index
         self._indexing = False
         self._reindex_pending = False
-        self.agent = agent_factory(TuiApprover(self))
         self._shutting_down = False
-        self._turn_active = False
-        self._turn_entered = False  # the turn worker has run its first line
-        self.paste = paste if paste is not None else PasteFolder(workspace)  # removed when the app quits
+        self.paste = paste if paste is not None else PasteFolder(self.workspace)  # removed when the app quits
         self._pending: list[tuple[Path, str, tuple[int, int, int, int]]] = []  # pasted images waiting: (file, chip label, identity)
-        self._draft: str | None = None  # the submitted message until the turn really starts sending it
-        self._queue = MessageQueue()  # messages typed while a turn runs, sent together when it ends `done`
-        self._interrupted = False  # Esc or ctrl+c landed while the turn or compaction was active: the queue is not sent
-        self._job_status: str | None = None  # how the running turn or compaction ended, once known
+        self._taken: tuple[int, list[tuple[Path, str, tuple[int, int, int, int]]]] | None = None  # (turn, chips it took)
+        self._ask_screens: dict[str, ApprovalScreen] = {}  # open approval dialogs by ask id
         self._progress_call: str | None = None  # the call whose live line the status bar shows
         self._finished_since_toggle = False  # a tool finished after a mid-turn mode toggle
-        self._undoing = False  # /undo is running: keys that act on a turn leave it alone
-        self._switching = False  # a session is being loaded and drawn: no turn may start meanwhile
         self._signals_before: dict[signal.Signals, Any] = {}  # what SIGTERM and SIGHUP did before the app
         self._keys_ignored_until = 0.0  # time.monotonic() until which an approval dialog takes no keys
         self._closing_tabs: set[str] = set()  # terminals whose tab is being closed (they are being stopped)
+
+    @property
+    def host(self) -> SessionHost:
+        return self.port.host
+
+    @property
+    def agent(self) -> Agent:
+        return self.port.host.agent
 
     class McpEvent(Message):
         """An MCP server became ready, failed or exited, or the hub has a warning."""
@@ -300,6 +262,8 @@ class AgentApp(App[None]):
         self.query_one(ChatInput).paths = self.query_one(PathSuggestions)
         self.query_one(ChatInput).focus()
         self.watch(status, "busy", lambda _: self._refresh_hints(), init=False)
+        # A failed check shows `not ready`; the host asks the provider again before the next turn while it does.
+        self.watch(status, "error", lambda error: setattr(self.host, "not_ready", bool(error)), init=False)
         self._refresh_hints()
         self._apply_height(self.size.height)
         self._reindex()
@@ -307,7 +271,8 @@ class AgentApp(App[None]):
         self._loop_thread = threading.get_ident()
         if self.config_guard is not None:  # a reaction on another thread tells its listeners on this loop
             self.config_guard.attach_loop(asyncio.get_running_loop())
-        self._switching = True  # claimed before any worker runs: `_start` releases it after the announcement
+        self.port.subscribe(self._on_port_event, self._on_ask)  # the host's events, drawn one after the other
+        self.host.switching = True  # claimed before any worker runs: `_start` releases it after the announcement
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
 
@@ -338,18 +303,8 @@ class AgentApp(App[None]):
         self._apply_height(event.size.height)
 
     async def _run_check(self) -> bool:
-        """Ask the provider whether it is ready. Shows the problem; returns True when ready."""
-        status = self.query_one(StatusBar)
-        try:
-            problem = await self.provider.check()
-        except Exception as exc:  # the contract says it returns a message; a bug must not kill the app
-            problem = f"Provider check failed: {exc}"
-        if problem is None:
-            status.error = None
-            return True
-        status.error = "not ready"
-        await self.query_one(Transcript).add_notice("error", problem)
-        return False
+        """Ask the provider whether it is ready (the host publishes the answer, shown by `_on_host_event`)."""
+        return await self.host.check()
 
     async def _start(self) -> None:
         source: Literal["startup", "resume"] = "startup"
@@ -363,7 +318,7 @@ class AgentApp(App[None]):
                 self._start_trust()
             await self._session_started(source)
         finally:
-            self._switching = False
+            self.host.end_switch()
 
     def _start_mcp(self) -> None:
         """Start the configured MCP servers in the background; their events become notices."""
@@ -522,23 +477,11 @@ class AgentApp(App[None]):
 
     async def _session_started(self, source: Literal["startup", "resume", "new", "switch"]) -> None:
         """Run the SessionStart hooks (the session is drawn and its notices are in); never raises. The caller holds the
-        switch claim, so no message is accepted while a hook runs. The hook runs in its own worker (group
-        `session-start`), which Esc cancels: the runner then kills the hook's process group."""
+        switch claim, so no message is accepted while a hook runs. The hook runs as the host's own task, which Esc
+        cancels: the runner then kills the hook's process group."""
         if not self.hooks.has("SessionStart"):
             return  # nothing to run, so nothing for Esc or ctrl+c to interrupt
-        events: list[AgentEvent] = []
-
-        async def run() -> None:
-            try:
-                await self.agent.session_started(source, events.append)
-            except Exception as exc:  # the agent does not raise; a bug here must not take the app down
-                events.append(hook_failed("SessionStart", exc))
-
-        worker = self.run_worker(run(), group="session-start", exit_on_error=False)
-        try:
-            await worker.wait()
-        except WorkerCancelled:
-            events.append(Notice("info", "hook SessionStart interrupted"))
+        events = await self.port.session_started(source)
         with contextlib.suppress(Exception):
             transcript = self.query_one(Transcript)
             for event in events:
@@ -550,7 +493,7 @@ class AgentApp(App[None]):
         try:
             await self._session_started("new")
         finally:
-            self._switching = False
+            self.host.end_switch()
 
     async def _open_start_session(self) -> Literal["startup", "resume"]:
         """Begin as the command line asked: the latest session, one by id prefix, or a new one. Returns the source
@@ -588,29 +531,13 @@ class AgentApp(App[None]):
 
     def _begin_switch(self) -> bool:
         """Claim the right to switch sessions: False while a turn runs or another switch is under way."""
-        if self._turn_active or self._switching:
+        if not self.host.begin_switch():  # no message is accepted until the switch ends
             return False
-        self._switching = True  # no message is accepted until the switch ends
         self._cancel_diff()
         return True
 
-    async def _close_old(self, old: Recorder | None) -> None:
-        """Close the replaced recorder in a thread (a final write must not block the UI), holding the
-        switch so no message is accepted meanwhile. The new recorder is already in place: nothing more
-        is written to the old session."""
-        if old is None:
-            return
-        held = not self._switching
-        self._switching = True
-        try:
-            await _uninterrupted(asyncio.to_thread(close_recorder, old))
-        finally:
-            if held:
-                self._switching = False
-
     def _busy_text(self, command: str) -> str:
-        hint = "a session is loading" if self._switching and not self._turn_active else f"press Esc to interrupt, then {command}"
-        return f"busy — {hint}"
+        return self.host.busy_text(command)
 
     def _skills_summary(self) -> str:
         """`<name> (<source>): <description>` per skill, then the launch warnings (file text, so escaped)."""
@@ -688,7 +615,7 @@ class AgentApp(App[None]):
         store, transcript = self.store, self.query_one(Transcript)
         if store is None:
             return False
-        infos = await asyncio.to_thread(store.list)
+        infos = await self.port.list_sessions()
         await self._warn_skipped(store)
         if not infos:
             await transcript.add_notice("info", "No saved sessions for this folder")
@@ -705,7 +632,7 @@ class AgentApp(App[None]):
         except Exception as error:  # a bug must not leave the app claimed or kill it
             await self.query_one(Transcript).add_notice("error", f"Model switch failed: {escape(str(error))}")
         finally:
-            self._switching = False
+            self.host.end_switch()
 
     def _picking(self) -> bool:
         """A bare `/model` is loading or its picker is open."""
@@ -722,19 +649,19 @@ class AgentApp(App[None]):
                 await transcript.add_notice("error", "No model catalog is available")
                 return
             try:
-                infos = await self.catalog.list()
+                infos = await self.port.list_models()
             except CatalogError as error:
                 await transcript.add_notice("error", f"Could not list the installed models: {error}")
                 return
             if not infos:
                 await transcript.add_notice("info", "No models installed.")
                 return
-            catalog = self.catalog
+            port = self.port
 
             async def look(info: ModelInfo) -> tuple[ModelInfo, tuple[int | None, str | None]]:
                 try:
                     async with asyncio.timeout(SHOW_TIMEOUT):
-                        length = await catalog.context_length(info.name)
+                        length = await port.model_length(info.name)
                     return replace(info, context_length=length), (length, None)
                 except CatalogError as error:
                     return info, (None, str(error))
@@ -743,8 +670,8 @@ class AgentApp(App[None]):
 
             looked = await asyncio.gather(*(look(info) for info in infos))
             known = {info.name: result for info, (_, result) in zip(infos, looked, strict=True)}
-            if self._turn_active or self._switching:
-                await transcript.add_notice("warn", self._busy_text("/model"))
+            if (reason := self.host.refusal("/model")) is not None:
+                await transcript.add_notice("warn", reason)
                 return
             if len(self.screen_stack) > 1:  # another dialog came up while the list loaded
                 await transcript.add_notice("warn", "Another dialog is open; run /model again after closing it")
@@ -759,63 +686,19 @@ class AgentApp(App[None]):
             try:
                 await self._switch_model(chosen, known.get(chosen))
             finally:
-                self._switching = False
+                self.host.end_switch()
         except Exception as error:  # a bug must not kill the app
             await transcript.add_notice("error", f"Model switch failed: {escape(str(error))}")
 
     async def _switch_model(self, name: str, looked: tuple[int | None, str | None] | None = None) -> None:
-        """Make `name` (an installed model) the one every later request uses, with a window that fits it, and
-        remember it for the project. Ollama failing leaves the old model and window in place."""
+        """Switch through the host (which remembers the model for the project), then show the new model."""
         transcript, status = self.query_one(Transcript), self.query_one(StatusBar)
-        if self.catalog is None:
-            await transcript.add_notice("error", "No model catalog is available")
-            return
-        try:
-            installed = [info.name for info in await self.catalog.list()]
-        except CatalogError as error:
-            await transcript.add_notice("error", f"Could not list the installed models: {error}")
-            return
-        target = installed_name(name, installed)
-        if target is None:
-            listed = ", ".join(escape_display(n) for n in installed) or "none"
-            await transcript.add_notice("error", f"Model {shown_name(name)} is not installed. Installed: {listed}")
-            return
-        if installed_name(self.provider.model, installed) == target:
-            await transcript.add_notice("info", f"Already using {escape_display(target)}.")
-            return
-        length: int | None = None
-        failed: str | None = None
-        if looked is not None:  # the picker already asked
-            length, failed = looked
-        else:
-            try:
-                async with asyncio.timeout(SHOW_TIMEOUT):
-                    length = await self.catalog.context_length(target)
-            except CatalogError as error:
-                failed = str(error)
-            except TimeoutError:
-                failed = f"Ollama did not answer within {SHOW_TIMEOUT:g} s"
-        window = resolve_window(length, self.window_cap)
-        self.provider.switch(target, window)
-        status.model = escape_display(target)
-        status.window = window
-        await transcript.add_notice("info", model_notice(target, window))
-        if failed is not None:
-            await transcript.add_notice(
-                "warn",
-                f"Could not read the context length of {escape_display(target)}; using AGENT_NUM_CTX ({self.window_cap}): {failed}",
-            )
-        recorded: list[Any] = []
-        self.agent.model_switched(target, window, recorded.append)
-        for event in recorded:
-            if isinstance(event, Notice):
-                await transcript.add_notice(event.level, event.text)
-        try:
-            self.permissions.save_project_key("model", target)
-        except RuleSavedNotTrusted as error:
-            await transcript.add_notice("warn", escape(str(error)))
-        except (OSError, ValueError) as error:
-            await transcript.add_notice("warn", f"Model saved for the run only: {escape(str(error))}")
+        result = await self.port.switch_model(name, looked)
+        if result.model is not None and result.window is not None:
+            status.model = escape_display(result.model)
+            status.window = result.window
+        for level, text in result.notices:
+            await transcript.add_notice(level, text)
 
     async def _sessions_command(self) -> None:
         """The `/sessions` worker: pick and switch, then release the claim `_begin_switch` took."""
@@ -823,38 +706,21 @@ class AgentApp(App[None]):
             if await self._pick_session():
                 await self._session_started("switch")
         finally:
-            self._switching = False
+            self.host.end_switch()
 
     async def _show_session(self, info: SessionInfo) -> bool:
         """Load `info`, make it the live session and redraw its transcript. The switching flag is held by the caller.
         False when the session could not be opened (the current one stays)."""
-        store, transcript = self.store, self.query_one(Transcript)
-        if store is None:
-            return False
-        try:
-            loaded = await asyncio.to_thread(store.load, info.id)
-            recorder = FileRecorder.resume(loaded.info.path, self.workspace)
-        except (SessionError, SessionWriteError) as exc:  # stay on the session we have
-            await transcript.add_notice("error", str(exc))
-            return False
-        try:
-            if self._turn_active:  # a turn started while the file was read
-                raise AgentBusy
-            old = self.agent.reset(
-                recorder=recorder,
-                history=loaded.history,
-                tool_meta=loaded.tool_meta,
-                todos=loaded.todos,
-                usage=loaded.usage,
-                unrecorded=loaded.unrecorded,
-            )
-        except AgentBusy:
-            await self._refuse_switch()
+        transcript = self.query_one(Transcript)
+        opened = await self.port.open_session(info)
+        for level, text in opened.notices:
+            await transcript.add_notice(level, text)
+        loaded = opened.loaded
+        if loaded is None:
             return False
         self.query_one(TodoPanel).show(self.agent.todos)
         self._pending.clear()  # pasted images belong to the old session
         self._show_pending()
-        await self._close_old(old)
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
         status.pending_mode = False
@@ -889,6 +755,7 @@ class AgentApp(App[None]):
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
         self._shutting_down = True  # from here on the widgets are going away: stop applying agent events
+        self.host.closing = True  # and the host sends no queued message
         super().exit(*args, **kwargs)
 
     def _stop_on_signals(self) -> None:
@@ -918,11 +785,15 @@ class AgentApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
+        self.host.closing = True
         if self.config_guard is not None:  # the transcript is going away: what is said now is printed after the app
             self.config_guard.unlisten(self._config_changed)
         with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
             self.agent.watch.check(Cause.background())  # first: the shell tab and background processes still run
         self.file_index.cancel()  # the build thread stops at its next check instead of walking on
+        with contextlib.suppress(Exception):  # the host's job and asks go with the app, as its workers do
+            await self.port.close()
+            self.host.close()
         self.agent.close()
         self.paste.remove()
         try:
@@ -946,10 +817,10 @@ class AgentApp(App[None]):
             await self.query_one(Transcript).add_notice("info", f"terminal {message.name} started · ctrl+t to show")
 
     def action_toggle_mode(self) -> None:
-        self.agent.set_mode(self.agent.mode.next())
+        self.port.set_mode(self.agent.mode.next())
         status = self.query_one(StatusBar)
         status.mode = self.agent.mode
-        if self._turn_active and not self._undoing:  # a step already running keeps the mode it started with
+        if self.host.turn_active and not self.host.undoing:  # a step already running keeps the mode it started with
             self._finished_since_toggle = False
             status.pending_mode = True
         else:
@@ -1051,26 +922,24 @@ class AgentApp(App[None]):
         return isinstance(focused, Tabs)  # a running tab closes only from the tab bar, never from the input or transcript
 
     def action_interrupt_or_quit(self) -> None:
-        if self._turn_active or any(w.group == "session-start" and not w.is_finished for w in self.workers):
+        if self.host.turn_active or self.host.session_starting:
             self.interrupt_turn()
         else:
             self.exit()
 
     def interrupt_turn(self) -> None:
-        if self._undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
+        host = self.host
+        if host.undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
             return
-        if self._pending and not self._turn_active and not self._switching and self._input_empty():
+        if self._pending and not host.turn_active and not host.switching and self._input_empty():
             self._pending.clear()  # Esc on an empty input: only the pasted images go
             self._show_pending()
             return
-        self.workers.cancel_group(self, "turn")
-        self.workers.cancel_group(self, "session-start")
+        self.workers.cancel_group(self, "turn")  # a workflow (the app runs those)
         self.workers.cancel_group(self, "model-pick")  # only while the list loads: an open picker takes Esc itself
-        if self._turn_active:
-            self._interrupted = True  # also after `done`, while the worker still finishes (`/init`'s file check)
-        if self._turn_active and not self._turn_entered:
-            # Cancelled before its first line ran: the `finally` in `_turn` never will.
-            self._end_turn()
+        # The host's turn or compaction and its SessionStart hooks; a job cancelled before its first line is ended
+        # at once (its `finally` never runs).
+        self.port.interrupt()
 
     def _input_empty(self) -> bool:
         with contextlib.suppress(NoMatches):
@@ -1120,6 +989,11 @@ class AgentApp(App[None]):
         except NoMatches:
             pass
 
+    async def _attachments(self, turn: int) -> tuple[list[Image], list[str]]:
+        """The host's turn `turn` takes the pending pasted images; they come back if the agent never gets the message."""
+        self._taken = (turn, list(self._pending))
+        return await self._take_pasted()
+
     async def _take_pasted(self) -> tuple[list[Image], list[str]]:
         """The pending images, read now; the chips go. A file that is gone or no image is a warning."""
         taken, self._pending = self._pending, []
@@ -1154,38 +1028,40 @@ class AgentApp(App[None]):
 
     def _queueing(self) -> bool:
         """A message sent now waits for the running turn, `/init` or `/compact` (not for an undo or a session load)."""
-        return self._turn_active and not self._undoing and not self._switching and not self._workflow_active
+        return self.host.queueing
 
     def _show_queue(self) -> None:
         with contextlib.suppress(NoMatches):  # gone when the app is shutting down
-            self.query_one(QueuePanel).show(self._queue.entries)
+            self.query_one(QueuePanel).show(self.host.queue.entries)
 
-    def _end_turn(self) -> None:
-        """Every turn and compaction ends here: a `done` end sends the queue as one turn, any other puts it back."""
-        self._turn_active = False
-        if self._workflow_active:
-            self._workflow_active = False
+    def _apply_outcome(self, outcome: TurnOutcome) -> None:
+        """Every turn, compaction and workflow ends here: after a `done` end the host sent the queue as one turn (busy
+        stays on); any other end puts the message that was not sent and the queue back in the box. The host holds its
+        claim until this has run (`outcome_applied`), so a message sent before cannot start a turn the old text then
+        lands on."""
+        started = False
+        if not outcome.continued:
+            if (back := outcome.restore) is not None:
+                self._restore_draft(back)
+            started = self.port.outcome_applied(outcome.ack)  # a message queued meanwhile is sent now
+        if outcome.kind == "workflow":
             with contextlib.suppress(NoMatches):
                 self.query_one(StatusBar).workflow = ""
         self._refresh_hints()
-        done = self._job_status == "done" and not self._interrupted
-        self._job_status = None
-        self._interrupted = False
-        queued = self._queue.take()
-        draft, self._draft = self._draft, None  # set when the turn ended before it sent the message
+        if self._taken is not None and self._taken[0] == outcome.turn:
+            taken, self._taken = self._taken[1], None
+            if taken and not outcome.delivered:
+                self._pending[:0] = taken  # the agent never got the message: its images wait for the next one
+                self._show_pending()
         with contextlib.suppress(NoMatches):  # the status bar is gone when the app is shutting down
             self.query_one(StatusBar).compacting = False
-        if queued and done and draft is None and not self._shutting_down:
+        if outcome.continued or started:
             self._show_queue()
-            merged = merge(queued)
-            self._begin_turn(merged.prompt, merged.draft, label=merged.label)  # busy stays on
+            self._cancel_diff()  # the merged turn has started
             return
-        back = [text for text in (draft, merge(queued).draft if queued and not self._shutting_down else None) if text]
-        if back:
-            self._restore_draft("\n".join(back))
         self._show_queue()
         with contextlib.suppress(NoMatches):
-            self.query_one(StatusBar).busy = False
+            self.query_one(StatusBar).busy = self.host.turn_active  # a turn sent meanwhile keeps it on
 
     # turns
 
@@ -1194,39 +1070,35 @@ class AgentApp(App[None]):
         if text.strip().startswith("/"):
             await self._command(text)
             return
-        if self._queueing():
-            if text.strip():
-                self._queue.add(Queued(text, text, None))
-                self._show_queue()
-            return
-        if await self._refuse_if_busy(text):
-            return
-        self._begin_turn(text, text)
+        await self._submit(text, text)
+
+    async def _submit(self, prompt: str, typed: str, label: str | None = None) -> None:
+        """Send, queue or refuse a message; a refused one goes back in the box, with a notice."""
+        result = self._begin_turn(prompt, typed, label=label)
+        if result.status == "refused":
+            self._restore_draft(typed)  # not accepted: the message stays in the box
+            await self.query_one(Transcript).add_notice("warn", result.reason)
 
     async def _refuse_if_busy(self, text: str) -> bool:
         """A message cannot start now: it goes back in the box, with a notice. True when it was refused."""
-        if not (self._turn_active or self._switching):
+        reason = self.host.message_refusal()
+        if reason is None:
             return False
         self._restore_draft(text)  # not accepted: the message stays in the box
-        if self._workflow_active:
-            await self.query_one(Transcript).add_notice("warn", WORKFLOW_RUNNING)
-            return True
-        hint = "press Esc to interrupt" if self._turn_active else "a session is loading"
-        await self.query_one(Transcript).add_notice("warn", f"busy — {hint}")
+        await self.query_one(Transcript).add_notice("warn", reason)
         return True
 
-    def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> None:
-        """Start the turn worker for `text`; `draft` is what the box gets back if it never sends."""
-        self._turn_active = True
-        self._refresh_hints()
-        self._job_status = None
-        self._interrupted = False
-        self._cancel_diff()
-        self._draft = draft
-        self.query_one(StatusBar).busy = True
-        self._turn_entered = False
-        # A partial, not a coroutine: cancelled before it first runs, nothing is left un-awaited.
-        self.run_worker(functools.partial(self._turn, text, init, draft, label), group="turn")
+    def _begin_turn(self, text: str, draft: str, init: bool = False, label: str | None = None) -> SendResult:
+        """Hand `text` to the host (a turn, or the queue while one runs); `draft` is what the box gets back if it
+        never sends."""
+        result = self.port.send(text, label=label, init=init, draft=draft)
+        if result.status == "started":
+            self._refresh_hints()
+            self._cancel_diff()
+            self.query_one(StatusBar).busy = True
+        elif result.status == "queued":
+            self._show_queue()
+        return result
 
     async def _command(self, original: str) -> None:
         transcript = self.query_one(Transcript)
@@ -1258,22 +1130,18 @@ class AgentApp(App[None]):
                     return
                 self.run_worker(self._sessions_command, group="sessions")
             case "/new" | "/clear":  # the old session's file stays as it is; the next message starts a new one
-                try:
-                    # Refused while a turn runs or a session loads: the history belongs to them until they end.
-                    if self._turn_active or self._switching:
-                        raise AgentBusy
-                    old = self.agent.reset(recorder=self.recorder_factory())
-                except AgentBusy:
-                    await transcript.add_notice("warn", self._busy_text(name))
+                # Refused while a turn runs or a session loads: the history belongs to them until they end. Otherwise
+                # the host holds the switch claim until the notice is back in the new transcript.
+                refused = await self.port.new_session(name)
+                if refused is not None:
+                    await transcript.add_notice("warn", refused)
                     return
-                self.query_one(TodoPanel).show(self.agent.todos)
-                self._pending.clear()  # pasted images belong to the old session
-                self._show_pending()
-                self._switching = True  # no message is accepted until the notice is back in the new transcript
-                self._cancel_diff()
                 handed = False  # the worker that runs the SessionStart hook releases the claim
                 try:
-                    await self._close_old(old)
+                    self.query_one(TodoPanel).show(self.agent.todos)
+                    self._pending.clear()  # pasted images belong to the old session
+                    self._show_pending()
+                    self._cancel_diff()
                     await transcript.clear_all()
                     status = self.query_one(StatusBar)
                     status.used = 0
@@ -1286,10 +1154,10 @@ class AgentApp(App[None]):
                     handed = True
                 finally:
                     if not handed:
-                        self._switching = False
+                        self.host.end_switch()
             case "/init":
-                if self._turn_active or self._switching:
-                    await transcript.add_notice("warn", self._busy_text("/init"))
+                if (reason := self.host.refusal("/init")) is not None:
+                    await transcript.add_notice("warn", reason)
                     return
                 if self.agent.mode is Mode.PLAN:
                     await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
@@ -1300,25 +1168,21 @@ class AgentApp(App[None]):
                     await transcript.add_notice("error", f"Could not start /init: {error}")
                     return
                 # Keys and messages were handled while the prompt was built: check again, with no await before the start.
-                if self._turn_active or self._switching:
-                    await transcript.add_notice("warn", self._busy_text("/init"))
+                if (reason := self.host.refusal("/init")) is not None:
+                    await transcript.add_notice("warn", reason)
                     return
                 if self.agent.mode is Mode.PLAN:
                     await transcript.add_notice("warn", "/init needs BUILD mode — press Tab to switch")
                     return
                 self._begin_turn(prompt, draft="/init", init=True)
             case "/compact":
-                if self._turn_active or self._switching:
-                    await transcript.add_notice("warn", self._busy_text("/compact"))
+                # Like a turn: Esc cancels it, and the same events reach the transcript.
+                result = self.port.compact()
+                if result.status == "refused":
+                    await transcript.add_notice("warn", result.reason)
                     return
-                self._turn_active = True
-                self._job_status = None
-                self._interrupted = False
                 self._cancel_diff()
-                self._turn_entered = False
                 self.query_one(StatusBar).busy = True
-                # Like a turn: Esc cancels the "turn" group, and the same events reach the transcript.
-                self.run_worker(self._compact, group="turn")
             case "/undo":
                 await self._undo_command()
             case "/diff":
@@ -1331,8 +1195,8 @@ class AgentApp(App[None]):
                 await self._workflow_command(rest)
             case "/model":
                 if not rest.strip():
-                    if self._turn_active or self._switching:
-                        await transcript.add_notice("warn", self._busy_text("/model"))
+                    if (reason := self.host.refusal("/model")) is not None:
+                        await transcript.add_notice("warn", reason)
                         return
                     if self._picking():
                         await transcript.add_notice("warn", "The model list is already open or loading")
@@ -1355,11 +1219,7 @@ class AgentApp(App[None]):
                 if not prompt.strip():
                     await transcript.add_notice("warn", f"{name} is empty")
                     return
-                if queueing:
-                    self._queue.add(Queued(original, prompt, f"{name} ({custom.source})"))
-                    self._show_queue()
-                    return
-                self._begin_turn(prompt, draft=original, label=f"{name} ({custom.source})")
+                await self._submit(prompt, original, label=f"{name} ({custom.source})")  # queued while a turn runs
 
     def _suggestion_entries(self) -> list[tuple[str, str, str | None]]:
         entries: list[tuple[str, str, str | None]] = [(name, text, None) for name, text in BUILTINS.items()]
@@ -1484,7 +1344,7 @@ class AgentApp(App[None]):
             await transcript.add_notice("info", self._workflow_listing())
             return
         if sub == "cancel" and len(words) == 1:
-            if self._workflow_active:
+            if self.host.workflow_active:
                 self.interrupt_turn()
             else:
                 await transcript.add_notice("info", "no workflow is running")
@@ -1494,11 +1354,11 @@ class AgentApp(App[None]):
         if not valid:
             await transcript.add_notice("warn", WORKFLOW_USAGE)
             return
-        if self._workflow_active:
+        if self.host.workflow_active:
             await transcript.add_notice("warn", WORKFLOW_RUNNING)
             return
-        if self._turn_active or self._switching:
-            await transcript.add_notice("warn", self._busy_text("/workflow"))
+        if (reason := self.host.refusal("/workflow")) is not None:
+            await transcript.add_notice("warn", reason)
             return
         if self.agent.mode is Mode.PLAN:
             await transcript.add_notice("warn", "workflows need build or edits mode — press Tab to switch")
@@ -1523,19 +1383,15 @@ class AgentApp(App[None]):
             def action(emit: EventSink) -> Awaitable[RunResult]:
                 return runner.resume(self.workflows.items.get, run_id, emit, self._approve_plan, redo)
 
-        self._turn_active = True
-        self._workflow_active = True
-        self._job_status = None
-        self._interrupted = False
+        self.host.begin_workflow()  # the run holds the host's turn claim: messages are refused meanwhile
         self._cancel_diff()
-        self._turn_entered = False
         self.query_one(StatusBar).busy = True
         self._refresh_hints()
         self.run_worker(functools.partial(self._workflow, action, runner), group="turn", exit_on_error=False)
 
     async def _workflow(self, action: Callable[[EventSink], Awaitable[RunResult]], runner: WorkflowRunner) -> None:
         """The worker of a run: events reach the widgets in order, the outcome is one last line."""
-        self._turn_entered = True
+        self.host.turn_entered = True
         try:
 
             async def work(emit: EventSink) -> None:
@@ -1558,7 +1414,9 @@ class AgentApp(App[None]):
 
             await self._run_with_events(work)
         finally:
-            self._end_turn()
+            self.host.end_turn()  # its outcome comes back on the bus, after everything the run published
+            with contextlib.suppress(Exception):
+                await uninterrupted(self.host.bus.drained())
 
     async def _approve_plan(self, plan: PlanSummary) -> bool:
         """The one approval of a run: the plan as a content preview; Allow once or Deny, never Always."""
@@ -1613,11 +1471,10 @@ class AgentApp(App[None]):
             await self.query_one(Transcript).add_notice("warn", "/usage takes no arguments")
             return
         status = self.query_one(StatusBar)
-        recorder_id = getattr(self.agent.recorder, "session_id", "")
         data = summary(
             self.agent.usage,
-            session_id=recorder_id if isinstance(recorder_id, str) else "",
-            model=self.provider.model,
+            session_id=self.port.session_id,
+            model=self.port.model,
             context_used=status.used,
             window=status.window,
             turns=len(turn_starts(self.agent.history)),
@@ -1651,7 +1508,7 @@ class AgentApp(App[None]):
         if roles is None:
             await transcript.add_notice("warn", "usage: /images [pull [gen|edit|upscale] | cancel]")
             return
-        if self._workflow_active:
+        if self.host.workflow_active:
             await transcript.add_notice("warn", "a workflow is running: /images pull waits until it ends (/images and /images cancel still work)")
             return
         if images.busy:
@@ -1691,8 +1548,8 @@ class AgentApp(App[None]):
         if rest.strip():
             await transcript.add_notice("warn", "/diff takes no arguments")
             return
-        if self._turn_active or self._switching:
-            await transcript.add_notice("warn", self._busy_text("/diff"))
+        if (reason := self.host.refusal("/diff")) is not None:
+            await transcript.add_notice("warn", reason)
             return
         self.run_worker(self._diff, group="diff", exclusive=True, exit_on_error=False)
 
@@ -1700,7 +1557,7 @@ class AgentApp(App[None]):
         """Build the change set off the UI path, then open the viewer (or say why not)."""
         transcript = self.query_one(Transcript)
         try:
-            diff = await self.agent.last_turn_diff()
+            diff = await self.port.diff_list()
         except AgentBusy:
             await transcript.add_notice("warn", self._busy_text("/diff"))
             return
@@ -1716,37 +1573,27 @@ class AgentApp(App[None]):
                 await transcript.add_notice("warn", BANNER)
             return
         # Keys and messages were handled while the list was built: look again, with no await before the push.
-        if self._turn_active or self._switching:
-            await transcript.add_notice("warn", self._busy_text("/diff"))
+        if (reason := self.host.refusal("/diff")) is not None:
+            await transcript.add_notice("warn", reason)
             return
         if not self.agent.is_current_diff(diff):  # a newer turn, an undo or a reset: this is not the turn to show
             return
-        await self.push_screen(DiffScreen(diff, self.agent.load_diff_file))
+        await self.push_screen(DiffScreen(diff, self.port.diff_file))
 
     async def _undo_command(self) -> None:
         transcript = self.query_one(Transcript)
-        if self._turn_active or self._switching:
-            await transcript.add_notice("warn", self._busy_text("/undo"))
+        if (reason := self.host.refusal("/undo")) is not None:
+            await transcript.add_notice("warn", reason)
             return
         status = self.query_one(StatusBar)
-        self._turn_active = True
         self._cancel_diff()
-        self._undoing = True
         status.busy = True
-        self._refresh_hints()
-        events: list[AgentEvent] = []
-        prompt: str | None = None
         try:
-            prompt = await self.agent.undo(events.append)
-        except AgentBusy:
-            events.append(Notice("warn", self._busy_text("/undo")))
-        except Exception as error:
-            events.append(Notice("error", f"Undo failed: {error}"))
+            result = await self.port.undo()  # the host holds the turn claim (and the undo flag) until it is done
         finally:
-            self._turn_active = False
-            self._undoing = False
             status.busy = False
             self._refresh_hints()
+        prompt, events = result.prompt, result.events
         if prompt is not None:
             await transcript.remove_last_turn()
             self.query_one(TodoPanel).show(self.agent.todos)
@@ -1759,129 +1606,7 @@ class AgentApp(App[None]):
 
     def _init_prompt(self) -> str:
         """The `/init` message: the file's state and the parent files already loaded (reads the disk)."""
-        own = levels(self.workspace)[-1][0]
-        parents = [f.label for f in self.agent.instructions().files if f.label != own and f.state != "omitted"]
-        block = render_facts(scan(self.workspace), int(FACTS_SHARE * self.provider.context_window) * CHARS_PER_TOKEN)
-        return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents, facts=block)
-
-    async def _turn(
-        self, text: str, init: bool = False, draft: str | None = None, label: str | None = None
-    ) -> None:
-        self._turn_entered = True
-        transcript = self.query_one(Transcript)
-        status = self.query_one(StatusBar)
-        agents_md = self.workspace / "AGENTS.md"
-        before: tuple[int, int] | None = None
-        sent = False
-        shown = False  # the user entry was drawn (or was being drawn)
-        started = False  # the agent was handed the message
-        hook_events: list[AgentEvent] = []  # what the UserPromptSubmit hooks reported, shown once the prompt is
-        context: list[str] = []  # and what they added for the model
-        sent_text = text  # what the hooks and the model get: `text` plus the files its @mentions attach
-        notes: tuple[MentionNote, ...] = ()
-        images: tuple[Image, ...] = ()
-        image_warnings: list[str] = []  # images that were not attached, and why
-        pasted_taken: list[tuple[Path, str, tuple[int, int, int, int]]] = []  # pending pasted images this turn took, given back if it never sends
-        pasted: list[Image] = []
-
-        async def work(emit: EventSink) -> None:
-            nonlocal started
-            started = True
-            for hook_event in hook_events:
-                emit(hook_event)
-            await self.agent.run_turn(
-                sent_text, emit, draft=draft, context=context, images=images, pasted=tuple(pasted)
-            )
-
-        try:
-            if status.error and not await self._run_check():  # R3: re-check before giving up on the model
-                return
-            if not init:  # /init's prompt is the app's own, not something the user sent
-                expansion = await asyncio.to_thread(expand_mentions, text, self.workspace, self.guard)
-                pasted_taken = list(self._pending)
-                pasted, pasted_warnings = await self._take_pasted()
-                expansion = replace(expansion, images=(*expansion.images, *pasted))
-                expansion, image_warnings = await apply_vision(expansion, self.vision, self.provider.model)
-                image_warnings = [*pasted_warnings, *image_warnings]
-                sent_text, notes, images = expansion.text, expansion.notes, expansion.images
-                decision = await self.agent.prompt_hooks(sent_text, hook_events.append)
-                if decision.blocked:  # the prompt is dropped: `_end_turn` puts it back in the box
-                    for warning in image_warnings:  # still true when it is sent again, so say it now
-                        await transcript.add_notice("warn", warning)
-                    for hook_event in hook_events:
-                        if isinstance(hook_event, Notice):
-                            await transcript.add_notice(hook_event.level, hook_event.text)
-                    return
-                context = decision.context
-            self._draft = None  # from here the message is part of the conversation
-            sent = True
-            before = fingerprint(agents_md)
-            shown = True
-            await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
-            for note in notes:
-                await transcript.add_notice("info" if note.attached else "warn", note_text(note))
-            for number, image in enumerate(pasted, 1):  # the numbers edit_image's `clipboard:N` uses
-                if any(image is i for i in images):
-                    await transcript.add_notice("info", f"image clipboard:{number} ({describe(image)})")
-            for warning in image_warnings:
-                await transcript.add_notice("warn", warning)
-            self._finished_since_toggle = False
-            status.pending_mode = False
-            await self._run_with_events(work)
-        finally:
-            if pasted_taken and not started:
-                self._pending[:0] = pasted_taken  # the agent never got the message: its images wait for the next one
-                self._show_pending()
-            try:
-                if shown and not self._shutting_down:
-                    with contextlib.suppress(Exception):
-                        if started:
-                            transcript.end_turn(transcript.latest_turn)  # what follows is not part of the turn
-                        else:  # Esc landed before the agent got the message: no turn, so no entry, and the text is kept
-                            self._draft = draft if draft is not None else text
-                            await _uninterrupted(self._discard_turn(transcript))
-                if init and sent and started and not self._shutting_down:
-                    if fingerprint(agents_md) == before:
-                        with contextlib.suppress(NoMatches):
-                            await transcript.add_notice("info", "/init finished without changing AGENTS.md")
-                    else:
-                        await self._check_init()
-            finally:
-                self._end_turn()
-
-    @staticmethod
-    async def _discard_turn(transcript: Transcript) -> None:
-        await transcript.remove_turn(transcript.latest_turn)
-
-    async def _check_init(self) -> None:
-        """After an `/init` turn that changed AGENTS.md: warn about commands the scan did not find. Never raises."""
-        try:
-            notice = await asyncio.to_thread(init_check, self.workspace)
-            if notice is not None:
-                await self.query_one(Transcript).add_notice(*notice)
-        except NoMatches:
-            pass
-        except Exception as error:
-            with contextlib.suppress(Exception):
-                await self.query_one(Transcript).add_notice("error", f"/init check failed: {error}")
-
-    async def _compact(self) -> None:
-        self._turn_entered = True
-        try:
-            failed = False
-
-            async def work(emit: EventSink) -> None:
-                def watch(event: AgentEvent) -> None:
-                    nonlocal failed
-                    failed = failed or event == Notice("warn", NOT_SUMMARIZED)
-                    emit(event)
-
-                await self.agent.compact(watch)
-
-            if await self._run_with_events(work) and not failed:  # a failed summary is not a finished compaction
-                self._job_status = "done"
-        finally:
-            self._end_turn()
+        return self.host.init_prompt()
 
     async def _run_with_events(self, work: Callable[[EventSink], Awaitable[None]]) -> bool:
         """Run an agent job (a turn, a compaction) with its events applied to the widgets in order.
@@ -1898,8 +1623,110 @@ class AgentApp(App[None]):
         finally:
             # Whatever ended the job, the queued events still reach the transcript, and a
             # repeated Esc must not cut that short.
-            await _uninterrupted(self._finish_turn(events, consumer))
+            await uninterrupted(self._finish_turn(events, consumer))
         return ran
+
+    async def _on_port_event(self, event: object) -> None:
+        """One event of the host's bus (they come one at a time, in order); a bad one is a display error."""
+        if self._shutting_down:
+            return  # shutting down: the widgets are going away
+        try:
+            await self._on_host_event(event)
+        except Exception as exc:  # one bad event must not drop the ones behind it
+            with contextlib.suppress(Exception):
+                await self.query_one(Transcript).add_notice("error", f"Display error: {exc}")
+
+    async def _on_host_event(self, event: object) -> None:
+        match event:
+            case ProviderState(problem):
+                status = self.query_one(StatusBar)
+                status.error = None if problem is None else "not ready"
+                if problem is not None:
+                    await self.query_one(Transcript).add_notice("error", problem)
+            case UserEntry(text, label):
+                transcript = self.query_one(Transcript)
+                try:
+                    await (transcript.add_user(text, label=label) if label else transcript.add_user(text))
+                except asyncio.CancelledError:
+                    if (task := asyncio.current_task()) is not None and task.cancelling():
+                        raise  # the app is closing
+                    self.port.interrupt()  # the entry was not drawn: the turn stops before the agent gets the message
+            case Delivering():
+                self._finished_since_toggle = False
+                self.query_one(StatusBar).pending_mode = False
+            case JobEventsDone():
+                transcript = self.query_one(Transcript)
+                await transcript.end_assistant()
+                await transcript.close_open_tools("ended")
+            case EntryEnd(discard):
+                transcript = self.query_one(Transcript)
+                with contextlib.suppress(Exception):
+                    if discard:  # the agent never got the message: no turn, so no entry (the text is kept)
+                        await uninterrupted(transcript.remove_turn(transcript.latest_turn))
+                    else:
+                        transcript.end_turn(transcript.latest_turn)  # what follows is not part of the turn
+            case TurnOutcome() as outcome:
+                self._apply_outcome(outcome)
+            case AskResolved(ask_id, by, _):
+                screen = self._ask_screens.pop(ask_id, None)
+                if screen is not None:
+                    await self._close_dialog(screen)
+                    if by and by != LOCAL_CLIENT:  # answered elsewhere (a client of the same session); unreachable with the local port alone
+                        await self.query_one(Transcript).add_notice("info", "answered in another client")
+            case _:
+                await self._on_agent_event(event)  # ty: ignore[invalid-argument-type]
+
+    def _on_ask(self, event: AskEvent) -> None:
+        """An approval for the user: the dialog opens over whatever is shown, and its choice answers the ask. Esc denies
+        and interrupts the turn."""
+        request = event.request
+        if not isinstance(request, ApprovalRequest):  # the trust prompts are still asked in-process (`_ask_trust`)
+            return
+        if self._shutting_down:  # the screens are going away: no dialog, and the ask must not wait for one
+            self.port.answer(event.ask_id, Decision(Choice.DENY, "shutting down"))
+            return
+        screen = ApprovalScreen(request)
+        self.guard_keys()  # before the dialog is shown: keys typed from now on are not meant for it
+        self._ask_screens[event.ask_id] = screen
+        self.push_screen(screen, callback=functools.partial(self._approval_answered, event.ask_id))
+
+    def _approval_answered(self, ask_id: str, result: Decision | None) -> None:
+        if self._ask_screens.pop(ask_id, None) is None:
+            return  # the ask was withdrawn (its turn was cancelled) and the dialog closed for it: nothing to answer
+        if result is None:  # Escape: deny, and stop the turn
+            self.interrupt_turn()  # the cancel lands at once, so the answer below only counts if nothing was cancelled
+            self._answered(ask_id, self.port.answer(ask_id, Decision(Choice.DENY, "interrupted")))
+            return
+        self._answered(ask_id, self.port.answer(ask_id, result))
+
+    def _answered(self, ask_id: str, result: AnswerResult) -> None:
+        """What the host said to an answer: a refused one is said, and an ask still open gets its dialog again."""
+        if result in ("ok", "already_answered"):
+            return
+        self.call_later(self._report_answer, result)
+        if result == "invalid":
+            for event in self.host.asks.pending():
+                if event.ask_id == ask_id:
+                    self._on_ask(event)
+
+    async def _report_answer(self, result: str) -> None:
+        with contextlib.suppress(NoMatches):
+            await self.query_one(Transcript).add_notice("warn", f"could not answer the approval ({result})")
+
+    async def _close_dialog(self, screen: ApprovalScreen) -> None:
+        """Take a withdrawn dialog off the stack even when another screen sits above it."""
+        try:
+            while screen in (stack := self.screen_stack) and len(stack) > 1:
+                if self.screen is screen:
+                    screen.dismiss(None)
+                else:
+                    self.pop_screen()
+        except Exception as exc:  # report it: a dialog that cannot be closed must not fail silently
+            with contextlib.suppress(Exception):
+                await self.query_one(Transcript).add_notice("error", f"Could not close the approval dialog: {exc}")
+        if screen in self.screen_stack:
+            with contextlib.suppress(Exception):
+                await self.query_one(Transcript).add_notice("error", "The approval dialog is still open")
 
     async def _finish_turn(self, events: asyncio.Queue[AgentEvent | None], consumer: asyncio.Task[None]) -> None:
         events.put_nowait(None)
@@ -1968,7 +1795,6 @@ class AgentApp(App[None]):
                 if not estimated and completion_tokens:
                     status.set_reply_tokens(completion_tokens)
             case TurnEnded(turn_status):
-                self._job_status = turn_status
                 status.clear_phase()
                 self._reindex()
                 status.pending_mode = False

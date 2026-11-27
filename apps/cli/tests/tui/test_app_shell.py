@@ -5,11 +5,10 @@ from pathlib import Path
 import pytest
 from core.engine.mode import Mode
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar, display_path
 
-from tests.tui.conftest import AppFactory, scripted, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, dialog, scripted, settled, type_and_send
 
 
 def test_display_path_abbreviates_the_home_folder(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -55,7 +54,7 @@ async def test_tab_with_the_approval_dialog_open_leaves_the_edits_mode(make_app:
         await pilot.press("tab")
         assert app.agent.mode is Mode.EDITS
         await type_and_send(pilot, "go")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await pilot.press("tab")
 
         assert app.agent.mode is Mode.EDITS

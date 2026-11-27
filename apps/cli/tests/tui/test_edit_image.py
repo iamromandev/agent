@@ -14,12 +14,11 @@ from core.engine.loop import PASTED_NOTE
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from core.testing.fakes import FakeCatalog
 from core.testing.image_fakes import fake_mflux, png
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.attachment_panel import AttachmentPanel
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.transcript import Transcript, UserEntry
 
-from tests.tui.conftest import AppFactory, choose, scripted, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, scripted, settled, type_and_send, until
 
 PASTED = png(40, 30) + b"clip"
 CALL = {"prompt": "pencil sketch", "image": "clipboard:1", "path": "sketch.png", "width": 256, "height": 256, "seed": 3}
@@ -65,7 +64,7 @@ async def test_a_pasted_image_is_labelled_for_the_model_and_the_transcript_shows
     async with app.run_test() as pilot:
         await _paste(pilot, app)
         await type_and_send(pilot, "sketch this")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await choose(pilot, "once")
         await settled(app)
 
@@ -93,7 +92,7 @@ async def test_undo_deletes_a_new_edit_and_restores_an_overwritten_one(
         for text in ("one", "two"):
             await _paste(pilot, app)
             await type_and_send(pilot, text)
-            await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+            await dialog(pilot)
             await choose(pilot, "once")
             await settled(app)
         assert png_size((workspace / "old.png").read_bytes()) == (256, 256)

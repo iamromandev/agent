@@ -12,7 +12,7 @@ from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import AssistantEntry, NoticeEntry, ToolEntry
 from textual.widgets import Collapsible, Static
 
-from tests.tui.conftest import AppFactory, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, dialog, settled, type_and_send, until
 
 
 def _task_call() -> list:
@@ -63,7 +63,7 @@ async def test_escape_on_a_child_approval_denies_and_interrupts_the_turn(make_ap
     app = make_app([_task_call(), fetch], task=True, task_fetcher=fetcher)
     async with app.run_test() as pilot:
         await type_and_send(pilot, "go")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await pilot.press("escape")
         await until(pilot, lambda: not app.query_one(StatusBar).busy)
 

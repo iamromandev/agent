@@ -6,14 +6,13 @@ import asyncio
 import threading
 from pathlib import Path
 
-import src.tui.app as app_module
+import core.host.session as host_module
 from core.engine.mode import Mode
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from core.testing.facts_fixtures import CI_YML, ROOT_MAKEFILE
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.transcript import NoticeEntry
 
-from tests.tui.conftest import AppFactory, choose, scripted, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, scripted, settled, type_and_send
 
 REPLY = [TextDelta("ok"), Done(1, 1)]
 PLAN_REFUSAL = "/init needs BUILD mode — press Tab to switch"
@@ -48,14 +47,14 @@ async def test_toggling_the_mode_while_the_scan_is_held_refuses_the_plan_turn(
     async with app.run_test() as pilot:
         await settled(app)
         entered, release = threading.Event(), threading.Event()
-        original = app_module.scan
+        original = host_module.scan
 
         def held(workspace: Path):
             entered.set()
             release.wait(5)
             return original(workspace)
 
-        monkeypatch.setattr(app_module, "scan", held)
+        monkeypatch.setattr(host_module, "scan", held)
         sending = asyncio.create_task(type_and_send(pilot, "/init"))
         await asyncio.wait_for(asyncio.to_thread(entered.wait, 5), 6)
         app.action_toggle_mode()  # the UI still handles keys while the scan runs in its thread
@@ -67,7 +66,7 @@ async def test_toggling_the_mode_while_the_scan_is_held_refuses_the_plan_turn(
         await pilot.pause()
 
         assert PLAN_REFUSAL in [e.text for e in app.query(NoticeEntry)][-1]
-        assert scripted(app).requests == [] and not app._turn_active
+        assert scripted(app).requests == [] and not app.host.turn_active
 
 
 # The check after the turn (R11-R13, AC10, AC12, AC13, AC15)
@@ -85,7 +84,7 @@ def _check_notices(app) -> list[str]:
 
 async def _run_init(app, pilot, *, approve: bool = True) -> None:
     await type_and_send(pilot, "/init")
-    await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+    await dialog(pilot)
     await choose(pilot, "once" if approve else "deny")
     if not approve:
         await pilot.press("enter")
@@ -120,7 +119,7 @@ async def test_a_failing_check_is_one_error_notice_and_the_app_goes_on(
     def boom(workspace: Path):
         raise RuntimeError("disk gone")
 
-    monkeypatch.setattr(app_module, "init_check", boom)
+    monkeypatch.setattr(host_module, "init_check", boom)
     app = make_app([[_agents_md("`make x`"), Done(1, 1)], REPLY, REPLY], workspace=_repo(tmp_path / "ws"))
     async with app.run_test() as pilot:
         await settled(app)
@@ -128,7 +127,7 @@ async def test_a_failing_check_is_one_error_notice_and_the_app_goes_on(
 
         errors = [e.text[2:] for e in app.query(NoticeEntry) if "/init check failed" in e.text]
         assert errors == ["/init check failed: disk gone"]
-        assert not app._turn_active
+        assert not app.host.turn_active
         await type_and_send(pilot, "next")
         await settled(app)
         assert scripted(app).requests[-1][0][-1].content == "next"

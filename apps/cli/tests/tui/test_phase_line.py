@@ -7,11 +7,10 @@ from pathlib import Path
 import pytest
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from core.testing.fakes import Gate
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.status import StatusBar
 from textual.pilot import Pilot
 
-from tests.tui.conftest import AppFactory, choose, reached, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, reached, settled, type_and_send, until
 
 
 def record_lines(status: StatusBar, monkeypatch: pytest.MonkeyPatch) -> list[str]:
@@ -71,7 +70,7 @@ async def test_an_approval_dialog_shows_awaiting_approval_then_running(
     async with app.run_test() as pilot:
         status = app.query_one(StatusBar)
         await type_and_send(pilot, "go")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         assert "● awaiting approval: write · step 1/5" in status.line
         await choose(pilot, "once")
         await until(pilot, lambda: not status.busy)

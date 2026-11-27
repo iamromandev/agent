@@ -363,7 +363,7 @@ async def test_a_failing_session_start_step_on_sessions_is_one_warning_and_relea
         await pilot.press("enter")
         await settled(app)
 
-        assert "hook SessionStart failed: bad\\x1b[31m" in _notices(app) and not app._switching
+        assert "hook SessionStart failed: bad\\x1b[31m" in _notices(app) and not app.host.switching
         await type_and_send(pilot, "hi")
         await settled(app)
         assert app.agent.history[-1].role == "assistant"

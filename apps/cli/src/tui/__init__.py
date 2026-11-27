@@ -14,34 +14,42 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code.
 
     `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key."""
+    from core.engine.mentions_index import FileIndex
+    from core.host.port import LocalPort
+    from core.host.session import SessionHost
+
     from src.tui.app import BUILTINS, AgentApp
 
     rt = build_runtime(workspace, BUILTINS, model=model, checkpoints=True, images=True)
     try:
-        # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
-        app = AgentApp(
+        # The live session; the app drives it through the in-process port.
+        host = SessionHost(
             rt.agent_factory,
             rt.provider,
             rt.root,
+            window_cap=rt.settings.num_ctx,
             store=rt.store,
-            start=start,
             recorder_factory=rt.recorder_factory,
+            catalog=rt.catalog,
+            vision=rt.vision,
+            guard=rt.guard,
+            permissions=rt.permissions.rules,
+            hooks=rt.hooks,
+        )
+        # Closed by the app on unmount, inside the loop that owns the connections and the terminals' readers.
+        app = AgentApp(
+            LocalPort(host, FileIndex(rt.root, rt.guard)),
+            start=start,
             on_close=rt.close,
             terminals=rt.terminals,
             mcp=rt.mcp,
             mcp_trust=rt.setup.remember,
-            permissions=rt.permissions.rules,
             permission_warnings=rt.warnings,
-            catalog=rt.catalog,
-            vision=rt.vision,
-            window_cap=rt.settings.num_ctx,
             launch_notices=rt.model_notices,
             commands=rt.commands,
             skills=rt.skills,
             agents=rt.agents,
             workflows=rt.workflows,
-            guard=rt.guard,
-            hooks=rt.hooks,
             paste=rt.paste,
             images=rt.images,
             config_guard=rt.config_guard,

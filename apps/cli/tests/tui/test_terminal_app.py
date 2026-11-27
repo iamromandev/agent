@@ -22,7 +22,7 @@ from src.tui.widgets.terminal import TerminalPane, TerminalView
 from src.tui.widgets.transcript import NoticeEntry
 from textual.pilot import Pilot
 
-from tests.tui.conftest import AppFactory, settled, type_and_send, until
+from tests.tui.conftest import AppFactory, dialog, settled, type_and_send, until
 
 
 def pane_of(app: AgentApp) -> TerminalPane:
@@ -98,7 +98,7 @@ async def test_keys_typed_in_a_terminal_do_not_answer_an_approval_dialog_that_op
         await until(pilot, lambda: isinstance(app.focused, TerminalView))
 
         gate.release.set()
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await pilot.press("up", "up", "enter")  # what the user was typing for the shell: Allow once
 
         assert isinstance(app.screen, ApprovalScreen)

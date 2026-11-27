@@ -13,12 +13,11 @@ from core.engine.guardrails.setup import Guardrails
 from core.engine.imagegen import MfluxGenerator
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
 from core.testing.image_fakes import fake_mflux
-from src.tui.screens.approval import ApprovalScreen
 from src.tui.widgets.chat_input import ChatInput
 from src.tui.widgets.status import StatusBar
 from src.tui.widgets.transcript import Transcript
 
-from tests.tui.conftest import AppFactory, choose, type_and_send, until
+from tests.tui.conftest import AppFactory, choose, dialog, type_and_send, until
 
 
 def _gone(pid: int) -> bool:
@@ -45,7 +44,7 @@ async def test_the_input_stays_usable_and_escape_cancels_a_running_generation(
     app = make_app([[call, Done(1, 1)], [TextDelta("ok"), Done(1, 1)]], workspace=workspace, imager=generator, context_window=4000)
     async with app.run_test() as pilot:
         await type_and_send(pilot, "go")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await choose(pilot, "once")
         await until(pilot, lambda: pids.exists() and len(pids.read_text().split()) == 2)
         pid_list = [int(p) for p in pids.read_text().split()]
@@ -84,7 +83,7 @@ async def test_the_status_bar_shows_progress_while_running_and_clears_after(
     app = make_app([[call, Done(1, 1)], [TextDelta("ok"), Done(1, 1)]], workspace=workspace, imager=generator, context_window=4000)
     async with app.run_test() as pilot:
         await type_and_send(pilot, "go")
-        await until(pilot, lambda: isinstance(app.screen, ApprovalScreen))
+        await dialog(pilot)
         await choose(pilot, "once")
         transcript = app.query_one(Transcript)
         status = app.query_one(StatusBar)

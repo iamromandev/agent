@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 
+from core.host.queue import Queued
 from rich.text import Text
 from textual.widgets import Static
 
-from src.tui.queue import Queued, panel_lines
+from src.tui.queue import panel_lines
 
 
 class QueuePanel(Static):
