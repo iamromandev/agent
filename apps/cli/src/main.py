@@ -124,5 +124,25 @@ def root(
             raise typer.Exit(code)  # e.g. 128 + the signal that ended it
 
 
+@app.command("serve")
+def serve_command(
+    workspace: Path | None = typer.Option(None, "--workspace", help="The folder to serve (default: this one)"),
+) -> None:
+    """Run the shared-session daemon for this folder in the foreground (logs to stderr)."""
+    import core.server.serve as served
+
+    if code := served.serve(workspace if workspace is not None else Path.cwd()):
+        raise typer.Exit(code)
+
+
+@app.command("stop")
+def stop_command() -> None:
+    """Stop the shared-session daemon of this folder."""
+    import core.server.serve as served
+
+    if not served.stop(Path.cwd()):
+        typer.echo("no agent daemon for this folder")
+
+
 def main() -> None:
     app()

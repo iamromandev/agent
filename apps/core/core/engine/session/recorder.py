@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from core.engine.provider.base import Message
+from core.engine.session.lock import SessionLock, SessionLocked
 from core.engine.session.records import (
     SessionHeader,
     ToolMeta,
@@ -137,8 +138,18 @@ def _stamp(moment: datetime) -> str:
 
 
 class FileRecorder:
-    def __init__(self, directory: Path, workspace: Path, now: Callable[[], datetime] = _utc_now) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        workspace: Path,
+        now: Callable[[], datetime] = _utc_now,
+        *,
+        session_id: str | None = None,
+    ) -> None:
+        """`session_id`: the id a new session gets (a fresh one when None), known before its first record (the daemon
+        names a session's address by it)."""
         self._directory = directory
+        self._chosen = session_id
         self._workspace = workspace.resolve()
         self._now = now
         self._path: Path | None = None
@@ -147,11 +158,16 @@ class FileRecorder:
         self._fd: int | None = None
         self._pending: list[bytes] = []
         self._held: list[bytes] = []  # model switches and usage records made before the file started
+        self._lock: SessionLock | None = None  # held while the recorder is open (from the file's creation, or resume)
 
     @classmethod
     def resume(cls, path: Path, workspace: Path) -> FileRecorder:
-        """Append to an existing session file: no header, no title."""
+        """Append to an existing session file: no header, no title. Takes the session's lock: `SessionLocked` when
+        another process has it open. A lock file that cannot be used now is tried again by the first write, which
+        then fails like any other write (the folder checks come first)."""
         recorder = cls(path.parent, workspace)
+        with contextlib.suppress(OSError):  # not SessionLocked: that one is the caller's to show
+            recorder._lock = SessionLock.acquire(path.parent, path.stem)
         recorder._path = path
         recorder._started = True
         return recorder
@@ -162,8 +178,10 @@ class FileRecorder:
 
     @property
     def session_id(self) -> str:
-        """The session's id (its file name), or "" while nothing was recorded yet."""
-        return self._path.stem if self._path is not None else ""
+        """The session's id (its file name), or "" while nothing was recorded yet (the chosen id, when one was given)."""
+        if self._path is not None:
+            return self._path.stem
+        return self._chosen or ""
 
     def message(self, message: Message, meta: ToolMeta | None) -> None:
         stamp = _stamp(self._now())
@@ -238,6 +256,9 @@ class FileRecorder:
         if fd is not None:
             with contextlib.suppress(OSError):
                 os.close(fd)
+        lock, self._lock = self._lock, None
+        if lock is not None:
+            lock.release()  # another process may open the session now
 
     def _start(self, first: Message | None, stamp: str) -> None:
         """Queue the header, and the title when the first message is the user's.
@@ -246,7 +267,7 @@ class FileRecorder:
         """
         if self._started:
             return
-        session_id = new_ulid()
+        session_id = self._chosen or new_ulid()
         lines = [_encode(SessionHeader(session_id, str(self._workspace), stamp, tracks_usage=True).to_obj())]
         if first is not None and first.role == "user" and (title := title_from(first.content)):
             lines.append(_encode({"type": "title", "title": title, "at": stamp}))
@@ -271,7 +292,12 @@ class FileRecorder:
         else:
             _secure_dir(root, create=False)
         _secure_dir(self._directory, create=self._creating)
-        flags = os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC  # RDWR: the tail is read
+        if self._lock is None:  # a new session (its folder exists now), or a reopen after `close`
+            try:
+                self._lock = SessionLock.acquire(self._directory, self._path.stem)
+            except (SessionLocked, OSError) as error:
+                raise SessionWriteError(errno.EBUSY, f"could not lock the session: {error}") from error
+        flags =os.O_RDWR | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC  # RDWR: the tail is read
         if self._creating:
             flags |= os.O_CREAT | os.O_EXCL
         fd = os.open(self._path, flags, FILE_MODE)

@@ -119,6 +119,59 @@ class TaskProgress(Message):
     event: WireEvent
 
 
+class ProviderState(Message):
+    type: Literal["provider_state"] = "provider_state"
+    problem: str | None = None
+
+
+class UserEntry(Message):
+    type: Literal["user_entry"] = "user_entry"
+    text: str
+    label: str | None = None
+    client: str = ""
+
+
+class Delivering(Message):
+    type: Literal["delivering"] = "delivering"
+
+
+class JobEventsDone(Message):
+    type: Literal["job_events_done"] = "job_events_done"
+
+
+class EntryEnd(Message):
+    type: Literal["entry_end"] = "entry_end"
+    discard: bool
+
+
+class InitCheck(Strict):
+    level: str
+    text: str
+
+
+class Restore(Strict):
+    client: str
+    text: str
+
+
+class TurnOutcome(Message):
+    # The texts that go back are the user's own draft, sent as typed (never redacted): a client must get its exact
+    # text back in its input box.
+    type: Literal["turn_outcome"] = "turn_outcome"
+    kind: Literal["turn", "compact", "workflow"]
+    status: str | None = None
+    continued: bool = False
+    restore_text: str | None = None
+    queue_restore: str | None = None
+    delivered: bool = False
+    turn: int = 0
+    init_check: InitCheck | None = None
+    ack: int = 0
+    client: str = ""
+    interrupted_by: str = ""
+    restores: list[Restore] = Field(default_factory=list)
+
+
 WireEvent = Annotated[
     AssistantText
     | ToolStarted
@@ -151,6 +204,11 @@ class TrustAsk(Strict):
     kind: Literal["global_trust", "mcp_trust", "permission_trust"]
     lines: list[str]
     note: str | None = None
+    title: str = ""
+    header: list[str] = Field(default_factory=list)
+    footer: list[str] = Field(default_factory=list)
+    decline: str = ""
+    accept: str = ""
 
 
 class Ask(Message):
@@ -190,12 +248,23 @@ class AskResolved(Message):
     type: Literal["ask_resolved"] = "ask_resolved"
     ask_id: str
     by: str
-    decision: Answer
+    decision: Answer | None = None  # None: withdrawn (its turn was interrupted, or the session closed)
 
 
 class QueueEntry(Strict):
     typed: str
     label: str = ""
+    client: str = ""
+
+
+class Claims(Strict):
+    """Who holds the session now: a turn (or compaction, undo, workflow), a switch, and whether a message queues."""
+
+    turn_active: bool = False
+    switching: bool = False
+    undoing: bool = False
+    workflow_active: bool = False
+    queueing: bool = False
 
 
 class Snapshot(Message):
@@ -203,6 +272,7 @@ class Snapshot(Message):
     model: str = ""
     mode: str = ""
     busy: bool = False
+    claims: Claims = Field(default_factory=Claims)
     queue: list[QueueEntry] = Field(default_factory=list)
     todos: list[TodoItem] = Field(default_factory=list)
     usage: dict[str, Any] = Field(default_factory=dict)
@@ -232,6 +302,12 @@ WireMessage = Annotated[
     | TaskProgress
     | ToolProgress
     | Phase
+    | ProviderState
+    | UserEntry
+    | Delivering
+    | JobEventsDone
+    | EntryEnd
+    | TurnOutcome
     | Snapshot
     | Ask
     | AskResolved

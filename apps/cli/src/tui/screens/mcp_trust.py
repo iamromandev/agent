@@ -7,7 +7,7 @@ from typing import ClassVar
 
 from core.engine.mcp.config import ServerConfig
 from core.engine.text import escape
-from core.trust import command_line, env_note
+from core.trust import command_line, env_note, trust_lines
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -55,14 +55,17 @@ class McpTrustScreen(ModalScreen[bool]):
         self.servers = list(servers)
 
     def compose(self) -> ComposeResult:
+        ask = trust_lines("mcp_trust", servers=self.servers)  # the texts; each server is drawn styled
         with Vertical():
-            yield Label(Text(".agent/mcp.json in this folder wants to start these MCP servers on your machine:"))
+            for line in ask.header:
+                yield Label(Text(line))
             with VerticalScroll(id="servers"):
                 for server in self.servers:
                     yield Label(describe(server))
-            yield Label(Text("Files these commands run (scripts, packages) are not checked. Tab scrolls the list."))
+            for line in ask.footer:
+                yield Label(Text(line))
             # "Don't trust" comes first and is highlighted from the start: a stray Enter must never start a process.
-            choices = OptionList(Option("Don't trust (keep them stopped)", id="decline"), Option("Trust and start them", id="trust"))
+            choices = OptionList(Option(ask.decline, id="decline"), Option(ask.accept, id="trust"))
             choices.highlighted = 0
             yield choices
 

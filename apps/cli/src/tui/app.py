@@ -177,7 +177,6 @@ class AgentApp(App[None]):
         # input box, the pasted images, the terminals, the workflows and the image pull.
         self.port = port
         host: SessionHost = port.host
-        host.attachments = self._attachments
         # What the marker holds until the next launch besides the allow rules, hooks and servers (shown and asked about
         # with them): the global keepEnv and the global commands, skills, agents and workflows.
         self._held = held if held is not None else HeldGlobal()
@@ -262,8 +261,7 @@ class AgentApp(App[None]):
         self.query_one(ChatInput).paths = self.query_one(PathSuggestions)
         self.query_one(ChatInput).focus()
         self.watch(status, "busy", lambda _: self._refresh_hints(), init=False)
-        # A failed check shows `not ready`; the host asks the provider again before the next turn while it does.
-        self.watch(status, "error", lambda error: setattr(self.host, "not_ready", bool(error)), init=False)
+        # A failed check shows `not ready` (a `ProviderState`); the host itself asks again before the next turn.
         self._refresh_hints()
         self._apply_height(self.size.height)
         self._reindex()
@@ -271,8 +269,9 @@ class AgentApp(App[None]):
         self._loop_thread = threading.get_ident()
         if self.config_guard is not None:  # a reaction on another thread tells its listeners on this loop
             self.config_guard.attach_loop(asyncio.get_running_loop())
-        self.port.subscribe(self._on_port_event, self._on_ask)  # the host's events, drawn one after the other
-        self.host.switching = True  # claimed before any worker runs: `_start` releases it after the announcement
+        # the host's events, drawn one after the other; a turn sent here takes the pasted images
+        self.port.subscribe(self._on_port_event, self._on_ask, self._attachments)
+        self.host.begin_switch()  # claimed before any worker runs (nothing else can hold it yet): `_start` releases it
         self.run_worker(self._run_check(), group="check")
         self.run_worker(self._start(), group="start")
 
@@ -755,7 +754,7 @@ class AgentApp(App[None]):
 
     def exit(self, *args: Any, **kwargs: Any) -> None:
         self._shutting_down = True  # from here on the widgets are going away: stop applying agent events
-        self.host.closing = True  # and the host sends no queued message
+        self.host.begin_close()  # and the host sends no queued message
         super().exit(*args, **kwargs)
 
     def _stop_on_signals(self) -> None:
@@ -785,7 +784,7 @@ class AgentApp(App[None]):
 
     async def on_unmount(self) -> None:
         self._shutting_down = True
-        self.host.closing = True
+        self.host.begin_close()
         if self.config_guard is not None:  # the transcript is going away: what is said now is printed after the app
             self.config_guard.unlisten(self._config_changed)
         with contextlib.suppress(Exception):  # a failing check must not keep the cleanup below from running
@@ -1041,7 +1040,7 @@ class AgentApp(App[None]):
         lands on."""
         started = False
         if not outcome.continued:
-            if (back := outcome.restore) is not None:
+            if (back := outcome.restore_for(LOCAL_CLIENT)) is not None:  # only what this client sent
                 self._restore_draft(back)
             started = self.port.outcome_applied(outcome.ack)  # a message queued meanwhile is sent now
         if outcome.kind == "workflow":
@@ -1391,7 +1390,7 @@ class AgentApp(App[None]):
 
     async def _workflow(self, action: Callable[[EventSink], Awaitable[RunResult]], runner: WorkflowRunner) -> None:
         """The worker of a run: events reach the widgets in order, the outcome is one last line."""
-        self.host.turn_entered = True
+        self.host.job_entered()
         try:
 
             async def work(emit: EventSink) -> None:

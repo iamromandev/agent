@@ -17,3 +17,8 @@
 #   `httpx.RemoteProtocolError`.
 # - macOS: `getsockopt(SOL_LOCAL=0, LOCAL_PEERCRED=1, 76)` returns struct xucred; cr_version (u32, must be 0) then
 #   cr_uid (u32). Linux uses SO_PEERCRED (struct ucred: pid signed, uid and gid unsigned). Linux is untested here.
+# - uvicorn's own `capture_signals` raises a caught SIGINT/SIGTERM again after `serve` returns, which would kill the
+#   process before the daemon's cleanup: `serve._Server.handle_exit` does not record the signal.
+"""The per-workspace daemon behind `agent serve` and `agent --shared`: `paths` (the private run folder), `files` (the
+pid lock and the 0600 socket), `peer` and `protocol` (the peer-uid check), `daemon` (runtime, sessions, trust prompts,
+idle exit), `snapshot`, `app` (the HTTP/SSE routes) and `serve` (foreground, background start, stop)."""

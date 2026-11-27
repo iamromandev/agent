@@ -44,27 +44,18 @@ class PermissionTrustScreen(ModalScreen[bool]):
         self.rules = sort_rules(rules)
 
     def compose(self) -> ComposeResult:
+        ask = trust_lines("permission_trust", rules=self.rules, hooks=self.hooks)
         with Vertical():
-            parts = []
-            if self.rules:
-                parts.append(f"{len(self.rules)} allow rule{'s' if len(self.rules) != 1 else ''}")
-            if self.hooks:
-                parts.append(f"{len(self.hooks)} hook{'s' if len(self.hooks) != 1 else ''}")
-            yield Label(Text(f"Trust this project's settings? ({', '.join(parts)})", "bold"), id="title")
-            if self.rules:
-                yield Label(Text(".agent/settings.json in this folder wants to allow these calls without asking:"))
-            if self.hooks:
-                yield Label(Text(".agent/settings.json in this folder wants to run these commands at these events:"))
+            yield Label(Text(ask.title, "bold"), id="title")
+            for line in ask.header:
+                yield Label(Text(line))
             with VerticalScroll(id="rules"):
-                for line in trust_lines("permission_trust", rules=self.rules, hooks=self.hooks).lines:
+                for line in ask.lines:
                     yield Label(Text(line))  # a `Text`, never markup; odd characters escaped, wrapped
-            if self.rules:
-                yield Label(Text("Matching calls will run without asking you. Tab scrolls the list."))
-            if self.hooks:
-                yield Label(Text("Hooks run in this folder like bash, and can refuse your tool calls. Tab scrolls the list."))
+            for line in ask.footer:
+                yield Label(Text(line))
             # "Don't trust" comes first and is highlighted from the start: a stray Enter must never allow a call.
-            what = " and ".join(name for name, items in (("rules", self.rules), ("hooks", self.hooks)) if items)
-            choices = OptionList(Option("Don't trust (keep them off)", id="decline"), Option(f"Trust these {what}", id="trust"))
+            choices = OptionList(Option(ask.decline, id="decline"), Option(ask.accept, id="trust"))
             choices.highlighted = 0
             yield choices
 

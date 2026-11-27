@@ -156,3 +156,54 @@ def test_output_json_without_p_is_a_usage_error(headless: Headless, opened: list
 
     assert result.exit_code == 2
     assert opened == [] and headless == []
+
+
+class DaemonCalls(list):
+    """What `core.server.serve.serve` and `stop` were called with, as `(name, workspace)`; `running` is what `stop`
+    answers."""
+
+    running = True
+
+
+@pytest.fixture
+def daemon_calls(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> DaemonCalls:
+    import core.server.serve as served
+
+    calls = DaemonCalls()
+
+    def fake_serve(workspace: Path) -> int:
+        calls.append(("serve", workspace))
+        return 1
+
+    def fake_stop(workspace: Path) -> bool:
+        calls.append(("stop", workspace))
+        return calls.running
+
+    monkeypatch.setattr(served, "serve", fake_serve)
+    monkeypatch.setattr(served, "stop", fake_stop)
+    monkeypatch.chdir(tmp_path)
+    return calls
+
+
+def test_serve_runs_the_daemon_for_this_folder_and_passes_its_exit_code(
+    daemon_calls: DaemonCalls, opened: Opened, tmp_path: Path
+) -> None:
+    result = runner.invoke(app, ["serve"])
+    assert result.exit_code == 1 and daemon_calls == [("serve", tmp_path)] and opened == []
+
+    other = tmp_path / "other"
+    other.mkdir()
+    runner.invoke(app, ["serve", "--workspace", str(other)])
+    assert daemon_calls[-1] == ("serve", other)
+
+
+def test_stop_says_when_no_daemon_runs_and_exits_0(daemon_calls: DaemonCalls, tmp_path: Path) -> None:
+    daemon_calls.running = False
+    result = runner.invoke(app, ["stop"])
+    assert result.exit_code == 0 and "no agent daemon for this folder" in result.output
+    assert daemon_calls == [("stop", tmp_path)]
+
+
+def test_a_word_after_resume_is_its_value_even_when_it_is_serve(daemon_calls: DaemonCalls, opened: Opened) -> None:
+    runner.invoke(app, ["--resume", "serve"])
+    assert daemon_calls == [] and opened  # `serve` is the session id here: the agent opened, no daemon started

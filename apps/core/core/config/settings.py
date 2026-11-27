@@ -97,6 +97,10 @@ class Settings(BaseSettings):
         float,
         Field(default=120.0, gt=0, description="Seconds an MCP server may take to start and list its tools"),
     ]
+    daemon_idle: Annotated[
+        float,
+        Field(default=600.0, gt=0, description="Seconds the shared-session daemon stays up with no client and no turn"),
+    ]
 
     @field_validator("search_url")
     @classmethod

@@ -14,6 +14,7 @@ from core.engine.provider.base import Done, ProviderError, TextDelta, ToolCall, 
 from core.engine.session import SessionStore
 from core.runtime import StartChoice
 from core.testing.fakes import ScriptedProvider
+from core.testing.helpers import session_held_elsewhere
 from src.headless import EXIT_FAIL, EXIT_OK, EXIT_USAGE, HEADLESS_DENY, HeadlessOptions
 from src.headless.run import run_headless
 
@@ -120,6 +121,26 @@ def test_resume_takes_a_session_by_id_prefix_and_an_unknown_one_exits_2(
     assert go(ws, bad, start=StartChoice("resume", "ZZZZZZZZ")) == EXIT_USAGE
     assert "ZZZZZZZZ" in capsys.readouterr().err
     assert bad.requests == []
+
+
+def test_headless_mode_never_touches_the_daemon_run_folder(ws: Path) -> None:
+    import os
+
+    assert go(ws, ScriptedProvider([say("one")])) == EXIT_OK
+    assert not (Path(os.environ["XDG_DATA_HOME"]) / "agent" / "run").exists()
+
+
+def test_resume_of_a_session_open_in_another_process_exits_2(ws: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    go(ws, ScriptedProvider([say("one")]), prompt="first")
+    (info,) = SessionStore(_sessions(), ws.resolve()).list()
+    capsys.readouterr()
+    provider = ScriptedProvider([say("x")])
+
+    with session_held_elsewhere(info.path.parent, info.id):
+        code = go(ws, provider, start=StartChoice("resume", info.id[:8]))
+
+    assert code == EXIT_USAGE and provider.requests == []
+    assert f"session {info.id} is open in another agent process" in capsys.readouterr().err
 
 
 class _Closed:

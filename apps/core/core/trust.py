@@ -24,9 +24,17 @@ _SPACES = re.compile(r" {2,}")
 
 @dataclass(frozen=True)
 class TrustAsk:
+    """What a trust prompt shows, top to bottom: `title`, the `header` lines, the items (`lines`), the `footer` lines,
+    then the two choices (`decline` first: a stray Enter must never trust). All of it escaped and ready to show."""
+
     kind: TrustKind
     lines: list[str]  # one per item, escaped and ready to show
-    note: str | None = None
+    note: str | None = None  # the global prompt: when and which files the marker names (also the header's first line)
+    title: str = ""
+    header: list[str] = field(default_factory=list)
+    footer: list[str] = field(default_factory=list)
+    decline: str = ""
+    accept: str = ""
 
 
 @dataclass
@@ -97,14 +105,52 @@ def trust_lines(
     deny: Sequence[Rule] = (),
     held: HeldGlobal | None = None,
 ) -> TrustAsk:
-    """What the prompt of `kind` lists, in the order the screens show it."""
+    """What the prompt of `kind` lists, in the order the screens show it, with its title, texts and choices."""
     if kind == "mcp_trust":
-        return TrustAsk(kind, [mcp_line(server) for server in servers])
+        return TrustAsk(
+            kind,
+            [mcp_line(server) for server in servers],
+            header=[".agent/mcp.json in this folder wants to start these MCP servers on your machine:"],
+            footer=["Files these commands run (scripts, packages) are not checked. Tab scrolls the list."],
+            decline="Don't trust (keep them stopped)",
+            accept="Trust and start them",
+        )
     lines = [f"allow {visible(rule.text)}" for rule in sort_rules(rules)]
     lines += [hook_line(hook) for hook in hooks]
     if kind == "permission_trust":
-        return TrustAsk(kind, lines)
+        parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook")) if items]
+        header, footer = [], []
+        if rules:
+            header.append(".agent/settings.json in this folder wants to allow these calls without asking:")
+            footer.append("Matching calls will run without asking you. Tab scrolls the list.")
+        if hooks:
+            header.append(".agent/settings.json in this folder wants to run these commands at these events:")
+            footer.append("Hooks run in this folder like bash, and can refuse your tool calls. Tab scrolls the list.")
+        what = " and ".join(name for name, items in (("rules", rules), ("hooks", hooks)) if items)
+        return TrustAsk(
+            kind,
+            lines,
+            title=f"Trust this project's settings? ({', '.join(parts)})",
+            header=header,
+            footer=footer,
+            decline="Don't trust (keep them off)",
+            accept=f"Trust these {what}",
+        )
     held = held if held is not None else HeldGlobal()
+    parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook"), (servers, "MCP server")) if items]
+    parts += [_count(len(names), f"global {label}") for label, names in held.kinds()]
+    if held.keep_env:
+        parts.append(_count(len(held.keep_env), "keepEnv name"))
+    note = marker_text(marker)
+    header = [
+        note,
+        "Until you trust it, these stay off (the files may hold what the command added):"
+        if parts
+        else "It holds no allow rules, hooks or MCP servers now.",
+    ]
+    footer = ["Deny rules and protected paths apply either way. Tab scrolls the list."]
+    if held.any:
+        footer.append(f"Trust turns the allow rules, hooks and MCP servers on now; {NEXT_LAUNCH}.")
     for server in servers:
         env = f" {env_note(server)}" if server.env else ""
         lines.append(f"mcp {visible(server.name)}  {visible(command_line(server))}{env}")
@@ -112,7 +158,20 @@ def trust_lines(
     for label, names in held.kinds():
         lines += [f"{label} {visible(name)}" for name in names]
     lines += [f"deny rule {visible(rule.text)} (applies either way)" for rule in deny]
-    return TrustAsk(kind, lines, marker_text(marker))
+    return TrustAsk(
+        kind,
+        lines,
+        note,
+        title="Trust the global config again?" + (f" ({', '.join(parts)})" if parts else ""),
+        header=header,
+        footer=footer,
+        decline="Don't trust (keep them off; the next launch asks again)",
+        accept="Trust the global config",
+    )
+
+
+def _count(n: int, what: str) -> str:
+    return f"{n} {what}{'s' if n != 1 else ''}"
 
 
 def pending_trust(

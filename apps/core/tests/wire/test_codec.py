@@ -2,11 +2,15 @@ import json
 
 import pytest
 from core.engine import events as ev
+from core.engine.configguard import NEXT_LAUNCH, HeldGlobal
+from core.engine.permissions.rules import parse_rule
 from core.engine.provider.base import Image
 from core.engine.todo import TodoItem
 from core.engine.tools.base import Preview, ToolResult
+from core.host import events as hev
+from core.trust import trust_lines
 from core.wire import models as wm
-from core.wire.codec import WireError, from_wire, to_wire, validate_answer
+from core.wire.codec import WireError, from_wire, to_wire, trust_from_wire, trust_to_wire, validate_answer
 
 
 def same(text: str) -> str:
@@ -103,6 +107,58 @@ def test_a_failing_redactor_is_a_wire_error_without_the_message() -> None:
     with pytest.raises(WireError, match="redaction failed") as info:
         to_wire(ev.Notice("info", "x"), session_id=None, seq=1, redact=boom)
     assert "secret-detail" not in str(info.value)
+
+
+HOST_EVENTS: list[object] = [
+    hev.ProviderState("Ollama is down"),
+    hev.ProviderState(None),
+    hev.UserEntry("hi", "/x (global)", "A"),
+    hev.Delivering(),
+    hev.JobEventsDone(),
+    hev.EntryEnd(True),
+    hev.TurnOutcome(
+        "turn",
+        "interrupted",
+        restore_text="x",
+        queue_restore="q",
+        turn=3,
+        init_check=("info", "/init done"),
+        ack=2,
+        client="A",
+        interrupted_by="B",
+        restores=(("A", "x"), ("B", "q")),
+    ),
+]
+
+
+@pytest.mark.parametrize("event", HOST_EVENTS, ids=lambda e: type(e).__name__)
+def test_every_host_event_round_trips(event: object) -> None:
+    data = to_wire(event, session_id="s1", seq=2, redact=same)  # ty: ignore[invalid-argument-type]
+    assert from_wire(json.loads(json.dumps(data))) == event
+
+
+def test_a_trust_ask_round_trips_with_its_texts() -> None:
+    ask = trust_lines("permission_trust", rules=[parse_rule("bash(ls*)")])
+    assert ask.title and ask.header and ask.footer and ask.decline and ask.accept
+    assert trust_from_wire(trust_to_wire(ask)) == ask
+
+
+def test_the_global_ask_carries_the_empty_and_next_launch_texts() -> None:
+    held = HeldGlobal(commands=("c",))
+    empty = trust_lines("global_trust", held=HeldGlobal())
+    full = trust_lines("global_trust", held=held)
+    assert "It holds no allow rules, hooks or MCP servers now." in trust_to_wire(empty).header
+    assert any(NEXT_LAUNCH in line for line in trust_to_wire(full).footer)
+
+
+def test_a_withdrawn_ask_has_no_decision() -> None:
+    resolved = wm.AskResolved(ask_id="a1", by="", decision=None)
+    assert from_wire(resolved.model_dump(mode="json")) == resolved
+
+
+def test_a_workflow_event_has_no_wire_form() -> None:
+    with pytest.raises(WireError):
+        to_wire(ev.WorkflowLine("info", "x"), session_id=None, seq=1, redact=same)
 
 
 def _trust(kind: str = "mcp_trust") -> wm.Ask:

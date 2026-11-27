@@ -48,6 +48,7 @@ class SessionInfo:
     created_at: datetime
     updated_at: datetime  # file mtime (about the last record), timezone-aware
     message_count: int  # user + assistant message records
+    open_elsewhere: bool = False  # another agent process has it open (its session lock is held)
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,8 @@ class SessionStore:
         return header, data, mtime
 
     def _info(self, path: Path, header: SessionHeader, data: bytes, mtime: float) -> SessionInfo:
+        from core.engine.session.lock import SessionLock  # the lock module builds on this one's SessionError
+
         complete = data[: data.rfind(b"\n") + 1]  # a cut last line is not a record yet
         created_at = _parse_time(header.created_at)
         return SessionInfo(
@@ -174,6 +177,7 @@ class SessionStore:
             created_at=created_at,
             updated_at=_updated_at(mtime, created_at),
             message_count=sum(complete.count(mark) for mark in _COUNTED_MARKS),
+            open_elsewhere=SessionLock.held_elsewhere(path.parent, path.stem),
         )
 
     def _replay(self, info: SessionInfo, data: bytes, tracks_usage: bool) -> LoadedSession:

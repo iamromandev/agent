@@ -11,6 +11,7 @@ class Queued:
     typed: str  # what the user typed: the message, or "/name args"
     prompt: str  # what is sent: the message itself, or the command's expanded prompt
     label: str | None  # "/name (source)" for a custom command, else None
+    client: str = "local"  # the client that sent it: a restore gives its text back to that client only
 
 
 @dataclass(frozen=True)
@@ -18,6 +19,7 @@ class Merged:
     prompt: str  # the entries' prompts joined by a blank line
     draft: str  # the entries' typed text joined by newlines (what /undo and a restore give back)
     label: str | None  # only when there is exactly one entry and it has one
+    parts: tuple[tuple[str, str], ...] = ()  # (client, typed text) per entry, in order
 
 
 class MessageQueue:
@@ -42,4 +44,9 @@ class MessageQueue:
 
 def merge(entries: Sequence[Queued]) -> Merged:
     label = entries[0].label if len(entries) == 1 else None
-    return Merged("\n\n".join(e.prompt for e in entries), "\n".join(e.typed for e in entries), label)
+    return Merged(
+        "\n\n".join(e.prompt for e in entries),
+        "\n".join(e.typed for e in entries),
+        label,
+        tuple((e.client, e.typed) for e in entries),
+    )

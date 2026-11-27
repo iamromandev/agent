@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any, get_args
+from typing import Any, cast, get_args
 
 from pydantic import TypeAdapter, ValidationError
 
@@ -11,7 +11,12 @@ from core.engine import events as ev
 from core.engine.approval import Choice
 from core.engine.todo import TodoItem
 from core.engine.tools.base import Preview, ToolResult
+from core.host import events as hev
+from core.trust import TrustAsk
 from core.wire import models as wm
+
+# What crosses the wire as an event: the engine's events and the host's turn steps.
+WireEvent = ev.AgentEvent | hev.ProviderState | hev.UserEntry | hev.Delivering | hev.JobEventsDone | hev.EntryEnd | hev.TurnOutcome
 
 _ADAPTER: TypeAdapter[Any] = TypeAdapter(wm.WireMessage)
 _KNOWN: frozenset[str] = frozenset(
@@ -39,10 +44,41 @@ def _preview(preview: Preview | None, redact: Callable[[str], str]) -> wm.Previe
     return wm.PreviewModel(kind=preview.kind, title=redact(preview.title), body=redact(preview.body))
 
 
-def _build(event: ev.AgentEvent, head: dict[str, Any], redact: Callable[[str], str]) -> wm.Message:
+def _build(event: WireEvent, head: dict[str, Any], redact: Callable[[str], str]) -> wm.Message:
     match event:
+        case hev.ProviderState():
+            return wm.ProviderState(**head, problem=None if event.problem is None else redact(event.problem))
+        case hev.UserEntry():
+            label = None if event.label is None else redact(event.label)
+            return wm.UserEntry(**head, text=redact(event.text), label=label, client=event.client)
+        case hev.Delivering():
+            return wm.Delivering(**head)
+        case hev.JobEventsDone():
+            return wm.JobEventsDone(**head)
+        case hev.EntryEnd():
+            return wm.EntryEnd(**head, discard=event.discard)
+        case hev.TurnOutcome():
+            check = event.init_check
+            return wm.TurnOutcome(
+                **head,
+                kind=event.kind,
+                status=event.status,
+                continued=event.continued,
+                # the user's own draft, given back exactly (see the model)
+                restore_text=event.restore_text,
+                queue_restore=event.queue_restore,
+                delivered=event.delivered,
+                turn=event.turn,
+                init_check=None if check is None else wm.InitCheck(level=check[0], text=redact(check[1])),
+                ack=event.ack,
+                client=event.client,
+                interrupted_by=event.interrupted_by,
+                restores=[wm.Restore(client=client, text=text) for client, text in event.restores],
+            )
         case ev.AssistantText():
-            return wm.AssistantText(**head, delta=event.delta)
+            # Each delta on its own: a secret the model writes in one piece is caught, one split across two deltas is
+            # not (the same limit as a secret split across two tool results).
+            return wm.AssistantText(**head, delta=redact(event.delta))
         case ev.ToolStarted():
             args = _redact_value(dict(event.args), redact)
             assert isinstance(args, dict)
@@ -93,8 +129,9 @@ def _build(event: ev.AgentEvent, head: dict[str, Any], redact: Callable[[str], s
             raise WireError(f"{type(event).__name__} is not sent on the wire")
 
 
-def to_wire(event: ev.AgentEvent, *, session_id: str | None, seq: int, redact: Callable[[str], str]) -> dict[str, Any]:
-    """The wire dict of an engine event. Images become metadata only; free text goes through `redact`.
+def to_wire(event: WireEvent, *, session_id: str | None, seq: int, redact: Callable[[str], str]) -> dict[str, Any]:
+    """The wire dict of an engine or host event. Images become metadata only; free text goes through `redact`. An
+    event with no wire form (the workflow events, which only the local app draws) is `WireError`.
 
     `redact` is `Callable[[str], str]`. The engine's `Redactor.redact` returns `(text, count)`, so the caller adapts
     it (e.g. `lambda t: redactor.redact(t)[0]`). If it raises, the result is `WireError("redaction failed")`:
@@ -111,8 +148,34 @@ def to_wire(event: ev.AgentEvent, *, session_id: str | None, seq: int, redact: C
     return _build(event, head, safe).model_dump(mode="json")
 
 
-def _event(message: wm.Message) -> ev.AgentEvent:
+def _event(message: wm.Message) -> WireEvent:
     match message:
+        case wm.ProviderState():
+            return hev.ProviderState(message.problem)
+        case wm.UserEntry():
+            return hev.UserEntry(message.text, message.label, message.client)
+        case wm.Delivering():
+            return hev.Delivering()
+        case wm.JobEventsDone():
+            return hev.JobEventsDone()
+        case wm.EntryEnd():
+            return hev.EntryEnd(message.discard)
+        case wm.TurnOutcome():
+            check = message.init_check
+            return hev.TurnOutcome(
+                message.kind,
+                message.status,
+                continued=message.continued,
+                restore_text=message.restore_text,
+                queue_restore=message.queue_restore,
+                delivered=message.delivered,
+                turn=message.turn,
+                init_check=None if check is None else (check.level, check.text),
+                ack=message.ack,
+                client=message.client,
+                interrupted_by=message.interrupted_by,
+                restores=tuple((r.client, r.text) for r in message.restores),
+            )
         case wm.AssistantText():
             return ev.AssistantText(message.delta)
         case wm.ToolStarted():
@@ -141,7 +204,8 @@ def _event(message: wm.Message) -> ev.AgentEvent:
         case wm.TodosChanged():
             return ev.TodosChanged(tuple(TodoItem(i.content, i.status) for i in message.items))
         case wm.TaskProgress():
-            return ev.TaskProgress(message.call_id, _event(message.event))
+            # a nested event is one of the engine's (the model's `WireEvent` has no host arms)
+            return ev.TaskProgress(message.call_id, cast(ev.AgentEvent, _event(message.event)))
         case wm.ToolProgress():
             return ev.ToolProgress(message.text)
         case wm.Phase():
@@ -149,7 +213,34 @@ def _event(message: wm.Message) -> ev.AgentEvent:
     raise WireError(f"{message.type} is not an engine event")
 
 
-def from_wire(data: dict[str, Any]) -> ev.AgentEvent | wm.Message:
+def trust_to_wire(ask: TrustAsk) -> wm.TrustAsk:
+    """A trust prompt as the wire carries it (its texts are built and escaped by `core.trust`, so nothing is added)."""
+    return wm.TrustAsk(
+        kind=ask.kind,
+        lines=list(ask.lines),
+        note=ask.note,
+        title=ask.title,
+        header=list(ask.header),
+        footer=list(ask.footer),
+        decline=ask.decline,
+        accept=ask.accept,
+    )
+
+
+def trust_from_wire(ask: wm.TrustAsk) -> TrustAsk:
+    return TrustAsk(
+        ask.kind,
+        list(ask.lines),
+        ask.note,
+        title=ask.title,
+        header=list(ask.header),
+        footer=list(ask.footer),
+        decline=ask.decline,
+        accept=ask.accept,
+    )
+
+
+def from_wire(data: dict[str, Any]) -> WireEvent | wm.Message:
     """An engine event for event messages, the wire model for the rest (snapshot, ask, ...)."""
     if not isinstance(data, dict):
         raise WireError("a wire message must be an object")
@@ -187,4 +278,4 @@ def validate_answer(ask: wm.Ask, answer: wm.Answer) -> None:
         raise WireError("always here is not offered")
 
 
-__all__ = ["WireError", "from_wire", "to_wire", "validate_answer"]
+__all__ = ["WireError", "WireEvent", "from_wire", "to_wire", "trust_from_wire", "trust_to_wire", "validate_answer"]

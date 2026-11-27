@@ -100,3 +100,12 @@ def timezone_of(hours: int):
     from datetime import timezone
 
     return timezone(timedelta(hours=hours))
+
+
+def test_a_session_open_in_another_process_is_marked() -> None:
+    from core.engine.session import SessionInfo
+    from src.tui.screens.sessions import describe
+
+    info = SessionInfo("01X", Path("/s/01X.jsonl"), "hello", NOW, NOW, 2, open_elsewhere=True)
+    assert "(open elsewhere)" in str(describe(info, NOW))
+    assert "(open elsewhere)" not in str(describe(SessionInfo("01X", Path("/s/01X.jsonl"), "hello", NOW, NOW, 2), NOW))

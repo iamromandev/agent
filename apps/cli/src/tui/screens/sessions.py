@@ -42,8 +42,12 @@ def relative(moment: datetime, now: datetime | None = None) -> str:
 
 
 def describe(info: SessionInfo, now: datetime | None = None) -> Text:
-    """One row. A `Text`, never markup: titles come from what the user typed."""
-    return session_row(info.title, relative(info.updated_at, now), info.message_count, TITLE_WIDTH)
+    """One row. A `Text`, never markup: titles come from what the user typed. A session another agent process has
+    open is marked (opening it is refused)."""
+    row = session_row(info.title, relative(info.updated_at, now), info.message_count, TITLE_WIDTH)
+    if info.open_elsewhere:
+        row.append("  (open elsewhere)", "dim")
+    return row
 
 
 class SessionPicker(ModalScreen[str | None]):
