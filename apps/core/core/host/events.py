@@ -5,6 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal
 
+from core.engine.mode import Mode
+from core.host.queue import Queued
+
 JobKind = Literal["turn", "compact", "workflow"]
 
 
@@ -13,6 +16,36 @@ class ProviderState:
     """The provider was asked whether it is ready: `problem` is None when it is (the text is shown as an error)."""
 
     problem: str | None
+
+
+@dataclass(frozen=True)
+class ModelChanged:
+    """The model (and its window) every later request uses changed: in a daemon all sessions share one provider, so a
+    switch in one session is published to every session."""
+
+    model: str
+    window: int
+
+
+@dataclass(frozen=True)
+class QueueChanged:
+    """The messages waiting for the running turn changed (one was queued, or the queue was sent or given back)."""
+
+    entries: tuple[Queued, ...]
+
+
+@dataclass(frozen=True)
+class ModeChanged:
+    """The session's mode changed (from the next model request on); every client of the session shows it."""
+
+    mode: Mode
+
+
+@dataclass(frozen=True)
+class TurnUndone:
+    """`client` undid the session's last turn: every other client drops it from its transcript too."""
+
+    client: str
 
 
 @dataclass(frozen=True)

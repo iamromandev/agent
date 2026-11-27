@@ -49,6 +49,7 @@ class SessionInfo:
     updated_at: datetime  # file mtime (about the last record), timezone-aware
     message_count: int  # user + assistant message records
     open_elsewhere: bool = False  # another agent process has it open (its session lock is held)
+    live: bool = False  # open in the daemon a `--shared` client asked: opening it shares it
 
 
 @dataclass(frozen=True)
@@ -281,12 +282,12 @@ def _remember(tool_meta: dict[str, ToolMeta], message: Message, meta: ToolMeta |
 
 def _items(message: Message, meta: ToolMeta | None) -> builtins.list[TranscriptItem]:
     """The transcript entries for a message: its own, then one notice line per image it carries."""
-    own = _item(message, meta)
+    own = transcript_item(message, meta)
     lines = [TranscriptItem("notice", f"image {escape_display(i.name)} ({describe(i)})") for i in message.images]
     return [own, *lines] if own is not None else lines
 
 
-def _item(message: Message, meta: ToolMeta | None) -> TranscriptItem | None:
+def transcript_item(message: Message, meta: ToolMeta | None) -> TranscriptItem | None:
     """The transcript entry for a message. An assistant turn that only calls tools has none."""
     if message.role == "tool":
         return TranscriptItem("tool", meta.label if meta else message.name or "", meta.summary if meta else "")

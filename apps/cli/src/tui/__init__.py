@@ -10,10 +10,14 @@ from core.runtime import NEW, StartChoice, build_runtime
 __all__ = ["NEW", "StartChoice", "run"]
 
 
-def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> int:
+def run(workspace: Path, start: StartChoice = NEW, model: str | None = None, shared: bool = False) -> int:
     """Open the coding agent for `workspace` (a folder) and block until the user quits; returns the exit code.
 
-    `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key."""
+    `model` (`--model`) is the model for this launch only: it beats `AGENT_MODEL` and the project's `model` key.
+    `shared` (`--shared`): the session lives in the folder's daemon (started when none runs), shared with every other
+    `--shared` client of the folder; plain `agent` never touches the daemon."""
+    if shared:
+        return run_shared(workspace, start, model)
     from core.engine.mentions_index import FileIndex
     from core.host.port import LocalPort
     from core.host.session import SessionHost
@@ -67,4 +71,24 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> 
             # Config watch warnings the quit checks saw after the transcript was gone (already escaped).
             for text in rt.config_guard.undelivered():
                 print(f"warning: {text}", file=sys.stderr)
+    return app.return_code or 0
+
+
+def run_shared(workspace: Path, start: StartChoice = NEW, model: str | None = None) -> int:
+    """`agent --shared`: make sure the folder's daemon runs, then open the app on a `RemotePort` to it. No runtime is
+    built here: terminals, workflows, image tools and pasted images are refused in this mode."""
+    from core.server.paths import RunDirError
+    from core.server.serve import ensure_daemon
+
+    from src.tui.app import AgentApp
+    from src.tui.remote import RemotePort
+
+    ws = workspace.resolve()
+    try:
+        socket = ensure_daemon(ws)
+    except (RunDirError, OSError, TimeoutError) as exc:
+        print(f"agent --shared: {exc}", file=sys.stderr)
+        return 1
+    app = AgentApp(RemotePort(socket, ws), start=start, model=model)
+    app.run()
     return app.return_code or 0

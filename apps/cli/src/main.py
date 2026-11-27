@@ -80,8 +80,13 @@ def root(
         False, "--trust-project", help="With -p: trust the project's settings and MCP file for this run (dangerous)"
     ),
     output: str = typer.Option("text", "--output", case_sensitive=False, help="With -p: text, json or stream-json on stdout"),
+    shared: bool = typer.Option(
+        False, "--shared", help="Open the session in this folder's daemon, shared with other --shared clients (starts it)"
+    ),
 ) -> None:
     """Agent command-line client. Run without a command to open the coding agent."""
+    if ctx.invoked_subcommand is not None and print_ is not None:
+        raise typer.BadParameter(f"-p does not go with {ctx.invoked_subcommand}", param_hint="-p")
     if ctx.invoked_subcommand is None:
         from core.runtime import StartChoice  # UI-free: Textual is not needed for `health`, `--help` or `-p`
 
@@ -101,6 +106,8 @@ def root(
             ):
                 if given:
                     raise typer.BadParameter(f"{flag} needs -p", param_hint=flag)
+        elif shared:
+            raise typer.BadParameter("--shared opens the app: it does not go with -p", param_hint="--shared")
         elif resume == PICK:
             raise typer.BadParameter("give a session id: there is no picker with -p", param_hint="--resume")
         if continue_:
@@ -120,7 +127,7 @@ def root(
             raise typer.Exit(run_headless(Path.cwd(), opts))
         from src.tui import run  # lazy: Textual is not needed for `health` or `--help`
 
-        if code := run(Path.cwd(), start, model=chosen):
+        if code := run(Path.cwd(), start, model=chosen, shared=shared):
             raise typer.Exit(code)  # e.g. 128 + the signal that ended it
 
 
@@ -139,8 +146,14 @@ def serve_command(
 def stop_command() -> None:
     """Stop the shared-session daemon of this folder."""
     import core.server.serve as served
+    from core.server.paths import RunDirError
 
-    if not served.stop(Path.cwd()):
+    try:
+        running = served.stop(Path.cwd())
+    except RunDirError as exc:
+        typer.echo(f"agent stop: {exc}", err=True)
+        raise typer.Exit(1) from None
+    if not running:
         typer.echo("no agent daemon for this folder")
 
 

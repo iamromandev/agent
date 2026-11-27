@@ -11,8 +11,11 @@ import socket
 import stat
 from pathlib import Path
 
+from core.engine.session.lock import same_file
+
 FILE_MODE = 0o600
 BACKLOG = 64
+ATTEMPTS = 5  # a pid file removed under us between open and flock is retried this often
 
 
 class AlreadyRunning(Exception):
@@ -39,23 +42,35 @@ class PidLock:
 
     @classmethod
     def acquire(cls, path: Path) -> PidLock:
-        """Lock `path` and write our pid into it. `AlreadyRunning` (with the holder's pid) when another daemon has it."""
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, FILE_MODE)
-        try:
-            if not stat.S_ISREG(os.fstat(fd).st_mode):
-                raise OSError(errno.EINVAL, f"{path} is not a regular file")
+        """Lock `path` and write our pid into it. `AlreadyRunning` (with the holder's pid) when another daemon has it.
+        The last holder removes the file while it still holds it, so after locking the path must still name the file
+        that was locked; if not, the new file is locked instead."""
+        for _ in range(ATTEMPTS):
+            fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, FILE_MODE)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError:
-                raise AlreadyRunning(_read_pid(fd)) from None
-            os.fchmod(fd, FILE_MODE)
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, f"{os.getpid()}\n".encode())
-        except BaseException:
-            os.close(fd)
-            raise
-        return cls(path, fd)
+                if not stat.S_ISREG(os.fstat(fd).st_mode):
+                    raise OSError(errno.EINVAL, f"{path} is not a regular file")
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except BlockingIOError:
+                    raise AlreadyRunning(_read_pid(fd)) from None
+                if not same_file(fd, path):
+                    os.close(fd)  # removed by its last holder meanwhile: lock the new one
+                    continue
+                cls._write_pid(fd)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.close(fd)
+                raise
+            return cls(path, fd)
+        raise OSError(errno.EAGAIN, f"could not lock {path}")
+
+    @staticmethod
+    def _write_pid(fd: int) -> None:
+        os.fchmod(fd, FILE_MODE)
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, f"{os.getpid()}\n".encode())
 
     def release(self) -> None:
         """Remove the file and unlock. Never raises."""

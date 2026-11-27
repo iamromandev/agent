@@ -101,6 +101,23 @@ async def test_secrets_never_cross_the_wire(serve, monkeypatch) -> None:
     assert "[redacted:github-token]" in stream.raw.decode()
 
 
+def _secret_hook(ws: Path) -> None:
+    (ws / ".agent").mkdir()
+    settings = {"hooks": {"PreToolUse": [{"command": f"echo {SECRET}"}]}, "permissions": {"allow": [f"bash(echo {SECRET})"]}}
+    (ws / ".agent" / "settings.json").write_text(json.dumps(settings))
+
+
+async def test_the_info_texts_are_redacted(serve) -> None:
+    served = await serve(setup=_secret_hook)
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    for name in ("hooks", "permissions", "mcp", "guardrails", "skills", "agents", "usage"):
+        got = await client.get(f"/v1/sessions/{session_id}/info/{name}")
+        assert got.status_code == 200 and SECRET not in got.text, name
+    hooks = (await client.get(f"/v1/sessions/{session_id}/info/hooks")).json()["lines"][0]["text"]
+    assert "[redacted:github-token]" in hooks
+
+
 async def test_an_event_with_no_wire_form_is_skipped_and_the_stream_goes_on(serve) -> None:
     served = await serve()
     client = served.client()
@@ -231,3 +248,194 @@ async def test_a_gated_turn_is_interrupted_by_any_client(serve) -> None:
     (outcome,) = stream.of("turn_outcome")
     assert outcome["status"] == "interrupted" and outcome["interrupted_by"] == "B"
     assert outcome["restores"] == [{"client": "B", "text": "later"}]
+
+
+async def test_a_session_that_cannot_be_read_is_500_with_its_reason_not_locked(serve, monkeypatch) -> None:
+    from core.engine.session import SessionError
+
+    served = await serve()
+    folder = served.daemon._sessions
+    recorder = FileRecorder(folder, served.workspace)
+    recorder.message(Message("user", "x"), None)
+    session_id = recorder.session_id
+    recorder.close()
+
+    def broken(_: str) -> None:
+        raise SessionError("Session X has an unreadable header")
+
+    monkeypatch.setattr(served.daemon.rt.store, "load", broken)
+    refused = await served.client().post("/v1/sessions", json={"resume": session_id})
+    assert refused.status_code == 500 and "unreadable header" in refused.json()["error"]
+    assert served.daemon.hosts == {} and not SessionLock.held_by_us(folder, session_id)
+
+
+async def test_an_unknown_session_is_404(serve) -> None:
+    served = await serve()
+    missing = await served.client().post("/v1/sessions", json={"resume": "01ZZZZZZZZZZZZ"})
+    assert missing.status_code == 404
+
+
+async def test_a_session_goes_with_its_last_client_and_so_does_its_diff_and_lock(serve) -> None:
+    served = await serve([REPLY])
+    served.daemon.drop_grace = 0.05
+    a = served.client("A")
+    empty = (await served.open(a))["session_id"]
+    used = (await served.open(a))["session_id"]
+    streams = [served.stream(a, empty, after=0), served.stream(a, used, after=0)]
+    await a.post(f"/v1/sessions/{used}/messages", json={"text": "hi"})
+    await streams[1].until(lambda s: "turn_outcome" in s.types())
+    await a.get(f"/v1/sessions/{used}/diff")
+    for stream in streams:
+        await stream.close()
+
+    await wait_until(lambda: empty not in served.daemon.hosts and used not in served.daemon.hosts)
+    await wait_until(lambda: served.daemon.diffs == {})
+    await wait_until(lambda: not SessionLock.held_by_us(served.daemon._sessions, used))  # plain `agent` may open it
+    with session_held_elsewhere(served.daemon._sessions, used):  # another process (plain `agent`) takes it
+        pass
+    again = await served.open(served.client("B"), resume=used)  # and so may the daemon again, from its file
+    assert again["snapshot"]["records"]
+
+
+async def test_a_session_is_kept_a_moment_for_a_client_whose_stream_is_not_up_yet(serve) -> None:
+    served = await serve()
+    served.daemon.drop_grace = 0.5
+    a, b = served.client("A"), served.client("B")
+    session_id = (await served.open(a))["session_id"]
+    first = served.stream(a, session_id, after=0)
+    await wait_until(lambda: served.daemon.connections.get((session_id, "A")) == 1)
+    await first.close()
+    await b.post("/v1/sessions", json={"resume": session_id})  # B joins before the grace is over
+    second = served.stream(b, session_id, after=0)
+    await wait_until(lambda: served.daemon.connections.get((session_id, "B")) == 1)
+    await asyncio.sleep(0.7)
+    assert session_id in served.daemon.hosts and not second.ended.is_set()
+
+
+async def test_a_failing_snapshot_leaks_no_subscriber_or_connection(serve, monkeypatch) -> None:
+    import core.server.app as app_module
+
+    served = await serve()
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    host = served.daemon.host(session_id)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("snapshot failed")
+
+    monkeypatch.setattr(app_module, "snapshot", broken)
+    stream = served.stream(client, session_id)  # no `after`: it starts with a snapshot
+    await asyncio.wait_for(stream.ended.wait(), 5)
+    assert host.bus.subscribers == [] and served.daemon.connections == {}
+
+
+async def test_an_outcome_that_could_not_be_sent_is_not_acknowledged(serve, monkeypatch) -> None:
+    import core.server.app as app_module
+    from core.host.events import TurnOutcome
+
+    real = app_module.encode
+    monkeypatch.setattr(app_module, "encode", lambda item, **kw: None if isinstance(item, TurnOutcome) else real(item, **kw))
+    served = await serve([REPLY])
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    host = served.daemon.host(session_id)
+    stream = served.stream(client, session_id, after=0)
+    await client.post(f"/v1/sessions/{session_id}/messages", json={"text": "hi"})
+    await stream.until(lambda s: "turn_ended" in s.types())
+    await wait_until(lambda: host._ending != 0)
+    await asyncio.sleep(0.2)  # the stream has handled the outcome by now
+    assert host._ending != 0  # still held: only the 2 s timeout releases it
+
+
+async def test_a_model_switch_in_one_session_is_told_to_every_session(serve) -> None:
+    served = await serve()
+    a, b = served.client("A"), served.client("B")
+    one = (await served.open(a))["session_id"]
+    two = (await served.open(b))["session_id"]
+    stream_one = served.stream(a, one, after=0)
+    stream_two = served.stream(b, two, after=0)
+    await stream_one.until(lambda s: True)
+
+    switched = (await b.post(f"/v1/sessions/{two}/model", json={"name": "other:7b"})).json()
+    assert switched["model"] == "other:7b"
+    await stream_one.until(lambda s: bool(s.of("model_changed")))
+    assert stream_one.of("model_changed")[0]["model"] == "other:7b"
+    assert any(m["text"] == "model switched to other:7b by another session" for m in stream_one.of("notice"))
+    await stream_two.until(lambda s: bool(s.of("model_changed")))
+    assert not any("by another session" in m["text"] for m in stream_two.of("notice"))  # its own notices say it
+    again = await served.open(served.client("C"), resume=None)
+    assert again["snapshot"]["model"] == "other:7b"
+
+
+async def test_the_info_texts_are_the_same_the_app_shows_and_help_is_still_the_clients(serve) -> None:
+    from core import info
+
+    served = await serve()
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    rt = served.daemon.rt
+    expected = {
+        "skills": info.skills_summary(rt.skills),
+        "agents": info.agents_summary(rt.agents),
+        "permissions": info.permissions_summary(rt.permissions.rules),
+        "hooks": info.hooks_summary(rt.hooks),
+        "mcp": info.mcp_summary(rt.mcp),
+        "guardrails": info.guardrails_summary(rt.guard, rt.config_guard),
+    }
+    for name, text in expected.items():
+        got = await client.get(f"/v1/sessions/{session_id}/info/{name}")
+        assert got.status_code == 200 and got.json() == {"lines": [{"level": "info", "text": text}]}, name
+    assert "commit (builtin)" in expected["skills"]
+    assert (await client.get(f"/v1/sessions/{session_id}/info/help")).status_code == 501
+
+
+async def test_an_undo_reaches_every_client_of_the_session(serve) -> None:
+    served = await serve([REPLY])
+    a, b = served.client("A"), served.client("B")
+    session_id = (await served.open(a))["session_id"]
+    stream_a, stream_b = served.stream(a, session_id, after=0), served.stream(b, session_id, after=0)
+    await a.post(f"/v1/sessions/{session_id}/messages", json={"text": "hi"})
+    await stream_b.until(lambda s: "turn_outcome" in s.types())
+    host = served.daemon.host(session_id)
+    await wait_until(lambda: not host.turn_active)
+    undone = (await a.post(f"/v1/sessions/{session_id}/undo")).json()
+    assert undone["prompt"] == "hi"
+    for stream in (stream_a, stream_b):
+        await stream.until(lambda s: bool(s.of("turn_undone")))
+        assert stream.of("turn_undone")[0]["client"] == "A"
+        await stream.until(lambda s: bool(s.of("todos_changed")))
+
+
+async def test_the_file_index_is_rebuilt_after_a_turn(serve) -> None:
+    served = await serve([REPLY])
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    await wait_until(lambda: served.daemon.file_index.ready)
+    (served.workspace / "fresh_file.txt").write_text("x")
+    stream = served.stream(client, session_id, after=0)
+    await client.post(f"/v1/sessions/{session_id}/messages", json={"text": "hi"})
+    await stream.until(lambda s: "turn_outcome" in s.types())
+
+    async def found() -> bool:
+        got = (await client.get("/v1/files/suggest", params={"token": "fresh"})).json()
+        return any(s["path"] == "fresh_file.txt" for s in got)
+
+    for _ in range(100):
+        if await found():
+            break
+        await asyncio.sleep(0.05)
+    assert await found()
+
+
+async def test_diff_is_refused_during_a_turn_and_a_file_is_found_by_its_index(serve) -> None:
+    gate = Gate()
+    served = await serve([[gate, *REPLY]])
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    await client.post(f"/v1/sessions/{session_id}/messages", json={"text": "slow"})
+    await asyncio.wait_for(gate.reached.wait(), 5)
+    busy = await client.get(f"/v1/sessions/{session_id}/diff")
+    assert busy.status_code == 409 and "busy" in busy.json()["error"]
+    gate.release.set()
+    missing = await client.get(f"/v1/sessions/{session_id}/diff/file", params={"index": "0"})
+    assert missing.status_code in (404, 409)

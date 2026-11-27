@@ -14,7 +14,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Literal
 
-from core.engine import Agent, AgentBusy, AgentEvent, EventSink, Notice, TurnEnded
+from core.engine import Agent, AgentBusy, AgentEvent, EventSink, Notice, TodosChanged, TurnEnded
 from core.engine.approval import Approver
 from core.engine.compaction import CHARS_PER_TOKEN
 from core.engine.facts import FACTS_SHARE, init_check, render_facts, scan
@@ -52,10 +52,23 @@ from core.engine.text import escape, escape_display
 from core.engine.turn_diff import DiffItem, FileDiff, TurnDiff
 from core.host.asks import AskBroker, HostApprover
 from core.host.bus import EventBus
-from core.host.events import Delivering, EntryEnd, JobEventsDone, JobKind, ProviderState, TurnOutcome, UserEntry
+from core.host.events import (
+    Delivering,
+    EntryEnd,
+    JobEventsDone,
+    JobKind,
+    ModeChanged,
+    ProviderState,
+    QueueChanged,
+    TurnOutcome,
+    TurnUndone,
+    UserEntry,
+)
 from core.host.queue import MessageQueue, Queued, merge
 
 WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
+# The daemon runs one job that runs tools at a time across its sessions (they share one checkpoint store).
+OTHER_SESSION = "busy — another session is running a turn; try again when it ends"
 OUTCOME_ACK_TIMEOUT = 2.0  # seconds the claim waits for a client to apply a turn's outcome (one that never does)
 LOCAL_CLIENT = "local"  # the client id of the in-process TUI (a remote one sends its own in `X-Agent-Client`)
 HOST = "host"  # the owner of a switch claim the host takes for itself (closing a replaced recorder)
@@ -105,6 +118,7 @@ class ModelSwitch:
 class OpenedSession:
     loaded: LoadedSession | None  # None: not opened (the current session stays)
     notices: list[tuple[Level, str]]
+    error: Exception | None = None  # why it was not opened (an `AgentBusy` when a turn or switch was in the way)
 
 
 class SessionHost:
@@ -151,6 +165,9 @@ class SessionHost:
         self._attachments: dict[str, Attachments] = {}  # where each client's pasted images come from
         # Whether a client is attached now (the daemon: it has an event stream open); None: every client is (local).
         self.connected: Callable[[str], bool] | None = None
+        # Whether another session of the same daemon holds a job (a turn, a compaction, an undo); None: no other.
+        self.elsewhere: Callable[[], bool] | None = None
+        self.on_job_end: Callable[[], None] | None = None  # every turn, compaction or workflow end (the daemon reindexes)
         self._draft: str | None = None  # the message until the turn really starts sending it
         self._draft_parts: tuple[tuple[str, str], ...] = ()  # (client, typed text) of that message
         self._origin = LOCAL_CLIENT  # the client that sent the running turn
@@ -220,9 +237,16 @@ class SessionHost:
         hint = "a session is loading" if self.switching and not self.turn_active else f"press Esc to interrupt, then {command}"
         return f"busy — {hint}"
 
+    def other_session_busy(self) -> bool:
+        """Another session of this daemon runs a job now: this one must not start one (see `OTHER_SESSION`)."""
+        return self.elsewhere is not None and self.elsewhere()
+
     def refusal(self, command: str) -> str | None:
-        """The busy line for `command` while a turn runs or a session loads, else None."""
-        return self.busy_text(command) if self.turn_active or self.switching else None
+        """The busy line for `command` while a turn runs or a session loads (here, or a job in another session of the
+        daemon), else None."""
+        if self.turn_active or self.switching:
+            return self.busy_text(command)
+        return OTHER_SESSION if self.other_session_busy() else None
 
     def _publish(self, event: object) -> None:
         self.bus.publish(event)
@@ -255,6 +279,7 @@ class SessionHost:
             if not text.strip():
                 return SendResult("ignored")
             self.queue.add(Queued(typed, text, label, client))
+            self._publish(QueueChanged(self.queue.entries))
             return SendResult("queued")
         elif (reason := self.message_refusal()) is not None:
             return SendResult("refused", reason)
@@ -264,7 +289,7 @@ class SessionHost:
     def message_refusal(self) -> str | None:
         """Why a message cannot start now (and is not queued either), or None."""
         if not (self.turn_active or self.switching):
-            return None
+            return OTHER_SESSION if self.other_session_busy() else None
         if self.workflow_active:
             return WORKFLOW_RUNNING
         return f"busy — {'press Esc to interrupt' if self.turn_active else 'a session is loading'}"
@@ -462,7 +487,7 @@ class SessionHost:
         self.interrupted = False
         self.interrupted_by = ""
         self.job_status = None
-        queued = self.queue.take()  # sent after the outcome was decided, while the claim was still held
+        queued = self._take_queue()  # sent after the outcome was decided, while the claim was still held
         if not queued or self.closing:
             return False
         merged = merge(queued)
@@ -473,6 +498,13 @@ class SessionHost:
             return False
         self._begin(merged.prompt, merged.draft, label=merged.label, parts=merged.parts)
         return True
+
+    def _take_queue(self) -> tuple[Queued, ...]:
+        """Everything queued, taken out (sent or given back); the clients are told when there was anything."""
+        queued = self.queue.take()
+        if queued:
+            self._publish(QueueChanged(()))
+        return queued
 
     def _hold_until_applied(self, client: str) -> int:
         """Keep the claim until `client` applies the outcome about to be published, at most OUTCOME_ACK_TIMEOUT (a
@@ -488,6 +520,9 @@ class SessionHost:
     def _end_turn(self, *, delivered: bool = False, turn: int = 0, init_notice: tuple[str, str] | None = None) -> None:
         """Every job ends here: a `done` end sends the queue as one turn, any other gives it back to the client (and
         the claim stays until the client applied that, see `outcome_applied`)."""
+        if self.on_job_end is not None:
+            with contextlib.suppress(Exception):  # its owner's bug must not keep the turn from ending
+                self.on_job_end()
         kind = self._job
         status = self.job_status
         origin = self._origin if kind == "turn" else LOCAL_CLIENT  # a compaction and a workflow are the local client's
@@ -496,7 +531,7 @@ class SessionHost:
         self.job_status = None
         self.interrupted = False
         self.interrupted_by = ""
-        queued = self.queue.take()
+        queued = self._take_queue()
         draft, self._draft = self._draft, None  # set when the turn ended before it sent the message
         parts = self._draft_parts if draft is not None else ()
         self._draft_parts = ()
@@ -573,8 +608,9 @@ class SessionHost:
         block = render_facts(scan(self.workspace), int(FACTS_SHARE * self.provider.context_window) * CHARS_PER_TOKEN)
         return build_init_prompt(self.workspace, (self.workspace / "AGENTS.md").is_file(), parents, facts=block)
 
-    async def undo(self) -> UndoResult:
-        """Undo the last turn, holding the turn claim meanwhile (nothing to interrupt)."""
+    async def undo(self, client: str = LOCAL_CLIENT) -> UndoResult:
+        """Undo the last turn, holding the turn claim meanwhile (nothing to interrupt). The other clients of the session
+        are told (`TurnUndone`, then the todo list as it is now) so they drop the turn too."""
         if (reason := self.refusal("/undo")) is not None:
             return UndoResult(None, [Notice("warn", reason)])
         self.turn_active = True
@@ -590,10 +626,14 @@ class SessionHost:
         finally:
             self.turn_active = False
             self.undoing = False
+        if prompt is not None:
+            self._publish(TurnUndone(client))
+            self._publish(TodosChanged(self.agent.todos))
         return UndoResult(prompt, events)
 
     def set_mode(self, mode: Any) -> None:
         self.agent.set_mode(mode)
+        self._publish(ModeChanged(self.agent.mode))
 
     # sessions
 
@@ -681,12 +721,12 @@ class SessionHost:
             return OpenedSession(None, [])
         with self._switch_held(client, "/sessions") as refused:
             if refused is not None:
-                return OpenedSession(None, [("warn", refused)])
+                return OpenedSession(None, [("warn", refused)], AgentBusy())
             try:
-                loaded = await asyncio.to_thread(store.load, info.id)
-                recorder = FileRecorder.resume(loaded.info.path, self.workspace)
+                # In a thread: reading the file, and the session lock (which may wait out another process's probe).
+                loaded, recorder = await asyncio.to_thread(self._load_and_lock, store, info.id)
             except (SessionError, SessionWriteError) as exc:  # stay on the session we have
-                return OpenedSession(None, [("error", str(exc))])
+                return OpenedSession(None, [("error", str(exc))], exc)
             try:
                 if self.turn_active:  # a turn started while the file was read
                     raise AgentBusy
@@ -698,11 +738,15 @@ class SessionHost:
                     usage=loaded.usage,
                     unrecorded=loaded.unrecorded,
                 )
-            except AgentBusy:
+            except AgentBusy as exc:
                 close_recorder(recorder)  # releases its session lock: the session stays free
-                return OpenedSession(None, [("warn", self.busy_text("/sessions"))])
+                return OpenedSession(None, [("warn", self.busy_text("/sessions"))], exc)
             await self.close_old(old)
             return OpenedSession(loaded, [])
+
+    def _load_and_lock(self, store: SessionStore, session_id: str) -> tuple[LoadedSession, FileRecorder]:
+        loaded = store.load(session_id)
+        return loaded, FileRecorder.resume(loaded.info.path, self.workspace)
 
     async def list_sessions(self) -> list[SessionInfo]:
         if self.store is None:

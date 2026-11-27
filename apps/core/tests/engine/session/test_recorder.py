@@ -288,3 +288,23 @@ def test_usage_before_any_message_writes_no_file(recorder: FileRecorder, directo
 
     assert recorder.path is None
     assert not directory.exists() or list(directory.iterdir()) == []
+
+
+@pytest.mark.parametrize("code", [errno.ENOLCK, errno.EOPNOTSUPP])
+def test_a_sessions_folder_without_flock_still_saves(
+    monkeypatch: pytest.MonkeyPatch, recorder: FileRecorder, code: int, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A filesystem with no `flock` (some network mounts): the session is saved without a lock, with one warning."""
+    from core.engine.session import lock as lock_module
+    from core.engine.session import recorder as recorder_module
+
+    def no_flock(fd: int, op: int) -> None:
+        raise OSError(code, os.strerror(code))
+
+    monkeypatch.setattr(lock_module.fcntl, "flock", no_flock)
+    monkeypatch.setattr(recorder_module, "_warned_no_lock", False)
+    with caplog.at_level("WARNING", logger="agent.session"):
+        recorder.message(Message("user", "hello"), None)
+        recorder.message(Message("assistant", "hi"), None)
+    assert recorder.path is not None and len(lines(recorder.path)) == 4  # header, title, two messages
+    assert [r.message for r in caplog.records].count(recorder_module.NO_LOCK_WARNING) == 1

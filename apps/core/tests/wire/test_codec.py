@@ -3,11 +3,13 @@ import json
 import pytest
 from core.engine import events as ev
 from core.engine.configguard import NEXT_LAUNCH, HeldGlobal
+from core.engine.mode import Mode
 from core.engine.permissions.rules import parse_rule
 from core.engine.provider.base import Image
 from core.engine.todo import TodoItem
 from core.engine.tools.base import Preview, ToolResult
 from core.host import events as hev
+from core.host.queue import Queued
 from core.trust import trust_lines
 from core.wire import models as wm
 from core.wire.codec import WireError, from_wire, to_wire, trust_from_wire, trust_to_wire, validate_answer
@@ -112,6 +114,10 @@ def test_a_failing_redactor_is_a_wire_error_without_the_message() -> None:
 HOST_EVENTS: list[object] = [
     hev.ProviderState("Ollama is down"),
     hev.ProviderState(None),
+    hev.ModelChanged("other:7b", 8192),
+    hev.QueueChanged((Queued("later", "later", None, "B"),)),
+    hev.ModeChanged(Mode.PLAN),
+    hev.TurnUndone("A"),
     hev.UserEntry("hi", "/x (global)", "A"),
     hev.Delivering(),
     hev.JobEventsDone(),

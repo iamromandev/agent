@@ -312,7 +312,7 @@ async def settled(app: AgentApp) -> None:
     async def quiet() -> None:
         while True:
             await app.workers.wait_for_complete()
-            await app.port.idle()
+            await app._local().idle()
             if all(worker.is_finished for worker in app.workers) and not app.host.busy_tasks():
                 return
 
