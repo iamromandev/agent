@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import shlex
 from collections.abc import Sequence
 from typing import ClassVar
 
 from core.engine.mcp.config import ServerConfig
 from core.engine.text import escape
+from core.trust import command_line, env_note
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -18,11 +18,6 @@ from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
 
-def command_line(server: ServerConfig) -> str:
-    """The full command line as the shell would see it (quoted), so odd arguments are visible."""
-    return shlex.join([escape(server.command), *(escape(arg) for arg in server.args)])
-
-
 def describe(server: ServerConfig) -> Text:
     """One server: its name, the command line, the names of the env vars it sets, and whether it replaces a global
     server. A `Text`, never markup, with every odd character escaped."""
@@ -31,7 +26,7 @@ def describe(server: ServerConfig) -> Text:
     text.append(name, "bold")
     text.append(f"  {command_line(server)}")
     if server.env:
-        text.append(f"  (env: {', '.join(escape(key) for key in server.env)})", "dim")
+        text.append(f"  {env_note(server)}", "dim")
     if server.overrides_global:
         text.append(f"\n  overrides the global '{name}'", "dim")
     return text

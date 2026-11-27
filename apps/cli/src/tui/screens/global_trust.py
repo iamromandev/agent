@@ -6,11 +6,11 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import ClassVar
 
-from core.engine.configguard import MAX_SHOWN, NEXT_LAUNCH, HeldGlobal, MarkerInfo
+from core.engine.configguard import NEXT_LAUNCH, HeldGlobal, MarkerInfo
 from core.engine.hooks.config import HookEntry
 from core.engine.mcp.config import ServerConfig
 from core.engine.permissions.rules import Rule
-from core.engine.text import escape
+from core.trust import marker_text, sort_rules, trust_lines
 from rich.text import Text
 from textual import on
 from textual.app import ComposeResult
@@ -20,25 +20,9 @@ from textual.screen import ModalScreen
 from textual.widgets import Label, OptionList
 from textual.widgets.option_list import Option
 
-from src.tui.screens.mcp_trust import command_line
-from src.tui.screens.permission_trust import visible
-
 
 def _count(n: int, what: str) -> str:
     return f"{n} {what}{'s' if n != 1 else ''}"
-
-
-def marker_text(marker: MarkerInfo | None) -> str:
-    """When and which files, as the marker recorded them (escaped; at most MAX_SHOWN names, then a count)."""
-    if marker is None:
-        return "A command changed the agent's global config during an earlier run."
-    when = f" ({marker.at.astimezone().strftime('%Y-%m-%d %H:%M:%S')})" if marker.at is not None else ""
-    text = f"A command changed the agent's global config during an earlier run{when}"
-    if not marker.files:
-        return text + "."
-    shown = ", ".join(visible(name) for name in marker.files[:MAX_SHOWN])
-    more = len(marker.files) - MAX_SHOWN
-    return f"{text}: {shown}{f' and {more} more' if more > 0 else ''}."
 
 
 class GlobalTrustScreen(ModalScreen[bool]):
@@ -72,7 +56,7 @@ class GlobalTrustScreen(ModalScreen[bool]):
     ) -> None:
         super().__init__()
         # What allows the most comes first, as in the project prompt.
-        self.rules = sorted(rules, key=lambda rule: not (rule.value is None or rule.prefix))
+        self.rules = sort_rules(rules)
         self.hooks = list(hooks)
         self.servers = list(servers)
         self.marker = marker
@@ -98,20 +82,16 @@ class GlobalTrustScreen(ModalScreen[bool]):
             else:
                 yield Label(Text("It holds no allow rules, hooks or MCP servers now."))
             with VerticalScroll(id="items"):
-                for rule in self.rules:
-                    yield Label(Text(f"allow {visible(rule.text)}"))
-                for hook in self.hooks:
-                    yield Label(Text(f"hook {escape(hook.label)} (timeout {hook.timeout:g}s) {visible(hook.command)}"))
-                for server in self.servers:
-                    env = f" (env: {', '.join(escape(key) for key in server.env)})" if server.env else ""
-                    yield Label(Text(f"mcp {visible(server.name)}  {visible(command_line(server))}{env}"))
-                for name in held.keep_env:
-                    yield Label(Text(f"keepEnv {visible(name)}"))
-                for kind, names in held.kinds():
-                    for name in names:
-                        yield Label(Text(f"{kind} {visible(name)}"))
-                for rule in self.deny:
-                    yield Label(Text(f"deny rule {visible(rule.text)} (applies either way)"))
+                lines = trust_lines(
+                    "global_trust",
+                    rules=self.rules,
+                    hooks=self.hooks,
+                    servers=self.servers,
+                    deny=self.deny,
+                    held=held,
+                )
+                for line in lines.lines:
+                    yield Label(Text(line))
             yield Label(Text("Deny rules and protected paths apply either way. Tab scrolls the list."))
             if held.any:
                 yield Label(Text(f"Trust turns the allow rules, hooks and MCP servers on now; {NEXT_LAUNCH}."))

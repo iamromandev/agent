@@ -39,8 +39,8 @@ from core.engine.approval import ApprovalRequest, Approver, Choice
 from core.engine.commands.builtins import BUILTINS
 from core.engine.commands.loader import Commands
 from core.engine.compaction import CHARS_PER_TOKEN, turn_starts
-from core.engine.configguard import NEXT_LAUNCH, ConfigGuard, HeldGlobal
-from core.engine.configwatch import Cause, TrustRevoked
+from core.engine.configguard import ConfigGuard, HeldGlobal
+from core.engine.configwatch import Cause
 from core.engine.events import WorkflowLine, WorkflowProgress
 from core.engine.facts import FACTS_SHARE, init_check, render_facts, scan
 from core.engine.guardrails.paths import (
@@ -95,6 +95,7 @@ from core.engine.workflows.model import PlanSummary, RunResult
 from core.engine.workflows.runner import WorkflowRunner
 from core.engine.workflows.runs import RunIndex
 from core.engine.workflows.timings import TimingStore
+from core.trust import TrustOutcome, apply_trust
 from textual import events
 from textual.app import App, ComposeResult, ScreenStackError
 from textual.binding import Binding, BindingType
@@ -441,23 +442,16 @@ class AgentApp(App[None]):
             self.permissions.global_allow, hooks, servers, marker, deny=self.permissions.global_deny, held=self._held
         )
         trusted = await self.push_screen_wait(screen)
-        if not trusted:
-            await transcript.add_notice(
-                "info", "global config not trusted: global allow rules, hooks and MCP servers are off for this run"
-            )
-            return
-        try:
-            await asyncio.to_thread(guard.trust_global)  # removes the marker: not on the event loop
-        except TrustRevoked as exc:  # a change seen in this run: everything stays off, the marker stays
-            await transcript.add_notice("warn", escape(f"global config: {exc}"))
-            return
-        except OSError as exc:  # the marker is still there: nothing was turned on
-            await transcript.add_notice("warn", escape(f"global config: {exc}"))
-            return
-        if self.mcp is not None and servers:
-            self.mcp.start([s.name for s in servers])
-        later = f"; {NEXT_LAUNCH}" if self._held.any else ""
-        await transcript.add_notice("info", f"global config trusted: global allow rules, hooks and MCP servers are on{later}")
+        # the marker is removed (and the store written) off the event loop
+        outcome = await asyncio.to_thread(
+            apply_trust,
+            "global_trust",
+            bool(trusted),
+            guard=guard,
+            servers=[s.name for s in servers],
+            held_any=self._held.any,
+        )
+        await self._show_trust(outcome)
 
     async def _ask_permission_trust(self) -> None:
         """Ask once whether to trust the project's allow rules and hooks (one decision for the file's bytes); only a
@@ -468,44 +462,35 @@ class AgentApp(App[None]):
             return
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
         trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks))
-        transcript = self.query_one(Transcript)
-        if not trusted:
-            if rules and hooks:
-                text = "project permission rules and hooks not trusted: allow rules and hooks are off for this run"
-            elif hooks:
-                text = "project hooks not trusted: hooks are off for this run"
-            else:
-                text = "project permission rules not trusted: allow rules are off for this run"
-            await transcript.add_notice("info", text)
-            return
-        try:
-            await asyncio.to_thread(self.permissions.trust_project)  # writes the trust store: not on the event loop
-        except TrustRevoked as exc:  # the config watch revoked project trust meanwhile: nothing was trusted
-            await transcript.add_notice("warn", escape(f"permissions: {exc}"))
-        except OSError as exc:  # the rules are on for this run; it will ask again next time
-            await transcript.add_notice("warn", escape(f"permissions: could not remember the trust: {exc}"))
+        outcome = await asyncio.to_thread(  # writes the trust store: not on the event loop
+            apply_trust,
+            "permission_trust",
+            bool(trusted),
+            permissions=self.permissions,
+            has_rules=bool(rules),
+            has_hooks=bool(hooks),
+        )
+        await self._show_trust(outcome)
 
     async def _ask_mcp_trust(self) -> None:
         """Ask once whether to start the project's MCP servers; only a yes starts them."""
         if self.mcp is None:
             return
         servers = self.mcp.untrusted("project")  # the global ones held by the marker have their own prompt
-        names = ", ".join(s.name for s in servers)
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
         trusted = await self.push_screen_wait(McpTrustScreen(servers))
+        outcome = await asyncio.to_thread(
+            apply_trust, "mcp_trust", bool(trusted), mcp_trust=self._mcp_trust, servers=[s.name for s in servers]
+        )
+        await self._show_trust(outcome)
+
+    async def _show_trust(self, outcome: TrustOutcome) -> None:
+        """The notices of a trust decision, then the MCP servers it turned on (on the event loop)."""
         transcript = self.query_one(Transcript)
-        if not trusted:
-            await transcript.add_notice("info", f"mcp: project servers not trusted, so not started: {names}")
-            return
-        if self._mcp_trust is not None:
-            try:
-                self._mcp_trust()
-            except TrustRevoked as exc:  # the config watch revoked project trust meanwhile: nothing starts
-                await transcript.add_notice("warn", escape(f"mcp: {exc}"))
-                return
-            except OSError as exc:  # the servers still start for this run; it will ask again next time
-                await transcript.add_notice("warn", f"mcp: could not remember the trust: {exc}")
-        self.mcp.start([s.name for s in servers])
+        for level, text in outcome.notices:
+            await transcript.add_notice(level, text)
+        if self.mcp is not None and outcome.start:
+            self.mcp.start(outcome.start)
 
     def _post_mcp_event(self, event: HubEvent) -> None:
         self.post_message(self.McpEvent(event))
