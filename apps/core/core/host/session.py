@@ -67,7 +67,7 @@ from core.host.events import (
 from core.host.queue import MessageQueue, Queued, merge
 
 WORKFLOW_RUNNING = "a workflow is running (Esc or /workflow cancel stops it)"
-# The daemon runs one job that runs tools at a time across its sessions (they share one checkpoint store).
+# Turns of different sessions run at once; only a model switch (the provider is shared) waits for the others.
 OTHER_SESSION = "busy — another session is running a turn; try again when it ends"
 OUTCOME_ACK_TIMEOUT = 2.0  # seconds the claim waits for a client to apply a turn's outcome (one that never does)
 LOCAL_CLIENT = "local"  # the client id of the in-process TUI (a remote one sends its own in `X-Agent-Client`)
@@ -238,15 +238,14 @@ class SessionHost:
         return f"busy — {hint}"
 
     def other_session_busy(self) -> bool:
-        """Another session of this daemon runs a job now: this one must not start one (see `OTHER_SESSION`)."""
+        """Another session of this daemon runs a job now: a model switch (the provider is shared) must wait."""
         return self.elsewhere is not None and self.elsewhere()
 
     def refusal(self, command: str) -> str | None:
-        """The busy line for `command` while a turn runs or a session loads (here, or a job in another session of the
-        daemon), else None."""
+        """The busy line for `command` while a turn runs or a session loads in this session, else None."""
         if self.turn_active or self.switching:
             return self.busy_text(command)
-        return OTHER_SESSION if self.other_session_busy() else None
+        return None
 
     def _publish(self, event: object) -> None:
         self.bus.publish(event)
@@ -289,7 +288,7 @@ class SessionHost:
     def message_refusal(self) -> str | None:
         """Why a message cannot start now (and is not queued either), or None."""
         if not (self.turn_active or self.switching):
-            return OTHER_SESSION if self.other_session_busy() else None
+            return None
         if self.workflow_active:
             return WORKFLOW_RUNNING
         return f"busy — {'press Esc to interrupt' if self.turn_active else 'a session is loading'}"

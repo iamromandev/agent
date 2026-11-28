@@ -96,6 +96,7 @@ def _diff_item(data: dict[str, Any]) -> DiffItem:
         added=data.get("added"),
         removed=data.get("removed"),
         note=data.get("note"),
+        foreign=bool(data.get("foreign", False)),
         old_mode=int(data.get("old_mode") or 0),
         new_mode=int(data.get("new_mode") or 0),
         old_size=data.get("old_size"),

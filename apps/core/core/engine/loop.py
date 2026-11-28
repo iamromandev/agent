@@ -9,10 +9,10 @@ import os
 import platform
 import stat
 import time
-from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncGenerator, Awaitable, Callable, Collection, Mapping, Sequence
 from datetime import UTC, date, datetime
 from pathlib import Path, PurePath
-from typing import Literal
+from typing import Any, Literal
 
 from core.engine.agents.loader import Agents
 from core.engine.approval import ApprovalRequest, Approver, Choice, Grants
@@ -54,6 +54,7 @@ from core.engine.guardrails.setup import REDACTION_FAILED, guard_of
 from core.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed, notice_text
 from core.engine.image_inputs import image_dimensions
 from core.engine.instructions import Instructions, load_instructions
+from core.engine.ledger import Foreign, LedgerEntry, TurnLedger
 from core.engine.lsp.hub import LspHub
 from core.engine.mode import Mode
 from core.engine.permissions.config import agent_config_files
@@ -86,6 +87,7 @@ from core.engine.undo import (
     SNAPSHOT_FILE_LIMIT,
     SNAPSHOT_TOTAL_LIMIT,
     UNDO_UNTRACKED,
+    UNSURE_OTHER,
     UndoLog,
     UndoResult,
     UndoTurn,
@@ -251,8 +253,15 @@ class Agent:
         preapproved: Callable[[ToolCall], bool] | None = None,
         watch: Watch | None = None,
         lsp: LspHub | None = None,
+        ledger: TurnLedger | None = None,
+        owner: str = "",
     ) -> None:
         self.provider = provider
+        # Sessions of one daemon run turns at once: the ledger tells `/undo` and `/diff` which paths another session's
+        # overlapping turn changed. Plain `agent`, `-p` and every child pass none.
+        self.ledger = ledger if role == "main" and not subagent and undo is None else None
+        self.owner = owner
+        self._ledger_entry: LedgerEntry | None = None
         self.lsp = lsp if role == "main" and not subagent else None  # diagnostics after write/edit: the main agent only
         # The config watch: checked around every tool call and at the end of a turn; a child shares its parent's.
         self.watch: Watch = watch if watch is not None else NullWatch()
@@ -266,7 +275,7 @@ class Agent:
         self._checkpoint_warning: str | None = None  # taken from the store, not yet shown
         self._large_before: dict[str, tuple[int, int] | None] = {}  # files over the size cap when the turn began
         self._exclude_before: tuple[int, int, int] | None = None  # `.git/info/exclude` when the turn began
-        self._checkpoint_read: asyncio.Task[tuple[list[DiffEntry], dict[str, bytes]]] | None = None  # the `/undo` diff + blob read, while it runs
+        self._checkpoint_read: asyncio.Task[Any] | None = None  # the `/undo` ledger look or diff + blob read, while it runs
         self.hooks = hooks if hooks is not None else Hooks.empty()  # the `task` child never gets any
         self.rules = rules if rules is not None else Rules.empty()  # not part of `Grants`: `reset()` leaves it alone
         self.role = role
@@ -368,6 +377,7 @@ class Agent:
         self._summary_failed = self._warned_full = False
         self._hook_notes.clear()  # context for the old session: the new one's SessionStart hook adds its own
         self._undo.clear()
+        self._forget_ledger()
         return old
 
     @property
@@ -526,6 +536,31 @@ class Agent:
         """Compaction drops the undo history of this agent; a shared log belongs to the parent's turns."""
         if not self._shared_undo:
             self._undo.clear()
+            self._forget_ledger()
+
+    def _forget_ledger(self) -> None:
+        """This agent's undo history is gone: its turns can no longer be undone, but what they changed is still in the
+        workspace, so the ledger keeps them (retired) for the other sessions' undo. The turn running now keeps its entry
+        here: `finish` still has to set its end."""
+        if self.ledger is not None:
+            self.ledger.retire(self.owner)
+
+    def _begin_undo(self, prompt: str) -> None:
+        self._undo.begin(len(self.history), prompt)
+        turn = self._undo.current
+        if self.ledger is not None and turn is not None:
+            self._ledger_entry = self.ledger.begin(self.owner, turn)
+
+    def _finish_undo(self, *, keep: bool = True) -> None:
+        entry, self._ledger_entry = self._ledger_entry, None
+        if keep:
+            self._undo.finish()
+            if entry is not None and self.ledger is not None:
+                self.ledger.finish(entry)
+        else:
+            self._undo.discard()
+            if entry is not None and self.ledger is not None:
+                self.ledger.drop(entry)
 
     async def compact(self, emit: EventSink) -> None:
         """Compact now, whatever the estimate (R16): prune, then summarize what is older than the kept turns.
@@ -690,7 +725,7 @@ class Agent:
         self._busy = True
         self._summary_failed = self._warned_full = False  # per turn: one retry of a summary, one warning
         if not self._shared_undo:
-            self._undo.begin(len(self.history), draft if draft is not None else text)
+            self._begin_undo(draft if draft is not None else text)
         kept = len(self._hook_notes)  # what stands before this turn's own context (SessionStart's)
         try:
             self._pasted = tuple(pasted)
@@ -735,7 +770,7 @@ class Agent:
                 await self._checkpoint(emit, end=True)
             finally:
                 if not self._shared_undo:
-                    self._undo.finish()
+                    self._finish_undo()
                 self._busy = False
                 self._inflight = None
                 self._pasted = ()
@@ -764,7 +799,7 @@ class Agent:
         self._busy = True
         op = Operation()
         try:
-            self._undo.begin(len(self.history), prompt)
+            self._begin_undo(prompt)
             await self._checkpoint(emit, end=False)
             yield op
         finally:
@@ -772,10 +807,7 @@ class Agent:
             try:
                 await self._checkpoint(emit, end=True)
             finally:
-                if op.keep:
-                    self._undo.finish()
-                else:
-                    self._undo.discard()
+                self._finish_undo(keep=op.keep)
                 self._busy = False
                 self._inflight = None
 
@@ -849,7 +881,11 @@ class Agent:
         turn = self._undo.peek()
         if turn is None:
             return None
-        return await build_diff(turn, self._checkpoints, self.ctx.workspace)
+        entry = self.ledger.find(turn) if self.ledger is not None else None
+        foreign: Collection[str] = ()
+        if entry is not None and self.ledger is not None:
+            foreign = await self.ledger.foreign_paths(entry, self._checkpoints, self.ctx.workspace)
+        return await build_diff(turn, self._checkpoints, self.ctx.workspace, foreign)
 
     def is_current_diff(self, diff: TurnDiff) -> bool:
         """Is the turn `diff` was built from still the newest one? False after a newer turn, an undo or a reset."""
@@ -870,12 +906,13 @@ class Agent:
         if turn is None:
             emit(Notice("info", NOTHING_TO_UNDO))
             return None
+        entry = self.ledger.find(turn) if self.ledger is not None else None
         self._busy = True
         try:
             # The restore runs in a thread a cancel cannot stop: let it finish and cut the history
             # to match what it did, then hand the cancel on.
             cut_ids = {m.tool_call_id for m in self.history[turn.start :] if m.tool_call_id}
-            task = asyncio.ensure_future(self._restore(turn, emit))
+            task = asyncio.ensure_future(self._restore(turn, emit, entry))
             cancel: asyncio.CancelledError | None = None
             while not task.done():
                 try:
@@ -887,7 +924,12 @@ class Agent:
                 except Exception:
                     break
             error = task.exception()
-            result, from_checkpoints = (None, False) if error is not None else task.result()
+            outcome = None if error is not None else task.result()
+            if error is None and outcome is None:  # Esc before any file was touched: still undoable, nothing changed
+                self._undo.restack(turn)
+                entry = None  # it still guards the others
+                raise cancel or asyncio.CancelledError()
+            result, from_checkpoints = outcome if outcome is not None else (None, False)
             if result is not None:
                 self._accept_undone(turn, result)
             del self.history[turn.start :]
@@ -913,6 +955,8 @@ class Agent:
             for notice in notices:
                 emit(notice)
         finally:
+            if entry is not None and self.ledger is not None:
+                self.ledger.undone(entry)  # what the undo skipped is still there: it guards the overlapping ones
             self._busy = False
         return turn.prompt
 
@@ -935,10 +979,36 @@ class Agent:
             with contextlib.suppress(Exception):
                 self.watch.accept(watched)
 
-    async def _restore(self, turn: UndoTurn, emit: EventSink) -> tuple[UndoResult, bool]:
+    async def _restore(
+        self, turn: UndoTurn, emit: EventSink, entry: LedgerEntry | None = None
+    ) -> tuple[UndoResult, bool] | None:
         """Restore the turn from its two checkpoints: `(result, True)`. Without a complete pair, when git fails before
-        anything was written, or when Esc stops git, from the file-level log: `(result, False)` (which is quick)."""
+        anything was written, or when Esc stops git, from the file-level log: `(result, False)` (which is quick).
+        Paths that another session's overlapping turn changed are left alone (`entry`: this turn in the ledger); when
+        what they changed cannot be read, no file of this turn is touched. None: Esc came while that was being
+        looked up, before any file was touched."""
         store = self._checkpoints
+        foreign = Foreign()
+        if entry is not None and self.ledger is not None:
+            look = asyncio.create_task(self.ledger.foreign_paths(entry, store, self.ctx.workspace))
+            self._checkpoint_read = look  # Esc cancels it (it may wait for the snapshot lock, then for a snapshot)
+            try:
+                foreign = await look
+            except asyncio.CancelledError:
+                if not look.cancelled():
+                    raise
+                with contextlib.suppress(Exception):
+                    emit(Notice("warn", "Undo interrupted; nothing was changed"))
+                return None
+            except Exception as exc:
+                foreign.failures.append(f"{type(exc).__name__}: {exc}")
+            finally:
+                self._checkpoint_read = None
+            if foreign.failures:
+                why = notice_text("; ".join(foreign.failures))
+                with contextlib.suppress(Exception):  # a sink that raises must not stop the undo
+                    emit(Notice("warn", f"Could not tell what other sessions changed ({why}); no file of this turn is touched"))
+        skip: dict[str, str] = dict(foreign)
         if turn.before and turn.after and store is not None:
             read = asyncio.create_task(self._read_checkpoint(store, turn.before, turn.after))
             self._checkpoint_read = read
@@ -956,8 +1026,21 @@ class Agent:
                 self._checkpoint_read = None
             if loaded is not None:
                 entries, blobs = loaded
-                return await asyncio.to_thread(self._restore_checkpoint, turn, entries, blobs), True
-        return await asyncio.to_thread(restore_turn, turn, self.ctx.workspace), False
+                if foreign.failures:
+                    skip = {**self._blanket(turn, entries), **skip}
+                return await asyncio.to_thread(self._restore_checkpoint, turn, entries, blobs, skip), True
+        if foreign.failures:
+            skip = {**self._blanket(turn, ()), **skip}
+        return await asyncio.to_thread(restore_turn, turn, self.ctx.workspace, skip), False
+
+    def _blanket(self, turn: UndoTurn, entries: Collection[DiffEntry]) -> dict[str, str]:
+        """Every path this turn changed, for a restore that must leave all of them alone."""
+        names = {e.path for e in entries}
+        root = self.ctx.workspace.resolve()
+        for path in turn.changes:
+            with contextlib.suppress(ValueError):
+                names.add(path.relative_to(root).as_posix())
+        return dict.fromkeys(names, UNSURE_OTHER)
 
     @staticmethod
     async def _read_checkpoint(
@@ -966,7 +1049,9 @@ class Agent:
         entries = await store.diff(before, after)
         return entries, await store.read_blobs([e.old_sha for e in entries if e.old_sha])
 
-    def _restore_checkpoint(self, turn: UndoTurn, entries: list[DiffEntry], blobs: dict[str, bytes]) -> UndoResult:
+    def _restore_checkpoint(
+        self, turn: UndoTurn, entries: list[DiffEntry], blobs: dict[str, bytes], skip: Mapping[str, str] | None = None
+    ) -> UndoResult:
         """The restore from the snapshots, then the write/edit changes to files the snapshots leave out (ignored files,
         `.agent/` files) from the file log. Blocking."""
         workspace = self.ctx.workspace
@@ -977,6 +1062,7 @@ class Agent:
             before_time=turn.before_time,
             large_before=frozenset(turn.large_before),
             exclude_changed=turn.exclude_changed,
+            skip=skip,
         )
         paths = guard_of(self.ctx).paths
 
@@ -986,7 +1072,7 @@ class Agent:
             except Exception:
                 return True  # when unsure, leave it alone
 
-        extra = restore_unsnapshotted(turn, entries, workspace, protected)
+        extra = restore_unsnapshotted(turn, entries, workspace, protected, skip)
         return UndoResult([*result.entries, *extra.entries])
 
     def _answer_unanswered_calls(

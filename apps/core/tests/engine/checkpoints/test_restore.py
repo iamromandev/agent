@@ -15,7 +15,7 @@ from core.engine.checkpoints import restore as restore_module
 from core.engine.checkpoints.restore import git_blob_sha, restore_checkpoint, restore_unsnapshotted
 from core.engine.checkpoints.store import CheckpointStore, DiffEntry
 from core.engine.guardrails.setup import Guardrails
-from core.engine.undo import CHANGED, UndoLog, UndoResult, UndoTurn
+from core.engine.undo import CHANGED, CHANGED_BY_OTHER, UndoLog, UndoResult, UndoTurn
 
 pytestmark = pytest.mark.skipif(shutil.which("git") is None, reason="needs git")
 
@@ -356,3 +356,26 @@ def test_a_protected_file_is_never_written_by_the_file_log(ws: Path) -> None:
 
     assert result.entries == []
     assert (ws / "secret.key").read_text() == "new"
+
+
+async def test_a_path_in_the_skip_map_is_left_alone_and_named_with_its_reason(store: CheckpointStore, ws: Path) -> None:
+    # Bug caught: the checkpoint restore reverting a file another session's overlapping turn also changed.
+    (ws / "shared.py").write_text("old")
+    (ws / "mine.py").write_text("old")
+
+    def turn() -> None:
+        (ws / "shared.py").write_text("new")
+        (ws / "mine.py").write_text("new")
+        (ws / "added_by_both.py").write_text("x")
+
+    result = await undo_turn(
+        store, ws, turn, skip={"shared.py": CHANGED_BY_OTHER, "added_by_both.py": CHANGED_BY_OTHER}
+    )
+
+    assert (ws / "shared.py").read_text() == "new" and (ws / "added_by_both.py").exists()
+    assert (ws / "mine.py").read_text() == "old"
+    assert kinds(result) == {
+        "mine.py": ("restored", None),
+        "shared.py": ("skipped", CHANGED_BY_OTHER),
+        "added_by_both.py": ("skipped", CHANGED_BY_OTHER),
+    }

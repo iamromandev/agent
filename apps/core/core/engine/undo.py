@@ -11,7 +11,7 @@ import hashlib
 import os
 import stat
 import tempfile
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -23,6 +23,10 @@ SNAPSHOT_FILE_LIMIT = 8 * 1024 * 1024
 SNAPSHOT_TOTAL_LIMIT = 64 * 1024 * 1024
 NOTHING_TO_UNDO = "Nothing to undo"
 CHANGED = "changed since the turn"
+CHANGED_BY_OTHER = "changed by another session"  # another session's overlapping turn changed the path
+MAYBE_BY_OTHER = "may have been changed by another session"  # it matches this turn's own end state: maybe its bash
+UNSURE_OTHER = "could not check other sessions"  # the other turns' changes could not be read: nothing is touched
+OTHER_SESSION_REASONS = frozenset({CHANGED_BY_OTHER, MAYBE_BY_OTHER, UNSURE_OTHER})
 TOO_LARGE = "too large"
 READ_ONLY = "read-only"
 # Tools whose effects /undo cannot reverse: it only counts them, and says so.
@@ -134,6 +138,11 @@ class UndoLog:
         self._current = UndoTurn(start, prompt)
         self._fresh = None
 
+    @property
+    def current(self) -> UndoTurn | None:
+        """The turn in progress."""
+        return self._current
+
     def finish(self) -> None:
         if self._current is not None:
             self._stack.append(self._current)
@@ -152,6 +161,10 @@ class UndoLog:
 
     def pop(self) -> UndoTurn | None:
         return self._stack.pop() if self._stack else None
+
+    def restack(self, turn: UndoTurn) -> None:
+        """Put back the turn `pop` took, when its undo was stopped before anything changed."""
+        self._stack.append(turn)
 
     def peek(self) -> UndoTurn | None:
         """The newest finished turn, left in place."""
@@ -361,15 +374,20 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[os.write(fd, view) :]
 
 
-def restore_turn(turn: UndoTurn, workspace: Path) -> UndoResult:
-    """Put back every file the turn changed that still holds what the turn left. Blocking; never raises."""
+def restore_turn(turn: UndoTurn, workspace: Path, skip: Mapping[str, str] | None = None) -> UndoResult:
+    """Put back every file the turn changed that still holds what the turn left. Blocking; never raises.
+    `skip`: workspace-relative paths (and why) that are left alone and named as skipped."""
     root = workspace.resolve()
     entries: list[tuple[Literal["restored", "deleted", "skipped"], str, str | None]] = []
+    folded = {name.casefold(): reason for name, reason in (skip or {}).items()}  # the filesystem may be case-insensitive
     for change in turn.changes.values():
         try:
             name = change.path.relative_to(root).as_posix()
         except ValueError:
             name = str(change.path)
+        if (why := folded.get(name.casefold())) is not None:
+            entries.append(("skipped", name, why))
+            continue
         try:
             outcome = _restore_one(change, root)
         except Exception as exc:  # whatever one file does, the others are still restored
@@ -390,6 +408,11 @@ OUTSIDE_NOTE = "Effects outside the workspace and running processes are not undo
 NAMES_SHOWN = 20
 
 
+def _skipped_name(name: str, reason: str | None) -> str:
+    """The reason is spelled out only for a path another session changed: the other skips are the user's own."""
+    return f"{escape(name)} ({reason})" if reason else escape(name)
+
+
 def checkpoint_notices(result: UndoResult, large_skipped: Sequence[str]) -> list[Notice]:
     """The notices of a restore from checkpoints: counts, the skipped names (escaped, at most 20), and the note about
     what an undo cannot reach. `large_skipped`: files over the checkpoint size cap that the turn made or changed;
@@ -398,13 +421,16 @@ def checkpoint_notices(result: UndoResult, large_skipped: Sequence[str]) -> list
     deleted = sum(1 for e in result.entries if e[0] == "deleted")
     handled = {name for kind, name, _ in result.entries if kind != "skipped"}
     skipped = [name for kind, name, _ in result.entries if kind == "skipped"]
+    why = {
+        name: reason for kind, name, reason in result.entries if kind == "skipped" and reason in OTHER_SESSION_REASONS
+    }
     skipped += [name for name in large_skipped if name not in handled and name not in skipped]
     if not (restored or deleted or skipped):
         text = "Undid the last turn: nothing to restore"
     else:
         text = f"Undid the last turn: {restored} restored, {deleted} deleted"
         if skipped:
-            names = ", ".join(escape(n) for n in skipped[:NAMES_SHOWN])
+            names = ", ".join(_skipped_name(n, why.get(n)) for n in skipped[:NAMES_SHOWN])
             if len(skipped) > NAMES_SHOWN:
                 names += f", and {len(skipped) - NAMES_SHOWN} more"
             text += f", {len(skipped)} skipped: {names}"

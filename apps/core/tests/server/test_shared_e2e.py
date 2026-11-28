@@ -240,18 +240,27 @@ async def test_ac11_two_sessions_share_one_language_server_and_both_results_carr
     def write(call_id: str) -> list[Any]:
         return [ToolCallEvent(ToolCall(call_id, "write", {"path": "a.py", "content": "x = 2\n"})), Done(1, 1)]
 
-    _served, client, watch = await clients([write("w1"), REPLY, write("w2"), REPLY], setup=_lsp_setup(tmp_path, monkeypatch))
+    gate = Gate()
+    # A's second request is held open, so B's whole turn runs inside A's
+    served, client, watch = await clients(
+        [write("w1"), [gate, *REPLY], write("w2"), REPLY], setup=_lsp_setup(tmp_path, monkeypatch)
+    )
     a, b = client("A"), client("B")
     sid_a = (await a.open_session(None))["session_id"]
     sid_b = (await b.open_session(None))["session_id"]
     seen_a, seen_b = watch(a, sid_a), watch(b, sid_b)
     await a.send(sid_a, "edit")
-    await seen_a.until("turn_outcome")
+    await asyncio.wait_for(gate.reached.wait(), 5)
+    (served.workspace / ".agent").mkdir()
+    (served.workspace / ".agent" / "settings.json").write_text("{}")  # a change made while both sessions run
     await b.send(sid_b, "edit")
     await seen_b.until("turn_outcome")
+    gate.release.set()
+    await seen_a.until("turn_outcome")
 
     for seen in (seen_a, seen_b):
         (finished,) = seen.of("tool_finished")
         assert "[diagnostics from ty:" in str(finished)
+        assert str(seen.messages).count("config changed by") == 1  # one change, one warning
     dump = tmp_path / "dump.jsonl"
     assert len({json.loads(x)["pid"] for x in dump.read_text().splitlines()}) == 1

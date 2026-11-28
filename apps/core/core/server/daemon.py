@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any
 from core import info
 from core.engine import AgentBusy
 from core.engine.events import Notice
+from core.engine.ledger import TurnLedger
 from core.engine.loop import close_recorder
 from core.engine.mentions_index import FileIndex
 from core.engine.session import FileRecorder, SessionError, SessionInfo, new_ulid, sessions_root, workspace_dir
@@ -85,6 +86,7 @@ class _Fanout:
 class Daemon:
     def __init__(self, rt: Runtime, *, idle: float | None = None) -> None:
         self.rt = rt
+        self.ledger = TurnLedger()  # when each session's undoable turns ran: `/undo` and `/diff` skip overlaps
         self.workspace = rt.root
         self.idle = idle if idle is not None else rt.settings.daemon_idle
         self.hosts: dict[str, SessionHost] = {}  # by session id (chosen up front for a new session)
@@ -205,6 +207,7 @@ class Daemon:
             host.agent.close()  # flushes the recorder and releases the session lock
         except Exception:
             log.exception("closing a session's agent failed")
+        self.ledger.retire(host.agent.owner)  # its turns can no longer be undone, but still guard the others
 
     async def _watch_idle(self) -> None:
         """Exit after `idle` seconds with no event stream open and no turn or hook running."""
@@ -346,8 +349,9 @@ class Daemon:
         )
         host.connected = lambda client: self.connections.get((host.session_id, client), 0) > 0
         host.on_job_end = self.reindex  # files a turn made are offered as `@` mentions after it
-        # One job that runs tools at a time across the daemon: the sessions share the runtime's checkpoint store.
+        # Turns of different sessions run at once; only a model switch waits for the others (see `switch_model`).
         host.elsewhere = lambda: any(other.turn_active for other in self.hosts.values() if other is not host)
+        host.agent.ledger, host.agent.owner = self.ledger, session_id
         old = host.agent.reset(recorder=FileRecorder(folder, rt.root, session_id=session_id))
         if old is not None:
             close_recorder(old)  # never written: the runtime's lazy recorder

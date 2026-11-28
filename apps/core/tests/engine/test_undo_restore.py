@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
-from core.engine.undo import CHANGED, TOO_LARGE, UndoLog, UndoTurn, restore_turn
+from core.engine.undo import CHANGED, CHANGED_BY_OTHER, TOO_LARGE, UndoLog, UndoTurn, restore_turn
 
 
 @pytest.fixture
@@ -149,3 +149,14 @@ def test_restoring_a_hard_linked_file_keeps_the_link(workspace: Path) -> None:
     assert result.entries == [("restored", "a.py", None)]
     assert link.read_bytes() == b"old"
     assert os.path.samefile(workspace / "a.py", link)
+
+
+def test_a_path_another_session_changed_is_skipped_and_left_untouched(workspace: Path) -> None:
+    # Bug caught: the file-level undo reverting a file that an overlapping turn of another session also wrote.
+    turn = run(workspace, ("mine.py", b"m"), ("shared.py", b"s"), seed={"shared.py": b"old"})
+
+    result = restore_turn(turn, workspace, skip={"shared.py": CHANGED_BY_OTHER})
+
+    assert (workspace / "shared.py").read_bytes() == b"s"
+    assert not (workspace / "mine.py").exists()
+    assert ("skipped", "shared.py", CHANGED_BY_OTHER) in result.entries

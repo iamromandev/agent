@@ -17,7 +17,7 @@ import hashlib
 import os
 import secrets
 import stat
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
 from typing import Literal
@@ -210,6 +210,7 @@ def restore_checkpoint(
     before_time: float | None = None,
     large_before: frozenset[str] = frozenset(),
     exclude_changed: bool = False,
+    skip: Mapping[str, str] | None = None,
 ) -> UndoResult:
     """Undo `entries` (what changed between the turn's two snapshots) in `workspace`. Blocking; never raises.
 
@@ -218,14 +219,15 @@ def restore_checkpoint(
     deleted only when it was born later (None: never). `large_before`: files over the size cap at that snapshot.
     `exclude_changed`: the turn changed the workspace's `.git/info/exclude`. A changed `.gitignore` (any folder) or
     exclude file means the diff cannot tell a file the turn created from one it stopped hiding: no added file is
-    deleted then."""
+    deleted then. `skip`: paths (and why) that another session's overlapping turn changed: never touched, named as
+    skipped (a changed `.gitignore` among them still counts for the rule above)."""
     root = workspace.resolve()
     try:
         root_fd = os.open(root, DIR_FLAGS)
     except OSError as exc:
         return UndoResult([("skipped", e.path, _reason(exc)) for e in entries])
     try:
-        return _restore(entries, blobs, root_fd, before_time, large_before, exclude_changed)
+        return _restore(entries, blobs, root_fd, before_time, large_before, exclude_changed, skip or {})
     finally:
         os.close(root_fd)
 
@@ -237,9 +239,14 @@ def _restore(
     before_time: float | None,
     large_before: frozenset[str],
     exclude_changed: bool,
+    skip: Mapping[str, str],
 ) -> UndoResult:
     done: list[tuple[Kind, str, str | None]] = []
     ignore_changed = exclude_changed or any(e.path.rpartition("/")[2].lower() == ".gitignore" for e in entries)
+    folded = {name.casefold(): reason for name, reason in skip.items()}  # the filesystem may be case-insensitive
+    held = [e for e in entries if e.path.casefold() in folded]
+    done.extend(("skipped", e.path, folded[e.path.casefold()]) for e in held)
+    entries = [e for e in entries if e.path.casefold() not in folded]
     added = sorted((e for e in entries if e.old_sha is None), key=lambda e: e.path.count("/"), reverse=True)
     cleaned: set[str] = set()  # folders above a file that was deleted (checked, real folders)
     for entry in added:
@@ -356,7 +363,11 @@ def _already_undone(change: FileChange) -> bool:
 
 
 def restore_unsnapshotted(
-    turn: UndoTurn, entries: list[DiffEntry], workspace: Path, is_protected: Callable[[Path], bool]
+    turn: UndoTurn,
+    entries: list[DiffEntry],
+    workspace: Path,
+    is_protected: Callable[[Path], bool],
+    skip: Mapping[str, str] | None = None,
 ) -> UndoResult:
     """Undo, from the file-level log, what the turn's write/edit calls changed in files the checkpoints leave out
     (ignored files, `.agent/` files). Files in `entries` (the checkpoint restore did them), protected files and files
@@ -375,4 +386,4 @@ def restore_unsnapshotted(
         changes[path] = change
     if not changes:
         return UndoResult([])
-    return restore_turn(replace(turn, changes=changes), workspace)
+    return restore_turn(replace(turn, changes=changes), workspace, skip)
