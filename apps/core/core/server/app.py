@@ -86,7 +86,7 @@ def _send_command(daemon: Daemon, host: SessionHost, raw: str, client: str) -> S
     name = found.group(1) if found else ""
     command = daemon.rt.commands.get(name)
     if command is None:
-        return SendResult("refused", f"Unknown command: /{name} (try /help)")
+        return SendResult("refused", f"Unknown command: /{escape(name)} (try /help)")
     prompt = command.expand((found.group(2) or "") if found else "")
     if not prompt.strip():
         return SendResult("refused", f"/{name} is empty")
@@ -359,7 +359,8 @@ def build_app(daemon: Daemon) -> ASGIApp:
             }
             for c in daemon.rt.commands.sorted()
         ]
-        return JSONResponse({"commands": rows})
+        warnings = [daemon.redact(escape(w)) for w in daemon.rt.commands.warnings]
+        return JSONResponse({"commands": rows, "warnings": warnings})
 
     diffs = daemon.diffs  # the last list each client asked for: its files are loaded from it
 

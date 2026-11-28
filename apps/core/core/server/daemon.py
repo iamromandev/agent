@@ -23,7 +23,7 @@ from core.engine.text import escape_display
 from core.engine.turn_diff import TurnDiff
 from core.host.asks import Answer, AnswerResult, AskBroker, AskEvent
 from core.host.bus import Subscriber
-from core.host.events import ModelChanged
+from core.host.events import ModelChanged, SessionStarting
 from core.host.session import OTHER_SESSION, ModelSwitch, SessionHost, SessionSource
 from core.trust import TrustOutcome, apply_trust, trust_lines
 
@@ -406,11 +406,15 @@ class Daemon:
         if source is None or self._loop is None or not host.hooks.has("SessionStart") or not host.begin_switch("daemon"):
             return
 
+        host.expect_hooks()
+        host.bus.publish(SessionStarting(True))
+
         async def run() -> None:
             try:
                 for event in await host.session_started(source):
                     host.bus.publish(event)
             finally:
+                host.bus.publish(SessionStarting(False))
                 host.end_switch("daemon")
 
         self._tasks = [t for t in self._tasks if not t.done()]

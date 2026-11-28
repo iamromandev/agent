@@ -278,6 +278,11 @@ class ModeChanged(Message):
     mode: Literal["build", "edits", "plan"]
 
 
+class SessionStarting(Message):
+    type: Literal["session_starting"] = "session_starting"
+    active: bool
+
+
 class Claims(Strict):
     """Who holds the session now: a turn (or compaction, undo, workflow), a switch, and whether a message queues."""
 
@@ -286,6 +291,7 @@ class Claims(Strict):
     undoing: bool = False
     workflow_active: bool = False
     queueing: bool = False
+    session_starting: bool = False
 
 
 class Snapshot(Message):
@@ -328,6 +334,7 @@ WireMessage = Annotated[
     | ModelChanged
     | QueueChanged
     | ModeChanged
+    | SessionStarting
     | TurnUndone
     | UserEntry
     | Delivering

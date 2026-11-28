@@ -82,3 +82,29 @@ async def test_the_listing_gives_name_source_and_description_escaped_and_redacte
     rows = {row["name"]: row for row in got.json()["commands"]}
     assert rows["review"] == {"name": "review", "source": "project", "description": "Look it over"}
     assert secret not in got.text and "\x1b" not in got.text
+
+
+async def test_the_unknown_name_in_the_refusal_is_escaped(serve) -> None:
+    served = await serve([REPLY], setup=_project_command)
+    client = served.client()
+    session_id = (await served.open(client))["session_id"]
+    got = await _send(client, session_id, "/a\x1b[31mb\x07")
+    assert got["status"] == "refused" and "\x1b" not in got["reason"] and "\x07" not in got["reason"]
+    assert "Unknown command: /a" in got["reason"]
+
+
+async def test_the_listing_carries_the_load_warnings_escaped_and_redacted(serve) -> None:
+    secret = "ghp_" + "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"
+
+    def setup(ws: Path) -> None:
+        _project_command(ws)
+        folder = ws / ".agent" / "commands"
+        (folder / "model.md").write_text("built-in name")
+        (folder / "bad\x1bname.md").write_text("x")
+        (folder / f"{secret}.md").write_bytes(b"\xff\xfe not utf-8")
+
+    served = await serve(setup=setup)
+    got = await served.client().get("/v1/commands")
+    warnings = got.json()["warnings"]
+    assert len(warnings) == 3 and any("/model is a built-in command" in w for w in warnings)
+    assert secret not in got.text and "\x1b" not in got.text

@@ -211,6 +211,7 @@ class AgentApp(App[None]):
         self._mcp_trust = mcp_trust  # remembers that the user trusted the project's servers
         self._permission_warnings = tuple(permission_warnings)
         self.commands = commands if commands is not None else Commands({}, ())
+        self._shown_command_warnings: set[str] = set()  # the daemon's command warnings already in the transcript
         self.skills = skills if skills is not None else Skills({}, ())
         self.agents = agents if agents is not None else Agents.empty()
         self.workspace = port.workspace
@@ -408,8 +409,19 @@ class AgentApp(App[None]):
     async def _load_daemon_commands(self, port: RemotePort) -> None:
         """The daemon's custom commands, for the suggestions and `/help`; their bodies stay on the daemon, which expands
         `/name args` itself."""
-        rows = await port.commands()
+        transcript = self.query_one(Transcript)
+        try:
+            rows, warnings = await port.commands()
+        except (DaemonError, DaemonUnavailable) as exc:  # the previous set stays: suggestions must not vanish
+            await transcript.add_notice(
+                "warn", f"could not read the daemon's custom commands ({escape(str(exc))[:200]}); the list may be out of date"
+            )
+            return
         self.commands = Commands({n: Command(n, "", d or None, "global" if s == "global" else "project") for n, s, d in rows}, ())
+        for warning in warnings:  # as the launch of a plain app shows them; a refetch does not repeat one
+            if warning not in self._shown_command_warnings:
+                self._shown_command_warnings.add(warning)
+                await transcript.add_notice("warn", warning)
 
     async def _open_remote_start(self, port: RemotePort) -> tuple[wm.Snapshot, str, int] | None:
         """The start session as `--continue`, `--resume` or the picker chose it (a new one otherwise, also when the
@@ -1866,6 +1878,8 @@ class AgentApp(App[None]):
                     await self._close_stale_dialogs()
                     await self._show_snapshot(snapshot)
                 await self.query_one(Transcript).add_notice("info", "reconnected to the agent daemon")
+                if snapshot is not None and isinstance(self.port, RemotePort):  # maybe another daemon: its commands may differ
+                    self.run_worker(self._load_daemon_commands(self.port), group="commands", exclusive=True, exit_on_error=False)
                 for ask in self.port.pending_asks():  # still open: shown again (one already shown is skipped)
                     self._on_ask(ask)
             case AskResolved(ask_id, by, _):
