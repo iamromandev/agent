@@ -141,6 +141,13 @@ class DaemonClient:
     async def models(self) -> list[dict[str, Any]]:
         return await self._objects("GET", "/v1/models")
 
+    async def model_length(self, name: str) -> int | None:
+        """The model's context length as the daemon reads it (`None`: unknown); `DaemonError` on a bad answer."""
+        length = (await self._object("GET", "/v1/model-length", params={"name": name})).get("context_length")
+        if length is not None and (not isinstance(length, int) or isinstance(length, bool)):
+            raise DaemonError(502, "the daemon sent a bad answer (context_length is not a number)")
+        return length
+
     async def suggest(self, token: str) -> list[dict[str, Any]]:
         return await self._objects("GET", "/v1/files/suggest", params={"token": token})
 

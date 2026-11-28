@@ -439,3 +439,12 @@ async def test_diff_is_refused_during_a_turn_and_a_file_is_found_by_its_index(se
     gate.release.set()
     missing = await client.get(f"/v1/sessions/{session_id}/diff/file", params={"index": "0"})
     assert missing.status_code in (404, 409)
+
+
+async def test_model_length_reads_the_catalog_and_needs_a_name(serve) -> None:
+    served = await serve()
+    served.daemon.rt.catalog.lengths["fake"] = 8192
+    client = served.client()
+    assert (await client.get("/v1/model-length", params={"name": "fake"})).json() == {"context_length": 8192}
+    assert (await client.get("/v1/model-length", params={"name": "nope"})).json() == {"context_length": None}
+    assert (await client.get("/v1/model-length")).status_code == 400

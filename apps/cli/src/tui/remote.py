@@ -585,7 +585,11 @@ class RemotePort:
             raise CatalogError(str(exc)) from exc
 
     async def model_length(self, name: str) -> int | None:
-        return None  # the daemon reads the length itself when it switches
+        """The length the daemon reads for the picker; a failure is a `CatalogError` (the picker shows `?`)."""
+        try:
+            return await self._http().model_length(name)
+        except (DaemonError, DaemonUnavailable) as exc:
+            raise CatalogError(str(exc)) from exc
 
     async def list_sessions(self) -> list[SessionInfo]:
         """The folder's sessions as the daemon sees them; `DaemonError` or `DaemonUnavailable` (the app says why)."""
