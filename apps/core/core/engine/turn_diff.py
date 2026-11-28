@@ -21,8 +21,8 @@ import stat
 import threading
 import time
 from collections import Counter
-from collections.abc import Callable, Iterator, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Collection, Iterator, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Literal
 
@@ -69,6 +69,7 @@ class DiffItem:
     old_bytes: bytes | None = None  # fallback source: what the log kept before the turn
     new_path: Path | None = None  # fallback: read now, only when its sha256 is still `new_digest`
     new_digest: bytes | None = None
+    foreign: bool = False  # another session's overlapping turn also changed it: `/undo` leaves it alone
 
 
 @dataclass(frozen=True)
@@ -192,30 +193,42 @@ def _item_from_entry(entry: DiffEntry, facts: _Facts) -> DiffItem:
 
 
 def _finish(
-    items: Sequence[DiffItem], fallback: bool, store: CheckpointStore | None, workspace: Path, turn: UndoTurn
+    items: Sequence[DiffItem],
+    fallback: bool,
+    store: CheckpointStore | None,
+    workspace: Path,
+    turn: UndoTurn,
+    foreign: Collection[str] = (),
 ) -> TurnDiff:
-    ordered = sorted(items, key=lambda i: i.path)
+    marked = {p.casefold() for p in foreign}  # the filesystem may be case-insensitive
+    ordered = sorted(
+        (replace(i, foreign=True) if i.path.casefold() in marked else i for i in items), key=lambda i: i.path
+    )
     return TurnDiff(
         tuple(ordered[:FILE_LIST_LIMIT]), max(0, len(ordered) - FILE_LIST_LIMIT), fallback, store, workspace, turn
     )
 
 
-async def build_diff(turn: UndoTurn, store: CheckpointStore | None, workspace: Path) -> TurnDiff:
+async def build_diff(
+    turn: UndoTurn, store: CheckpointStore | None, workspace: Path, foreign: Collection[str] = ()
+) -> TurnDiff:
     """The file list of `turn`. Whole files are read only by the fallback (the files its log recorded, to count).
 
     From the snapshots when the turn has both; if git fails and the file log has entries, from the log. Raises
     GitError (or OSError) when there is nothing to fall back on. A failure of the counting steps alone is not one: the
-    files are listed with unknown counts."""
+    files are listed with unknown counts. `foreign`: paths another session's overlapping turn changed (`DiffItem.foreign`)."""
     if turn.before and turn.after and store is not None:
         try:
-            return await _from_checkpoints(turn, store, workspace)
+            return await _from_checkpoints(turn, store, workspace, foreign)
         except (GitError, OSError):
             if not turn.changes:
                 raise
-    return await _in_thread(lambda budget: _from_log(turn, workspace, budget), LIST_SECONDS)
+    return await _in_thread(lambda budget: _from_log(turn, workspace, budget, foreign), LIST_SECONDS)
 
 
-async def _from_checkpoints(turn: UndoTurn, store: CheckpointStore, workspace: Path) -> TurnDiff:
+async def _from_checkpoints(
+    turn: UndoTurn, store: CheckpointStore, workspace: Path, foreign: Collection[str] = ()
+) -> TurnDiff:
     assert turn.before and turn.after
     entries = await store.diff(turn.before, turn.after)
     facts = await _facts(store, turn.before, turn.after, entries)
@@ -225,7 +238,7 @@ async def _from_checkpoints(turn: UndoTurn, store: CheckpointStore, workspace: P
     for name in turn.skipped_large:  # over the snapshot cap: not in the snapshots, but the turn made or changed it
         if name not in listed:
             items.append(DiffItem(name, "M" if name in large_before else "A", None, None, "too large"))
-    return _finish(items, False, store, workspace, turn)
+    return _finish(items, False, store, workspace, turn, foreign)
 
 
 async def _facts(store: CheckpointStore, before: str, after: str, entries: Sequence[DiffEntry]) -> _Facts:
@@ -275,14 +288,14 @@ def _current(path: Path, digest: bytes | None, root: Path) -> bytes | None:
     return data if hashlib.sha256(data).digest() == digest else None
 
 
-def _from_log(turn: UndoTurn, workspace: Path, budget: Budget) -> TurnDiff:
+def _from_log(turn: UndoTurn, workspace: Path, budget: Budget, foreign: Collection[str] = ()) -> TurnDiff:
     root = workspace.resolve()
     items: list[DiffItem] = []
     for change in turn.changes.values():
         found = _item_from_change(change, root, budget)
         if found is not None:
             items.append(found)
-    return _finish(items, True, None, root, turn)
+    return _finish(items, True, None, root, turn, foreign)
 
 
 def _item_from_change(change: FileChange, root: Path, budget: Budget) -> DiffItem | None:

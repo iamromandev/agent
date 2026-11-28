@@ -28,6 +28,7 @@ Loader = Callable[[TurnDiff, DiffItem], Awaitable[FileDiff]]
 STYLES: dict[LineKind, Style] = {"add": OK, "del": ERROR, "hunk": DIM, "meta": DIM, "ctx": PLAIN}
 STATUS_STYLES = {"A": OK, "D": ERROR, "M": MODIFIED, "T": TYPE_CHANGED}
 MORE_ID = "more"
+ALSO_BY_OTHER = "also changed by another session"
 MINUS = "\u2212"  # the minus sign, not a hyphen: the counts line up with `+`
 OFF_LOOP_LINES = 200  # a diff with more lines is turned into text in a thread
 
@@ -49,6 +50,8 @@ def describe(item: DiffItem) -> Text:
         row.append(f" {' '.join(counts)}", DIM)
     if item.note:
         row.append(f" ({escape_display(item.note)})", DIM)
+    if item.foreign:
+        row.append(f" ({ALSO_BY_OTHER})", DIM)
     return row
 
 

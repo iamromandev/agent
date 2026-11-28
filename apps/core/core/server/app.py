@@ -335,6 +335,7 @@ def build_app(daemon: Daemon) -> ASGIApp:
             "added": item.added,
             "removed": item.removed,
             "note": item.note,
+            "foreign": item.foreign,
             "old_mode": item.old_mode,
             "new_mode": item.new_mode,
             "old_size": item.old_size,

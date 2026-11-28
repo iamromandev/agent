@@ -1,5 +1,4 @@
-"""One job that runs tools at a time per daemon: the sessions share one checkpoint store, so two turns at once would
-break its index and `/undo` in one could revert the other's files."""
+"""Turns of different sessions run at once; only `/model` waits for another session's turn (the provider is shared)."""
 
 from __future__ import annotations
 
@@ -12,35 +11,22 @@ from core.testing.fakes import Gate
 REPLY = [TextDelta("ok"), Done(1, 1)]
 
 
-async def test_a_second_sessions_turn_compact_and_undo_are_refused_while_another_session_runs_one(serve) -> None:
+async def test_compact_and_undo_in_a_second_session_are_not_refused_while_another_session_runs_a_turn(serve) -> None:
+    # Bug caught: the old one-job-at-a-time refusal (OTHER_SESSION) still returned for compact and undo.
     gate = Gate()
     served = await serve([[gate, *REPLY], REPLY])
     a, b = served.client("A"), served.client("B")
     one = (await served.open(a))["session_id"]
     two = (await served.open(b))["session_id"]
-    stream_one = served.stream(a, one, after=0)
-    stream_two = served.stream(b, two, after=0)
     await a.post(f"/v1/sessions/{one}/messages", json={"text": "slow"})
     await asyncio.wait_for(gate.reached.wait(), 5)
 
-    refused = (await b.post(f"/v1/sessions/{two}/messages", json={"text": "mine"})).json()
     compact = (await b.post(f"/v1/sessions/{two}/compact")).json()
     undo = (await b.post(f"/v1/sessions/{two}/undo")).json()
-    assert refused == {"status": "refused", "reason": OTHER_SESSION}
-    assert compact == {"status": "refused", "reason": OTHER_SESSION}
-    assert undo["prompt"] is None and undo["events"][0]["text"] == OTHER_SESSION
-    assert len(served.provider.requests) == 1  # the second session's turn never reached the model
 
+    assert OTHER_SESSION not in str(compact) and OTHER_SESSION not in str(undo)
+    assert undo["events"][0]["text"] == "Nothing to undo"
     gate.release.set()
-    await stream_one.until(lambda s: "turn_outcome" in s.types())
-    host_one = served.daemon.host(one)
-    from core.testing.helpers import wait_until
-
-    await wait_until(lambda: not host_one.turn_active)
-    started = (await b.post(f"/v1/sessions/{two}/messages", json={"text": "now"})).json()
-    assert started["status"] == "started"
-    await stream_two.until(lambda s: "turn_outcome" in s.types())
-    assert len(served.provider.requests) == 2
 
 
 async def test_a_model_switch_waits_for_another_sessions_turn_and_is_recorded_in_every_session(serve) -> None:

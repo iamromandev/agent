@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import os
 import shutil
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -177,3 +178,10 @@ def test_a_row_with_unknown_counts_shows_a_question_mark_unless_a_note_says_why(
     assert describe(_item("M")).plain == "M p.py ?"
     assert describe(_item("A", note="binary")).plain == "A p.py (binary)"
     assert describe(_item("M", note="too large to compare")).plain == "M p.py (too large to compare)"
+
+
+def test_a_row_for_a_path_another_session_also_changed_says_so() -> None:
+    # Bug caught: the list hiding the marker, so the user is surprised when /undo skips the file.
+    row = describe(replace(_item("M", 1, 0), foreign=True))
+
+    assert row.plain == "M p.py +1 (also changed by another session)"

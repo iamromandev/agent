@@ -133,6 +133,9 @@ class CheckpointStore:
         self._tree: str | None = None
         self._commit: str | None = None
         self._verdicts: dict[str, tuple[int, ...]] = {}  # kept files, by stat: not asked to the guard again
+        # Snapshots share one index and the `_tree`/`_commit` chain, so sessions of one daemon take turns; the first
+        # one also initialises the shadow repo under it. Created here: an asyncio.Lock binds its loop on first wait.
+        self._lock = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
@@ -194,8 +197,11 @@ class CheckpointStore:
         if not self.enabled:
             return None
         try:
-            async with asyncio.timeout(self._timeout):
-                return await self._snapshot()
+            async with self._lock:  # the time limit is for the snapshot itself, not the wait for another one
+                if not self.enabled:
+                    return None
+                async with asyncio.timeout(self._timeout):
+                    return await self._snapshot()
         except TimeoutError:
             self._turn_off(f"snapshot took longer than {self._timeout:g} s")
         except GitTimeout:

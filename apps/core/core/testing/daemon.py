@@ -117,14 +117,16 @@ async def serve(data_home: Path, tmp_path: Path) -> AsyncIterator[Callable[..., 
     """Start a daemon in this process on a temp socket, over a scripted provider; stopped and closed at the end."""
     started: list[Served] = []
 
-    async def start(script: Script | None = None, *, idle: float = 600.0, setup: Callable[[Path], None] | None = None) -> Served:
+    async def start(script: Script | None = None, *, idle: float = 600.0, setup: Callable[[Path], None] | None = None, checkpoints: bool = True
+    ) -> Served:
         ws = tmp_path / "ws"
         ws.mkdir(exist_ok=True)
         if setup is not None:
             setup(ws)
         provider = ScriptedProvider(list(script or []))
         rt = build_runtime(
-            ws, BUILTINS, terminals=False, provider=provider, catalog=FakeCatalog(["fake", "other:7b"]), connector=FakeConnector()
+            ws, BUILTINS, terminals=False, provider=provider, catalog=FakeCatalog(["fake", "other:7b"]), connector=FakeConnector(),
+            checkpoints=checkpoints,
         )
         daemon = Daemon(rt, idle=idle)
         path = socket_path(ws)
