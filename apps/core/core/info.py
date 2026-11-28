@@ -5,6 +5,7 @@ from __future__ import annotations
 
 from core.engine.agents.loader import READ_ONLY_TOOLS, Agents
 from core.engine.configguard import ConfigGuard
+from core.engine.format.runner import FormatHub
 from core.engine.guardrails.paths import (
     BUILTIN_HOME,
     BUILTIN_NAMES,
@@ -23,6 +24,7 @@ from core.engine.text import escape, escape_display
 
 __all__ = [
     "agents_summary",
+    "format_summary",
     "guardrails_summary",
     "hooks_summary",
     "lsp_summary",
@@ -117,3 +119,11 @@ def lsp_summary(lsp: LspHub | None) -> str:
         lines.append(f"{line}: {escape_display(reason)}" if reason else line)
     lines.extend(lsp.warnings)
     return "\n".join(lines) if lines else "No language servers found."
+
+
+def format_summary(fmt: FormatHub | None) -> str:
+    """`<name> (<source>) <found|not found|off[: reason]>  <extensions>` per formatter, then the setup warnings."""
+    if fmt is None:
+        return 'formatting is off (set "format": true in settings)'
+    lines = [*fmt.listing(), *fmt.warnings]
+    return "\n".join(lines) if lines else "No formatters found."

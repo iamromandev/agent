@@ -11,6 +11,7 @@ from typing import Literal, Protocol
 
 from core.engine.configguard import MAX_SHOWN, NEXT_LAUNCH, HeldGlobal, MarkerInfo
 from core.engine.configwatch import TrustRevoked
+from core.engine.format.config import FormatterSpec
 from core.engine.hooks.config import HookEntry
 from core.engine.lsp.config import ServerSpec
 from core.engine.mcp.config import ServerConfig
@@ -63,7 +64,7 @@ def command_line(server: ServerConfig) -> str:
     return shlex.join([escape(server.command), *(escape(arg) for arg in server.args)])
 
 
-def env_note(server: ServerConfig | ServerSpec) -> str:
+def env_note(server: ServerConfig | ServerSpec | FormatterSpec) -> str:
     return f"(env: {', '.join(escape(key) for key in server.env)})" if server.env else ""
 
 
@@ -81,6 +82,12 @@ def lsp_line(server: ServerSpec) -> str:
     written out; the env keys as the MCP prompt shows them (the server gets the env unfiltered: `PATH`, `LD_PRELOAD`)."""
     env = f"  {env_note(server)}" if server.env else ""
     return f"lsp {visible(server.name)}: {visible(shlex.join([server.command, *server.args]))}{env}"
+
+
+def format_line(spec: FormatterSpec) -> str:
+    """`format <name>: <command line>  (env: KEYS)`, escaped like `lsp_line`."""
+    env = f"  {env_note(spec)}" if spec.env else ""
+    return f"format {visible(spec.name)}: {visible(shlex.join(spec.argv))}{env}"
 
 
 def marker_text(marker: MarkerInfo | None) -> str:
@@ -113,6 +120,7 @@ def trust_lines(
     deny: Sequence[Rule] = (),
     held: HeldGlobal | None = None,
     lsp: Sequence[ServerSpec] = (),
+    formatters: Sequence[FormatterSpec] = (),
 ) -> TrustAsk:
     """What the prompt of `kind` lists, in the order the screens show it, with its title, texts and choices."""
     if kind == "mcp_trust":
@@ -128,7 +136,12 @@ def trust_lines(
     lines += [hook_line(hook) for hook in hooks]
     if kind == "permission_trust":
         lines += [lsp_line(server) for server in lsp]
-        parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook"), (lsp, "language server")) if items]
+        lines += [format_line(spec) for spec in formatters]
+        parts = [
+            _count(len(items), what)
+            for items, what in ((rules, "allow rule"), (hooks, "hook"), (lsp, "language server"), (formatters, "formatter"))
+            if items
+        ]
         header, footer = [], []
         if rules:
             header.append(".agent/settings.json in this folder wants to allow these calls without asking:")
@@ -139,7 +152,12 @@ def trust_lines(
         if lsp:
             header.append(".agent/settings.json in this folder wants to start these language servers on your machine:")
             footer.append("Language servers run in this folder like bash; their messages are added to write and edit results.")
-        what = " and ".join(name for name, items in (("rules", rules), ("hooks", hooks), ("language servers", lsp)) if items)
+        if formatters:
+            header.append(".agent/settings.json in this folder wants to run these formatters on files the agent writes:")
+            footer.append("Formatters run in this folder like bash, on every file you edit that they match.")
+        what = " and ".join(
+            name for name, items in (("rules", rules), ("hooks", hooks), ("language servers", lsp), ("formatters", formatters)) if items
+        )
         return TrustAsk(
             kind,
             lines,
@@ -152,7 +170,13 @@ def trust_lines(
     held = held if held is not None else HeldGlobal()
     parts = [
         _count(len(items), what)
-        for items, what in ((rules, "allow rule"), (hooks, "hook"), (servers, "MCP server"), (lsp, "language server"))
+        for items, what in (
+            (rules, "allow rule"),
+            (hooks, "hook"),
+            (servers, "MCP server"),
+            (lsp, "language server"),
+            (formatters, "formatter"),
+        )
         if items
     ]
     parts += [_count(len(names), f"global {label}") for label, names in held.kinds()]
@@ -172,6 +196,7 @@ def trust_lines(
         env = f" {env_note(server)}" if server.env else ""
         lines.append(f"mcp {visible(server.name)}  {visible(command_line(server))}{env}")
     lines += [lsp_line(server) for server in lsp]
+    lines += [format_line(spec) for spec in formatters]
     lines += [f"keepEnv {visible(name)}" for name in held.keep_env]
     for label, names in held.kinds():
         lines += [f"{label} {visible(name)}" for name in names]
@@ -206,6 +231,8 @@ def pending_trust(
     project_hooks: Sequence[HookEntry],
     project_lsp: Sequence[ServerSpec] = (),
     global_lsp: Sequence[ServerSpec] = (),
+    project_format: Sequence[FormatterSpec] = (),
+    global_format: Sequence[FormatterSpec] = (),
 ) -> list[TrustAsk]:
     """The prompts to show at launch, in the order they are asked: global, MCP, permissions."""
     asks: list[TrustAsk] = []
@@ -220,12 +247,15 @@ def pending_trust(
                 deny=global_deny,
                 held=held,
                 lsp=global_lsp,
+                formatters=global_format,
             )
         )
     if project_servers:
         asks.append(trust_lines("mcp_trust", servers=project_servers))
-    if project_rules or project_hooks or project_lsp:
-        asks.append(trust_lines("permission_trust", rules=project_rules, hooks=project_hooks, lsp=project_lsp))
+    if project_rules or project_hooks or project_lsp or project_format:
+        asks.append(
+            trust_lines("permission_trust", rules=project_rules, hooks=project_hooks, lsp=project_lsp, formatters=project_format)
+        )
     return asks
 
 
@@ -241,6 +271,7 @@ def apply_trust(
     has_rules: bool = True,
     has_hooks: bool = False,
     has_lsp: bool = False,
+    has_format: bool = False,
 ) -> TrustOutcome:
     """What a yes or a no does. Blocking (writes the trust stores): call it off the event loop. The caller shows the
     notices and starts `start` (MCP servers) itself."""
@@ -278,8 +309,9 @@ def apply_trust(
         out.start = list(servers)
     else:
         if not yes:
-            if has_lsp:
-                off = [name for name, on in (("allow rules", has_rules), ("hooks", has_hooks)) if on] + ["language servers"]
+            if has_lsp or has_format:
+                off = [name for name, on in (("allow rules", has_rules), ("hooks", has_hooks)) if on]
+                off += [name for name, on in (("language servers", has_lsp), ("formatters", has_format)) if on]
                 text = f"project settings not trusted: {', '.join(off)} are off for this run"
             elif has_rules and has_hooks:
                 text = "project permission rules and hooks not trusted: allow rules and hooks are off for this run"

@@ -43,6 +43,7 @@ from core.engine.compaction import turn_starts
 from core.engine.configguard import ConfigGuard, HeldGlobal
 from core.engine.configwatch import Cause
 from core.engine.events import WorkflowLine, WorkflowProgress
+from core.engine.format.runner import FormatHub
 from core.engine.guardrails.setup import Guardrails
 from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
@@ -134,10 +135,10 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /lsp language servers · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
+    "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /lsp language servers · /format formatters · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
 
-SHARED_INFO = frozenset({"/mcp", "/permissions", "/guardrails", "/hooks", "/lsp", "/skills", "/agents"})  # the daemon's
+SHARED_INFO = frozenset({"/mcp", "/permissions", "/guardrails", "/hooks", "/lsp", "/format", "/skills", "/agents"})  # the daemon's
 WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] [--redo <step>] | cancel]"
 PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
 FAILED_SHOWN = 200
@@ -187,6 +188,7 @@ class AgentApp(App[None]):
         config_guard: ConfigGuard | None = None,
         held: HeldGlobal | None = None,
         lsp: LspHub | None = None,
+        format: FormatHub | None = None,
         model: str | None = None,
     ) -> None:
         super().__init__()
@@ -197,6 +199,7 @@ class AgentApp(App[None]):
         # with them): the global keepEnv and the global commands, skills, agents and workflows.
         self._held = held if held is not None else HeldGlobal()
         self.lsp = lsp  # language servers: its project-sourced ones wait for the same trust as the rules and hooks
+        self.format = format  # formatters: the same
         # The config watch's reaction object: its warnings go to the transcript, `/guardrails` lists its changes, and
         # its marker (an earlier run's change to the global config) opens the global trust dialog at launch.
         self.config_guard = config_guard
@@ -540,6 +543,7 @@ class AgentApp(App[None]):
             or self.permissions.untrusted_allow
             or self.hooks.untrusted()
             or (self.lsp is not None and self.lsp.untrusted())
+            or (self.format is not None and self.format.untrusted())
             or (self.mcp is not None and self.mcp.untrusted("project"))
             or self._global_waiting()
         ):
@@ -578,6 +582,7 @@ class AgentApp(App[None]):
             deny=self.permissions.global_deny,
             held=self._held,
             lsp=self.lsp.untrusted("global") if self.lsp is not None else (),
+            formatters=self.format.untrusted("global") if self.format is not None else (),
         )
         trusted = await self.push_screen_wait(screen)
         # the marker is removed (and the store written) off the event loop
@@ -597,10 +602,11 @@ class AgentApp(App[None]):
         rules = self.permissions.untrusted_allow
         hooks = self.hooks.untrusted()
         lsp = self.lsp.untrusted() if self.lsp is not None else []
-        if not rules and not hooks and not lsp:
+        formatters = self.format.untrusted() if self.format is not None else []
+        if not rules and not hooks and not lsp and not formatters:
             return
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
-        trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks, lsp=lsp))
+        trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks, lsp=lsp, formatters=formatters))
         outcome = await asyncio.to_thread(  # writes the trust store: not on the event loop
             apply_trust,
             "permission_trust",
@@ -609,6 +615,7 @@ class AgentApp(App[None]):
             has_rules=bool(rules),
             has_hooks=bool(hooks),
             has_lsp=bool(lsp),
+            has_format=bool(formatters),
         )
         await self._show_trust(outcome)
 
@@ -1284,6 +1291,8 @@ class AgentApp(App[None]):
                 await transcript.add_notice("info", info.hooks_summary(self.hooks))
             case "/lsp":
                 await transcript.add_notice("info", info.lsp_summary(self.lsp))
+            case "/format":
+                await transcript.add_notice("info", info.format_summary(self.format))
             case "/skills":
                 await transcript.add_notice("info", info.skills_summary(self.skills))
             case "/agents":

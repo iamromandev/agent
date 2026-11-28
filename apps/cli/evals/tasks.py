@@ -17,7 +17,7 @@ from evals.record import RunRecord
 
 # The names of the TUI's built-in slash commands, which a custom command may not take. A copy: importing
 # `src.tui.app` would pull in Textual. A test keeps it equal to `BUILTINS` there.
-RESERVED = frozenset({"agents", "clear", "compact", "diff", "guardrails", "help", "hooks", "images", "init", "lsp", "mcp", "model", "new", "permissions", "quit", "sessions", "skills", "undo", "usage", "workflow"})
+RESERVED = frozenset({"agents", "clear", "compact", "diff", "format", "guardrails", "help", "hooks", "images", "init", "lsp", "mcp", "model", "new", "permissions", "quit", "sessions", "skills", "undo", "usage", "workflow"})
 TEST_COMMAND = "python -m pytest"
 PYTEST_TIMEOUT = 60.0
 _SKIP_DIRS = frozenset({".git", "__pycache__", ".pytest_cache"})

@@ -39,7 +39,7 @@ PROTOCOL = "1"
 VERSION = "0.0.1"
 HEARTBEAT = 15.0  # seconds between two SSE comments on a quiet stream
 CLIENT = re.compile(r"[A-Za-z0-9_-]{1,64}")
-INFO_NAMES = frozenset({"usage", "permissions", "mcp", "hooks", "lsp", "guardrails", "skills", "agents", "help"})
+INFO_NAMES = frozenset({"usage", "permissions", "mcp", "hooks", "lsp", "format", "guardrails", "skills", "agents", "help"})
 
 _ANSWER: TypeAdapter[wm.Answer] = TypeAdapter(wm.Answer)
 

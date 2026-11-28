@@ -426,6 +426,43 @@ def test_trust_project_lets_the_project_lsp_servers_run(
     assert len({json.loads(x)["pid"] for x in dump.read_text().splitlines()}) == 1
 
 
+def _format_project(ws: Path, tmp_path: Path) -> None:
+    from core.testing.format_fakes import fake_formatter
+
+    bin_dir = tmp_path / "fbin"
+    bin_dir.mkdir()
+    fake_formatter(bin_dir, "fmt", "upper")
+    from core.engine.format.config import BUILTINS
+
+    servers: dict[str, object] = {b.name: False for b in BUILTINS}  # only the fake, whatever else is installed
+    servers["mine"] = {"command": str(bin_dir / "fmt"), "extensions": [".zz"]}
+    (ws / ".agent").mkdir()
+    (ws / ".agent" / "settings.json").write_text(json.dumps({"format": {"servers": servers}}))
+
+
+def test_an_untrusted_project_format_value_warns_and_formats_nothing(
+    ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    _format_project(ws, tmp_path)
+    provider = ScriptedProvider([call("write", path="a.zz", content="abc\n"), say("ok")])
+
+    code = go(ws, provider, allow=("write",))
+
+    assert code == EXIT_OK
+    assert "warning: project formatters are not trusted: mine" in capsys.readouterr().err
+    assert (ws / "a.zz").read_text() == "abc\n"
+
+
+def test_trust_project_lets_the_project_formatters_run(ws: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    _format_project(ws, tmp_path)
+    provider = ScriptedProvider([call("write", path="a.zz", content="abc\n"), say("ok")])
+
+    code = go(ws, provider, allow=("write",), trust_project=True)
+
+    assert code == EXIT_OK and "formatters are not trusted" not in capsys.readouterr().err
+    assert (ws / "a.zz").read_text() == "ABC\n" and "[formatted by mine: 2 lines changed]" in tool_results(provider)[0]
+
+
 def test_a_stdin_without_a_byte_buffer_is_no_input_not_a_crash(
     ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -318,3 +318,61 @@ def test_ac9_lsp_true_in_both_files_or_with_no_server_found_leaves_trust_not_pen
 
     monkeypatch.setenv("PATH", str(tmp_path))  # no `ty` there
     assert not launch.prepare().rules.pending_trust  # nothing found to start
+
+
+def test_a_project_format_entry_waits_for_trust_and_global_ones_do_not(launch: Launch) -> None:
+    entry = {"format": {"servers": {"mine": {"command": "/bin/sh", "extensions": [".m"]}}}}
+    launch.write(launch.global_path, **entry)
+    assert not launch.prepare().rules.pending_trust  # a global formatter needs no project trust
+    launch.global_path.unlink()
+    launch.write(launch.project_path, **entry)
+    rules = launch.prepare().rules
+    assert rules.pending_trust and not rules.project_trusted
+    again = launch.prepare().rules
+    again.trust_project()
+    assert not launch.prepare().rules.pending_trust
+
+
+def _node_prettier(workspace: Path, body: str = "#!/bin/sh\n") -> Path:
+    local = workspace / "node_modules" / ".bin" / "prettier"
+    local.parent.mkdir(parents=True, exist_ok=True)
+    local.write_text(body)
+    local.chmod(0o755)
+    (workspace / ".prettierrc").write_text("{}")
+    return local
+
+
+def test_a_workspace_prettier_waits_for_trust_even_without_a_settings_file(launch: Launch) -> None:
+    launch.write(launch.global_path, format=True)
+    _node_prettier(launch.workspace)
+    assert not launch.project_path.exists()
+    rules = launch.prepare().rules
+    assert rules.pending_trust and not rules.project_trusted
+    rules.trust_project()
+    again = launch.prepare().rules
+    assert again.project_trusted and not again.pending_trust
+
+
+def test_a_changed_workspace_prettier_asks_again(launch: Launch) -> None:
+    launch.write(launch.global_path, format=True)
+    local = _node_prettier(launch.workspace)
+    launch.prepare().rules.trust_project()
+    local.write_text("#!/bin/sh\necho changed\n")
+    assert launch.prepare().rules.pending_trust
+
+
+def test_a_changed_code_config_asks_again(launch: Launch, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    bin_dir = tmp_path / "pbin"
+    bin_dir.mkdir()
+    (bin_dir / "prettier").write_text("#!/bin/sh\n")
+    (bin_dir / "prettier").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+    launch.write(launch.global_path, format=True)
+    config = launch.workspace / "prettier.config.js"
+    config.write_text("module.exports = {}")
+    rules = launch.prepare().rules
+    assert rules.pending_trust
+    rules.trust_project()
+    assert launch.prepare().rules.project_trusted
+    config.write_text("require('./evil')")
+    assert launch.prepare().rules.pending_trust

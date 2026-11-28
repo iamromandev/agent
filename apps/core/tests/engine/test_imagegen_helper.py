@@ -54,6 +54,15 @@ async def test_it_runs_with_a_filtered_environment_in_its_cwd(tmp_path: Path, mo
     assert Path(seen["cwd"]).resolve() == tmp_path.resolve()
 
 
+async def test_env_extra_reaches_the_child_and_wins_over_the_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HF_TOKEN", "hf_secretsecretsecret")
+    dump = tmp_path / "dump.json"
+    argv = _script(tmp_path, f"import json, os\njson.dump(dict(os.environ), open({str(dump)!r}, 'w'))\n")
+    await run_helper(argv, tmp_path, Guardrails.off(tmp_path), 20, env_extra={"MY_FMT": "1"})
+    seen = json.loads(dump.read_text())
+    assert seen["MY_FMT"] == "1" and "HF_TOKEN" not in seen
+
+
 async def test_a_timeout_kills_the_group(tmp_path: Path) -> None:
     pids = tmp_path / "pids"
     argv = _script(
@@ -92,5 +101,5 @@ async def test_a_cancel_kills_the_group_and_propagates(tmp_path: Path) -> None:
 
 
 async def test_a_missing_program_is_an_image_error(tmp_path: Path) -> None:
-    with pytest.raises(ImageGenError, match="Could not start"):
-        await run_helper([str(tmp_path / "nope")], tmp_path, Guardrails.off(tmp_path), 5)
+    with pytest.raises(ImageGenError, match=r"^Could not start the helper: \[Errno 2\]"):
+        await run_helper([str(tmp_path / "nope")], tmp_path, Guardrails.off(tmp_path), 5, who="the helper")
