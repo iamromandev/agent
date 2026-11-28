@@ -5,11 +5,13 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 from core.client.daemon import DaemonClient
 from core.engine.provider.base import Done, TextDelta, ToolCall, ToolCallEvent
+from core.engine.session import SessionInfo
 from core.testing.daemon import data_home, serve
 from core.testing.fakes import Gate
 from src.tui.app import AgentApp
@@ -35,6 +37,12 @@ async def _open(app: AgentApp, pilot) -> str:
     assert isinstance(port, RemotePort)
     await until(pilot, lambda: bool(port.session_id) and not port.switching)
     return port.session_id
+
+
+async def _open_port(app: AgentApp, pilot) -> RemotePort:
+    await _open(app, pilot)
+    assert isinstance(app.port, RemotePort)
+    return app.port
 
 
 async def test_a_dialog_answered_in_another_client_closes_with_a_notice(serve) -> None:
@@ -294,3 +302,134 @@ async def test_a_daemon_that_cannot_be_reached_at_start_asks_and_quit_names_why(
         await pilot.press("enter")
         await until(pilot, lambda: bool(exits))
     assert exits[0]["return_code"] == 1 and "cannot be reached" in exits[0]["message"]
+
+
+def _slow_hook(pid_file: Path):
+    def setup(ws: Path) -> None:
+        folder = Path(os.environ["XDG_CONFIG_HOME"]) / "agent"
+        folder.mkdir(parents=True, exist_ok=True)
+        command = f"echo $$ >> {pid_file}; exec sleep 30"
+        (folder / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"command": command, "timeout": 60}]}}))
+
+    return setup
+
+
+def _gone(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return True
+    return False
+
+
+@pytest.mark.parametrize("key", ["escape", "ctrl+c"])
+async def test_a_key_interrupts_the_daemons_session_start_hook_for_the_client_that_opened_the_session(
+    serve, tmp_path, key: str
+) -> None:
+    pid_file = tmp_path / "pids"
+    served = await serve(setup=_slow_hook(pid_file))
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        port = app.port
+        assert isinstance(port, RemotePort)
+        await until(pilot, lambda: pid_file.exists() and port.session_starting)
+        await pilot.press(key)
+        await until(pilot, lambda: any("hook SessionStart interrupted" in t for t in notices(app)))
+        await until(pilot, lambda: not port.session_starting)
+        assert app.is_running  # ctrl+c did not quit the client
+    assert _gone(int(pid_file.read_text().split()[0]))
+
+
+@pytest.mark.parametrize("key", ["escape", "ctrl+c"])
+async def test_a_key_interrupts_the_hook_for_a_client_that_attached_while_it_ran(serve, tmp_path, key: str) -> None:
+    pid_file = tmp_path / "pids"
+    served = await serve(setup=_slow_hook(pid_file))
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    other = DaemonClient(served.socket, "B")
+    try:
+        async with app.run_test() as pilot:
+            port = app.port
+            assert isinstance(port, RemotePort)
+            await until(pilot, lambda: port.session_starting)
+            await pilot.press("escape")  # its own session's hook first
+            await until(pilot, lambda: not port.session_starting)
+            live = (await other.open_session(None, source="startup"))["session_id"]  # a second slow hook
+            now = datetime.now().astimezone()
+            assert await app._show_session(SessionInfo(live, Path(), "live", now, now, 0))  # attaches mid-hook
+            assert port.session_starting
+            await pilot.press(key)
+            await until(pilot, lambda: not served.daemon.host(live).session_starting)
+            await until(pilot, lambda: not port.session_starting)
+            assert app.is_running
+        assert all(_gone(int(pid)) for pid in pid_file.read_text().split())
+    finally:
+        await other.aclose()
+
+
+@pytest.mark.parametrize("typed", ["hello", "/review x"])
+async def test_a_message_or_command_typed_during_the_hook_gets_the_busy_line_and_stays_in_the_box(serve, tmp_path, typed: str) -> None:
+    def setup(ws: Path) -> None:
+        _slow_hook(tmp_path / "pids")(ws)
+        _review(ws)
+
+    served = await serve([REPLY], setup=setup)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        port = app.port
+        assert isinstance(port, RemotePort)
+        await until(pilot, lambda: port.session_starting)
+        await type_and_send(pilot, typed)
+        await until(pilot, lambda: any("busy — a session is loading" in t for t in notices(app)))
+        await until(pilot, lambda: app.query_one(ChatInput).text == typed)
+        await pilot.press("escape")
+        await until(pilot, lambda: not port.session_starting)
+    assert served.provider.requests == []
+
+
+async def test_the_daemons_command_load_warnings_are_shown_once_at_launch(serve) -> None:
+    def setup(ws: Path) -> None:
+        _review(ws)
+        (ws / ".agent" / "commands" / "model.md").write_text("clash")
+
+    served = await serve([REPLY], setup=setup)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        port = await _open_port(app, pilot)
+        await until(pilot, lambda: any("/model is a built-in command" in t for t in notices(app)))
+        await app._load_daemon_commands(port)  # asked again (a reconnect): the same warning is not repeated
+        assert sum("/model is a built-in command" in t for t in notices(app)) == 1
+
+
+async def test_a_failed_command_listing_keeps_the_previous_set_and_warns_once(serve) -> None:
+    from core.client.daemon import DaemonError
+
+    served = await serve([REPLY], setup=_review)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        port = await _open_port(app, pilot)
+        await until(pilot, lambda: "review" in app.commands.by_name)
+
+        async def fail() -> object:
+            raise DaemonError(500, "boom")
+
+        port._http().commands = fail  # ty: ignore[invalid-assignment]
+        await app._load_daemon_commands(port)
+        assert "review" in app.commands.by_name
+        assert sum("could not read the daemon's custom commands" in t for t in notices(app)) == 1
+
+
+async def test_the_commands_are_read_again_after_a_reconnect_to_a_new_daemon(serve, monkeypatch) -> None:
+    import src.tui.remote as remote
+
+    monkeypatch.setattr(remote, "RECONNECT_WAIT", 5.0)
+    monkeypatch.setattr(remote, "RETRY_STEP", 0.05)
+    served = await serve([REPLY], setup=_review)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        await _open(app, pilot)
+        await until(pilot, lambda: "review" in app.commands.by_name)
+        (served.workspace / ".agent" / "commands" / "second.md").write_text("Second")
+        served.daemon.request_stop()
+        await asyncio.wait_for(served.task, 10)
+        await serve([REPLY])
+        await until(pilot, lambda: "second" in app.commands.by_name, timeout=10)

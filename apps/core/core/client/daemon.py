@@ -133,10 +133,11 @@ class DaemonClient:
     async def info(self, session_id: str, name: str) -> dict[str, Any]:
         return await self._object("GET", f"/v1/sessions/{session_id}/info/{name}")
 
-    async def commands(self) -> list[dict[str, Any]]:
-        """The daemon's custom commands: `name`, `source`, `description`."""
+    async def commands(self) -> tuple[list[dict[str, Any]], list[str]]:
+        """The daemon's custom commands (`name`, `source`, `description`) and the warnings from loading them."""
         data = await self._object("GET", "/v1/commands")
-        return [row for row in data.get("commands") or () if isinstance(row, dict)]
+        rows = [row for row in data.get("commands") or () if isinstance(row, dict)]
+        return rows, [w for w in data.get("warnings") or () if isinstance(w, str)]
 
     async def diff(self, session_id: str) -> dict[str, Any]:
         return await self._object("GET", f"/v1/sessions/{session_id}/diff")

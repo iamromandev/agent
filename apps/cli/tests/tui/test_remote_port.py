@@ -4,6 +4,10 @@ unsaved session that is gone, an overflow, a reconnect that fails) and a daemon 
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import sys
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -215,5 +219,47 @@ async def test_model_length_comes_from_the_daemon_and_a_failure_is_a_catalog_err
         assert await port.model_length("missing") is None  # unknown length, not an error
         with pytest.raises(remote.CatalogError, match="Could not read fake"):
             await port.model_length("fake")
+    finally:
+        await port.close()
+
+
+def _logging_hook(log: Path):
+    code = f"import sys, json; open({str(log)!r}, 'a').write(json.load(sys.stdin)['source'] + '\\n')"
+
+    def setup(ws: Path) -> None:
+        folder = Path(os.environ["XDG_CONFIG_HOME"]) / "agent"
+        folder.mkdir(parents=True, exist_ok=True)
+        command = f'{sys.executable} -c "{code}"'
+        (folder / "settings.json").write_text(json.dumps({"hooks": {"SessionStart": [{"command": command}]}}))
+
+    return setup
+
+
+async def test_a_session_replacing_a_lost_unsaved_one_runs_the_hook_as_new(serve, tmp_path) -> None:
+    log = tmp_path / "log"
+    served = await serve(setup=_logging_hook(log))
+    seen = Seen()
+    port = await _port(served, seen)  # opened without a source: no hook
+    try:
+        await _restart(serve, served)
+        await wait_until(lambda: UNSAVED_LOST in seen.notices(), 8)
+        await wait_until(log.exists)
+        assert log.read_text().split() == ["new"]
+    finally:
+        await port.close()
+
+
+async def test_a_reconnect_to_the_same_session_runs_no_hook_also_on_a_new_daemon(serve, tmp_path) -> None:
+    log = tmp_path / "log"
+    served = await serve([REPLY], setup=_logging_hook(log))
+    seen = Seen()
+    port = await _port(served, seen)
+    try:
+        assert (await port.send_message("hi")).status == "started"
+        await wait_until(lambda: bool(seen.of(TurnOutcome)))
+        await _restart(serve, served)
+        await wait_until(lambda: any(r.snapshot is not None for r in seen.of(Reconnected)), 8)
+        await asyncio.sleep(0.5)
+        assert not log.exists()
     finally:
         await port.close()

@@ -26,7 +26,7 @@ from core.engine.turn_diff import DiffItem, FileDiff, TurnDiff
 from core.engine.undo import UndoTurn
 from core.engine.usage import UsageSummary
 from core.host.asks import Answer, AnswerResult, AskEvent, AskResolved, answer_to_wire
-from core.host.events import ModeChanged, ModelChanged, QueueChanged, TurnOutcome, UserEntry
+from core.host.events import ModeChanged, ModelChanged, QueueChanged, SessionStarting, TurnOutcome, UserEntry
 from core.host.queue import Queued
 from core.host.replay import snapshot_items
 from core.host.session import Attachments, ModelSwitch, OpenedSession, SendResult, SessionSource, UndoResult
@@ -137,6 +137,7 @@ class RemotePort:
         self.on_suggestions: Callable[[], None] | None = None  # the app redraws the path list when a refresh lands
         self._tasks: set[asyncio.Task[Any]] = set()
         self._daemon_pid: object = None  # the daemon's instance id (its pid with an older daemon)
+        self._starting = False  # the daemon's SessionStart hooks run for this session
         self._unknown = False  # the stream said 404: the daemon no longer has the session
         self._outcomes = 0  # turn outcomes seen (a send's answer must not mark a turn busy that already ended)
 
@@ -168,7 +169,7 @@ class RemotePort:
 
     @property
     def session_starting(self) -> bool:
-        return False  # the daemon runs no SessionStart hooks for a shared session
+        return self._starting  # the daemon's SessionStart hooks run (the snapshot and `SessionStarting` say so)
 
     @property
     def queue_entries(self) -> tuple[Queued, ...]:
@@ -265,6 +266,7 @@ class RemotePort:
         self.turn_active = claims.turn_active
         self.undoing = claims.undoing
         self.workflow_active = claims.workflow_active
+        self._starting = claims.session_starting
         self._queue = tuple(Queued(q.typed, q.typed, q.label or None, q.client) for q in snapshot.queue)
         self._todos = tuple(TodoItem(t.content, t.status) for t in snapshot.todos)
         self._asks = {}
@@ -370,11 +372,13 @@ class RemotePort:
                 return True  # the same daemon: the stream replays what was missed
             try:
                 try:
+                    # The same session id again: no hook (the session is not new to this client, so a reconnect never
+                    # runs SessionStart, even when a new daemon loads it from its file).
                     snapshot = await self.open(self._session_id)
                 except DaemonError as exc:
                     if exc.status != 404:
                         raise
-                    snapshot = await self.open(None)
+                    snapshot = await self.open(None, source="new")  # another session: the daemon creates it, so it starts
                     await self._emit(Notice("warn", UNSAVED_LOST))
             except (DaemonUnavailable, DaemonError, ProtocolMismatch):
                 await asyncio.sleep(RETRY_STEP)
@@ -424,6 +428,8 @@ class RemotePort:
                 self._queue = entries
             case ModeChanged(mode):
                 self._mode = mode
+            case SessionStarting(active):
+                self._starting = active
             case ModelChanged(model, window):
                 self._model, self._window = model, window
             case TodosChanged(items):
@@ -632,13 +638,12 @@ class RemotePort:
 
         return _shaped(build)
 
-    async def commands(self) -> list[tuple[str, str, str]]:
-        """The daemon's custom commands as `(name, source, description)`; empty when it cannot say."""
-        try:
-            rows = await self._http().commands()
-        except (DaemonError, DaemonUnavailable):
-            return []
-        return [(str(r.get("name", "")), str(r.get("source", "")), str(r.get("description", ""))) for r in rows if r.get("name")]
+    async def commands(self) -> tuple[list[tuple[str, str, str]], list[str]]:
+        """The daemon's custom commands as `(name, source, description)` and the warnings from loading them; raises
+        `DaemonError`/`DaemonUnavailable` when it cannot say."""
+        rows, warnings = await self._http().commands()
+        found = [(str(r.get("name", "")), str(r.get("source", "")), str(r.get("description", ""))) for r in rows if r.get("name")]
+        return found, warnings
 
     async def info(self, name: str) -> list[tuple[Literal["info", "warn", "error"], str]]:
         """The lines of a listing command from the daemon (its runtime's rules, hooks, servers, ...)."""

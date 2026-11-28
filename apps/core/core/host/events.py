@@ -42,6 +42,14 @@ class ModeChanged:
 
 
 @dataclass(frozen=True)
+class SessionStarting:
+    """The daemon's SessionStart hooks began (`active`) or ended: every client of the session knows, so Esc and ctrl+c
+    interrupt them instead of quitting."""
+
+    active: bool
+
+
+@dataclass(frozen=True)
 class TurnUndone:
     """`client` undid the session's last turn: every other client drops it from its transcript too."""
 

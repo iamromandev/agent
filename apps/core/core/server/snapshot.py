@@ -73,6 +73,7 @@ def snapshot(
             undoing=host.undoing,
             workflow_active=host.workflow_active,
             queueing=host.queueing,
+            session_starting=host.session_starting,
         ),
         queue=[wm.QueueEntry(typed=redact(q.typed), label=redact(q.label or ""), client=q.client) for q in host.queue.entries],
         todos=[wm.TodoItem(content=redact(t.content), status=t.status) for t in agent.todos],

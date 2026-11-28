@@ -24,6 +24,7 @@ WireEvent = (
     | hev.ModelChanged
     | hev.QueueChanged
     | hev.ModeChanged
+    | hev.SessionStarting
     | hev.TurnUndone
     | hev.UserEntry
     | hev.Delivering
@@ -69,6 +70,8 @@ def _build(event: WireEvent, head: dict[str, Any], redact: Callable[[str], str])
             return wm.QueueChanged(**head, entries=entries)
         case hev.ModeChanged():
             return wm.ModeChanged(**head, mode=event.mode.value)
+        case hev.SessionStarting():
+            return wm.SessionStarting(**head, active=event.active)
         case hev.TurnUndone():
             return wm.TurnUndone(**head, client=event.client)
         case hev.UserEntry():
@@ -182,6 +185,8 @@ def _event(message: wm.Message) -> WireEvent:
             return hev.QueueChanged(tuple(Queued(e.typed, e.typed, e.label or None, e.client) for e in message.entries))
         case wm.ModeChanged():
             return hev.ModeChanged(Mode(message.mode))
+        case wm.SessionStarting():
+            return hev.SessionStarting(message.active)
         case wm.TurnUndone():
             return hev.TurnUndone(message.client)
         case wm.UserEntry():

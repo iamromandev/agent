@@ -176,6 +176,8 @@ class SessionHost:
         self._turn_no = 0
         self._task: asyncio.Task[None] | None = None  # the running turn or compaction
         self._hook_task: asyncio.Task[None] | None = None  # the running SessionStart hooks
+        self._hooks_pending = False  # hooks were promised (`expect_hooks`) and `session_started` has not finished
+        self._hooks_cancelled = False  # an interrupt came before the hook task existed
         self._outcomes = 0  # outcomes published with an ack
         self._ending = 0  # the ended job's outcome no client has applied yet (it holds the claim); 0: none
         self._ending_timer: asyncio.TimerHandle | None = None
@@ -231,7 +233,13 @@ class SessionHost:
 
     @property
     def session_starting(self) -> bool:
-        return self._hook_task is not None and not self._hook_task.done()
+        return self._hooks_pending or (self._hook_task is not None and not self._hook_task.done())
+
+    def expect_hooks(self) -> None:
+        """`session_started` will be awaited soon: until it finishes the hooks count as running, and an interrupt in
+        the gap before its task exists is remembered (it then starts nothing)."""
+        self._hooks_pending = True
+        self._hooks_cancelled = False
 
     def busy_text(self, command: str) -> str:
         hint = "a session is loading" if self.switching and not self.turn_active else f"press Esc to interrupt, then {command}"
@@ -572,6 +580,8 @@ class SessionHost:
         sent."""
         if self.undoing:  # an undo is not a turn: there is nothing to cancel, and its guard must stay up
             return
+        if self._hooks_pending:
+            self._hooks_cancelled = True
         for task in (self._task, self._hook_task):
             if task is not None and not task.done():
                 task.cancel()
@@ -755,8 +765,17 @@ class SessionHost:
     async def session_started(self, source: SessionSource) -> list[AgentEvent]:
         """Run the SessionStart hooks as the host's own task, which `interrupt` cancels (the runner then kills the
         hook's process group). Returns their notices; never raises but for the caller's own cancel."""
-        if not self.hooks.has("SessionStart"):
+        try:
+            return await self._run_session_start(source)
+        finally:
+            self._hooks_pending = False
+            self._hooks_cancelled = False
+
+    async def _run_session_start(self, source: SessionSource) -> list[AgentEvent]:
+        if not self.hooks.has("SessionStart") or self.closing:
             return []  # nothing to run, so nothing to interrupt
+        if self._hooks_cancelled:  # Esc came before the task existed
+            return [Notice("info", "hook SessionStart interrupted")]
         events: list[AgentEvent] = []
 
         async def run() -> None:
