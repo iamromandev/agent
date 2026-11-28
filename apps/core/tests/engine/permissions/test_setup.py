@@ -280,3 +280,41 @@ def test_run_rule_warnings_name_unknown_tools_and_valued_rules_on_keyless_tools(
         "--allow read(x): read has no argument to match; this rule never applies",
         "--allow nosuch: no tool named nosuch; this rule never applies",
     ]
+
+
+def test_ac9_a_project_lsp_value_waits_for_trust_and_always_here_does_not_vouch_for_it(launch: Launch) -> None:
+    launch.write(launch.project_path, lsp={"servers": {"mine": {"command": "/bin/sh", "extensions": [".m"]}}})
+    rules = launch.prepare().rules
+    assert rules.pending_trust and not rules.project_trusted
+
+    rules.save_project("bash(ls)")  # the lsp entry is still unaccepted: the saved bytes are not trusted
+
+    assert launch.prepare().rules.pending_trust
+    again = launch.prepare().rules
+    again.trust_project()
+    assert not again.pending_trust and again.project_trusted
+    assert not launch.prepare().rules.pending_trust  # the store now holds the bytes
+
+
+def _fake_ty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, present: bool = True) -> None:
+    bin_dir = tmp_path / "pbin"
+    bin_dir.mkdir()
+    if present:
+        (bin_dir / "ty").write_text("#!/bin/sh\n")
+        (bin_dir / "ty").chmod(0o755)
+    monkeypatch.setenv("PATH", str(bin_dir))
+
+
+def test_ac9_lsp_true_in_both_files_or_with_no_server_found_leaves_trust_not_pending(
+    launch: Launch, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _fake_ty(tmp_path, monkeypatch)
+    launch.write(launch.global_path, lsp=True)
+    launch.write(launch.project_path, lsp=True)  # the global file already turned it on: the built-in is global
+    assert not launch.prepare().rules.pending_trust
+
+    launch.global_path.unlink()
+    assert launch.prepare().rules.pending_trust  # only the project file turns it on: one project-sourced server
+
+    monkeypatch.setenv("PATH", str(tmp_path))  # no `ty` there
+    assert not launch.prepare().rules.pending_trust  # nothing found to start

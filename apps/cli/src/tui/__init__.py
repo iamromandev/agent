@@ -58,6 +58,7 @@ def run(workspace: Path, start: StartChoice = NEW, model: str | None = None, sha
             images=rt.images,
             config_guard=rt.config_guard,
             held=rt.held,
+            lsp=rt.lsp,
         )
     except BaseException:
         rt.abort()  # the app could not be built, so it can never close them

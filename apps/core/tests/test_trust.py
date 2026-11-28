@@ -4,11 +4,13 @@ import pytest
 from core.engine.configguard import HeldGlobal, MarkerInfo
 from core.engine.configwatch import TrustRevoked
 from core.engine.hooks.config import HookEntry
+from core.engine.lsp.config import ServerSpec
 from core.engine.mcp.config import ServerConfig
 from core.engine.permissions.rules import parse_rule
 from core.trust import apply_trust, pending_trust, trust_lines
 
 HOOK = HookEntry("PreToolUse", "echo ok" + " " * 200 + "; curl x", "bash", 30.0, "project")
+LSP = ServerSpec("my\x1bdsl", "/opt/bin/ls p", ("--stdio", "a" + " " * 5 + "b"), frozenset({".m"}), {}, "project")
 SERVER = ServerConfig("db\x1b", "run", ("a b",), {"K": "v"}, "project", True)
 
 
@@ -79,7 +81,7 @@ def test_global_yes_trusts_starts_servers_and_says_so() -> None:
     assert out.notices == [
         (
             "info",
-            "global config trusted: global allow rules, hooks and MCP servers are on; "
+            "global config trusted: global allow rules, hooks, MCP servers and language servers are on; "
             "keepEnv and the global commands, skills, agents and workflows return at the next launch (they are read once at launch)",
         )
     ]
@@ -90,7 +92,7 @@ def test_global_no_changes_nothing() -> None:
     out = apply_trust("global_trust", False, guard=guard, servers=["a"])
     assert guard.calls == 0 and out.start == []
     assert out.notices == [
-        ("info", "global config not trusted: global allow rules, hooks and MCP servers are off for this run")
+        ("info", "global config not trusted: global allow rules, hooks, MCP servers and language servers are off for this run")
     ]
 
 
@@ -143,3 +145,48 @@ def test_permission_yes_and_failures() -> None:
     assert revoked.notices == [("warn", f"permissions: {TrustRevoked('r')}")]
     broken = apply_trust("permission_trust", True, permissions=Permissions(OSError("x")))
     assert broken.notices == [("warn", "permissions: could not remember the trust: x")]
+
+
+def test_lsp_servers_are_listed_after_the_hooks_in_the_project_and_global_prompts() -> None:
+    ask = trust_lines("permission_trust", rules=[parse_rule("bash(a)")], hooks=[HOOK], lsp=[LSP])
+    assert ask.lines[-1] == "lsp my\\x1bdsl: '/opt/bin/ls p' --stdio 'a\u2420\u00d75b'"
+    assert ask.lines[:2] == [ask.lines[0], ask.lines[1]] and ask.lines[1].startswith("hook ")
+    assert "1 language server" in ask.title
+    only = trust_lines("permission_trust", lsp=[LSP])
+    assert only.lines == [ask.lines[-1]] and only.accept == "Trust these language servers"
+
+    glob = trust_lines("global_trust", lsp=[LSP], marker=None)
+    assert glob.lines == [ask.lines[-1]] and "1 language server" in glob.title
+
+
+def test_pending_trust_asks_the_permission_prompt_for_lsp_alone() -> None:
+    asks = pending_trust(
+        global_waiting=False, marker=None, global_rules=[], global_hooks=[], global_servers=[], global_deny=[],
+        held=HeldGlobal(), project_servers=[], project_rules=[], project_hooks=[], project_lsp=[LSP],
+    )
+    assert [a.kind for a in asks] == ["permission_trust"] and asks[0].lines[0].startswith("lsp ")
+
+
+def test_an_lsp_line_shows_the_env_keys_like_the_mcp_prompt_does() -> None:
+    spec = ServerSpec("e", "/bin/ls", (), frozenset({".m"}), {"LD_PRELOAD": "/tmp/x.so", "NODE_\x1bOPTIONS": "-r y"}, "project")
+    assert trust_lines("permission_trust", lsp=[spec]).lines == ["lsp e: /bin/ls  (env: LD_PRELOAD, NODE_\\x1bOPTIONS)"]
+    assert trust_lines("permission_trust", lsp=[LSP]).lines[0].endswith("'a\u2420\u00d75b'")  # no env: no note
+
+
+@pytest.mark.parametrize(
+    ("rules", "hooks", "text"),
+    [
+        (True, False, "project settings not trusted: allow rules, language servers are off for this run"),
+        (False, True, "project settings not trusted: hooks, language servers are off for this run"),
+        (True, True, "project settings not trusted: allow rules, hooks, language servers are off for this run"),
+        (False, False, "project settings not trusted: language servers are off for this run"),
+    ],
+)
+def test_declining_the_project_prompt_with_language_servers_names_what_stays_off(rules: bool, hooks: bool, text: str) -> None:
+    out = apply_trust("permission_trust", False, has_rules=rules, has_hooks=hooks, has_lsp=True)
+    assert out.notices == [("info", text)]
+
+
+def test_the_global_prompt_footer_names_language_servers() -> None:
+    ask = trust_lines("global_trust", lsp=[LSP], marker=None, held=HeldGlobal(commands=("c",)))
+    assert ask.footer[-1].startswith("Trust turns the allow rules, hooks, MCP servers and language servers on now;")

@@ -265,6 +265,7 @@ class Daemon:
         rules, hooks, mcp, guard = rt.permissions.rules, rt.hooks, rt.mcp, rt.config_guard
         if guard.marker_set and not rules.global_active and not rules.global_revoked:
             servers = mcp.untrusted("global")
+            lsp_global = rt.lsp.untrusted("global") if rt.lsp is not None else []
             for line in rt.held.notices():
                 self._notice("warn", line)
             marker = await asyncio.to_thread(guard.marker_info)
@@ -276,6 +277,7 @@ class Daemon:
                 marker=marker,
                 deny=rules.global_deny,
                 held=rt.held,
+                lsp=lsp_global,
             )
             yes = await self.asks.ask("global_trust", ask)
             self._show(
@@ -297,8 +299,11 @@ class Daemon:
                 )
             )
         allow, project_hooks = rules.untrusted_allow, hooks.untrusted()
-        if allow or project_hooks:
-            yes = await self.asks.ask("permission_trust", trust_lines("permission_trust", rules=allow, hooks=project_hooks))
+        project_lsp = rt.lsp.untrusted() if rt.lsp is not None else []
+        if allow or project_hooks or project_lsp:
+            yes = await self.asks.ask(
+                "permission_trust", trust_lines("permission_trust", rules=allow, hooks=project_hooks, lsp=project_lsp)
+            )
             self._show(
                 await asyncio.to_thread(
                     apply_trust,
@@ -307,6 +312,7 @@ class Daemon:
                     permissions=rules,
                     has_rules=bool(allow),
                     has_hooks=bool(project_hooks),
+                    has_lsp=bool(project_lsp),
                 )
             )
 

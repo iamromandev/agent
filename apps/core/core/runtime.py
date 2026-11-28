@@ -408,7 +408,7 @@ def build_runtime(
             untrusted=(frozenset() if trust_project_mcp else setup.untrusted)
             | (frozenset(s.name for s in setup.servers if s.source == "global") if global_held else frozenset()),
         )
-        config_guard = ConfigGuard(root, permissions.rules, mcp, [permission_store, mcp_store], marker)
+        config_guard = ConfigGuard(root, permissions.rules, mcp, [permission_store, mcp_store], marker, lsp=lsp)
         config_guard.bind(config_watch)  # from here a change is reacted to (one seen before is handed over)
 
         puller: ImagePuller | None = None

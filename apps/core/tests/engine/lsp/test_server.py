@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 from core.engine.lsp import server as server_module
-from core.engine.lsp.config import ServerSpec
+from core.engine.lsp.config import ServerSpec, take_fingerprint
 from core.engine.lsp.server import Diagnostic, LspServer
 from core.testing.helpers import assert_all_gone, wait_until
 from core.testing.lsp_fakes import fake_lsp
@@ -211,3 +211,48 @@ async def test_a_bare_command_is_never_resolved_by_the_spawn(workspace: Path) ->
     server = LspServer(spec, workspace, dict(os.environ))
     assert await server.diagnostics(workspace / "a.py", "x\n", wait=1, start_wait=2) is None
     assert server.state == "exited" and server.reason is not None and server.reason.startswith("could not start: ")
+
+
+async def test_withdraw_while_the_process_is_still_spawning_leaves_no_process_and_no_exited_reason(
+    make: Maker, workspace: Path
+) -> None:
+    server = make("pull")
+    task = asyncio.ensure_future(server.diagnostics(workspace / "a.py", "x\n", wait=3, start_wait=5))
+    await asyncio.sleep(0)  # the spawn has begun, not finished: there is no process group to kill yet
+    server.withdraw("config changed")
+    assert await task is None
+    assert server._proc is not None
+    await assert_all_gone(server._proc.pid)  # before any close(): the start itself killed it
+    assert (server.state, server.reason) == ("off", "config changed")
+
+
+async def test_withdraw_while_a_diagnostics_call_waits_kills_the_process_and_returns_nothing(
+    make: Maker, workspace: Path
+) -> None:
+    server = make("late", FAKE_LSP_DELAY="30")
+    task = asyncio.ensure_future(server.diagnostics(workspace / "a.py", "x\n", wait=20, start_wait=5))
+    await wait_until(lambda: make.dump.exists() and "textDocument/diagnostic" in make.dump.read_text())
+    server.withdraw("config changed")
+    assert await task is None
+    await assert_all_gone(int(lines(make.dump)[0]["pid"]))
+    assert (server.state, server.reason) == ("off", "config changed")  # not `exited (code -9)`
+
+
+async def test_a_program_that_changed_since_launch_is_not_started(make: Maker, workspace: Path) -> None:
+    exe = fake_lsp(make.tmp_path, "ty")
+    spec = ServerSpec("ty", str(exe), (), frozenset({".py"}), {}, "global", take_fingerprint(str(exe)))
+    server = LspServer(spec, workspace, dict(os.environ))
+    make.made.append(server)
+    exe.write_text(exe.read_text() + "\n# changed\n")
+    assert await server.diagnostics(workspace / "a.py", "x\n", wait=1, start_wait=2) is None
+    assert server.state == "exited" and server.reason == f"{exe} changed since launch"
+    assert not make.dump.exists()  # nothing was spawned
+
+
+async def test_an_unchanged_fingerprinted_program_starts(make: Maker, workspace: Path) -> None:
+    exe = fake_lsp(make.tmp_path, "ty")
+    spec = ServerSpec("ty", str(exe), (), frozenset({".py"}), {}, "global", take_fingerprint(str(exe)))
+    server = LspServer(spec, workspace, dict(os.environ))
+    make.made.append(server)
+    assert await server.diagnostics(workspace / "a.py", "x\n", wait=3, start_wait=5) is not None
+    await server.stop()

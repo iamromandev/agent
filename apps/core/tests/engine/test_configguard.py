@@ -13,9 +13,13 @@ from pathlib import Path
 import pytest
 from core.engine.configguard import ConfigGuard, GlobalMarker
 from core.engine.configwatch import Cause, ConfigWatch, TrustRevoked, WatchedSet
+from core.engine.lsp.config import LspSetup, ServerSpec
+from core.engine.lsp.hub import LspHub
 from core.engine.mcp.trust import TrustStore
 from core.engine.permissions.config import project_settings_path
 from core.engine.permissions.setup import Rules, prepare
+from core.testing.helpers import assert_all_gone
+from core.testing.lsp_fakes import fake_lsp
 
 
 class FakeMcp:
@@ -66,7 +70,7 @@ class Env:
         rules.trust_project()
         return rules
 
-    def guard(self, rules: Rules) -> ConfigGuard:
+    def guard(self, rules: Rules, lsp: LspHub | None = None) -> ConfigGuard:
         guard = ConfigGuard(
             self.workspace,
             rules,
@@ -74,6 +78,7 @@ class Env:
             [self.perm_store, self.mcp_store],
             self.marker,
             home=self.tmp / "home",
+            lsp=lsp,
         )
         guard.listeners.append(self.warnings.append)
         return guard
@@ -650,3 +655,89 @@ def test_the_marker_round_trip_is_atomic_and_clear_is_idempotent(env: Env) -> No
     env.marker.clear()
 
     assert env.marker.exists() is False
+
+
+def _hub(env: Env, monkeypatch: pytest.MonkeyPatch) -> tuple[LspHub, Path]:
+    dump = env.tmp / "dump.jsonl"
+    monkeypatch.setenv("FAKE_LSP_DUMP", str(dump))
+    (env.tmp / "bin").mkdir(exist_ok=True)
+    specs = tuple(
+        ServerSpec(name, str(fake_lsp(env.tmp / "bin", name)), (), frozenset({".py"}), {}, source)
+        for name, source in (("proj", "project"), ("glob", "global"))
+    )
+    hub = LspHub(LspSetup(True, False, specs, ()), env.workspace, dict(os.environ), wait=3, start_wait=5, max_lines=20)
+    return hub, dump
+
+
+async def _run_both(hub: LspHub, env: Env, dump: Path) -> tuple[int, int]:
+    """The pids of the project server and the global one (the table order is the order they first appear)."""
+    for text in ("x\n", "y\n"):
+        await hub.block(env.workspace / "a.py", text, lambda e: None, 10_000)
+    found = list(dict.fromkeys(json.loads(x)["pid"] for x in dump.read_text().splitlines()))
+    assert len(found) == 2
+    return found[0], found[1]
+
+
+async def test_ac10_a_project_change_stops_the_project_lsp_servers_and_nothing_restarts(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, dump = _hub(env, monkeypatch)
+    guard = env.guard(env.rules(), lsp=hub)
+    watch = env.watch(guard)
+    proj_pid, glob_pid = await _run_both(hub, env, dump)
+
+    (env.workspace / ".agent" / "settings.json").write_text("{}")
+    watch.check(Cause.tool("bash", "./setup.sh"))
+    await guard.settle()
+    await assert_all_gone(proj_pid)  # right after the reaction, not at close()
+    os.kill(glob_pid, 0)  # the global server is still alive
+
+    assert ("proj", "project", "off", "config changed") in hub.listing()
+    assert next(row for row in hub.listing() if row[0] == "glob")[2] == "running"
+    assert env.warnings[0].endswith("project trust revoked — the next launch will ask; LSP servers stopped")
+    await hub.block(env.workspace / "a.py", "z\n", lambda e: None, 10_000)
+    assert len({json.loads(x)["pid"] for x in dump.read_text().splitlines()}) == 2  # nothing new started
+    await hub.close()
+    await assert_all_gone(glob_pid)
+
+
+async def test_ac10_a_global_settings_change_stops_the_global_lsp_servers_only(
+    env: Env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    hub, dump = _hub(env, monkeypatch)
+    guard = env.guard(env.rules(), lsp=hub)
+    watch = env.watch(guard)
+    proj_pid, glob_pid = await _run_both(hub, env, dump)
+
+    (env.config / "settings.json").write_text("{}")
+    watch.check(Cause.background())
+    await guard.settle()
+    await assert_all_gone(glob_pid)  # right after the reaction, not at close()
+    os.kill(proj_pid, 0)  # the project server is still alive
+
+    states = {row[0]: row[2:] for row in hub.listing()}
+    assert states["glob"] == ("off", "config changed") and states["proj"][0] == "running"
+    assert env.warnings[0].endswith("; LSP servers stopped")
+    await hub.close()
+    await assert_all_gone(proj_pid)
+
+
+async def test_a_failing_lsp_withdraw_does_not_break_the_reaction(env: Env) -> None:
+    class Broken:
+        def sources(self) -> dict[str, str]:
+            return {"proj": "project"}
+
+        def withdraw(self, names: Sequence[str], reason: str) -> None:
+            raise RuntimeError("hub broken")
+
+    rules = env.rules()
+    guard = ConfigGuard(env.workspace, rules, env.mcp, [env.perm_store, env.mcp_store], env.marker, home=env.tmp / "home", lsp=Broken())
+    guard.listeners.append(env.warnings.append)
+    watch = env.watch(guard)
+
+    (env.workspace / ".agent" / "settings.json").write_text("{}")
+    watch.check(Cause.background())
+    await guard.settle()
+
+    assert not _allowed(rules)  # the revoke still happened
+    assert "could not stop the LSP servers" in env.warnings[0]

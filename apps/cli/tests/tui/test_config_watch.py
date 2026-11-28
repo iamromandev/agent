@@ -363,6 +363,29 @@ async def test_the_global_dialog_escapes_what_came_from_the_files() -> None:
     assert "a\\x1b]0;x\\x07" in text and "and 3 more" in text
 
 
+async def test_the_global_dialog_lists_the_held_global_language_servers() -> None:
+    from core.engine.lsp.config import ServerSpec
+    from textual.app import App, ComposeResult
+
+    spec = ServerSpec("my\x1bdsl", "/opt/dsl", ("--stdio",), frozenset({".m"}), {"PATH": "/x"}, "global")
+    screen = GlobalTrustScreen([], [], [], None, lsp=[spec])
+
+    class Host(App[None]):
+        def compose(self) -> ComposeResult:
+            yield from ()
+
+        async def on_mount(self) -> None:
+            await self.push_screen(screen)
+
+    async with Host().run_test(size=(160, 40)) as pilot:
+        await pilot.pause()
+        text = " ".join(str(label.render()) for label in screen.query(Label))
+        options = " ".join(str(screen.query_one(OptionList).get_option_at_index(i).prompt) for i in range(screen.query_one(OptionList).option_count))
+
+    assert "1 language server" in text
+    assert "lsp my\\x1bdsl: /opt/dsl --stdio  (env: PATH)" in (text + " " + options)
+
+
 async def test_without_a_marker_there_is_no_global_dialog(launch: Launch) -> None:
     _global(["bash(ls)"], {"g": {"command": "srv"}})
     app = launch.app()

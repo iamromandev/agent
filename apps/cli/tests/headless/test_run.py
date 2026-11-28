@@ -376,6 +376,56 @@ def test_trust_project_activates_rules_hooks_and_servers_without_writing_a_trust
     assert _trust_files() == []
 
 
+def _lsp_project(ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    import os
+
+    from core.testing.lsp_fakes import fake_lsp
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_lsp(bin_dir, "ty")
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}/usr/bin{os.pathsep}/bin")  # no other language server is found
+    dump = tmp_path / "dump.jsonl"
+    monkeypatch.setenv("FAKE_LSP_DUMP", str(dump))
+    (ws / ".agent").mkdir()
+    from core.engine.lsp.config import BUILTINS
+
+    servers: dict[str, object] = {b.name: False for b in BUILTINS if b.name != "ty"}  # only the fake `ty`, whatever else is installed
+    servers["mine"] = {"command": str(bin_dir / "ty"), "extensions": [".zz"]}
+    (ws / ".agent" / "settings.json").write_text(json.dumps({"lsp": {"servers": servers}}))
+    return dump
+
+
+def test_an_untrusted_project_lsp_value_warns_and_starts_nothing(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dump = _lsp_project(ws, tmp_path, monkeypatch)
+    provider = ScriptedProvider([call("write", path="a.py", content="x = 1\n"), say("ok")])
+
+    code = go(ws, provider, allow=("write",))
+
+    err = capsys.readouterr().err
+    assert code == EXIT_OK
+    (line,) = [x for x in err.splitlines() if "project lsp servers are not trusted: " in x]
+    assert line == "warning: project lsp servers are not trusted: ty, mine"
+    assert not dump.exists()
+    assert "[diagnostics" not in tool_results(provider)[0]
+
+
+def test_trust_project_lets_the_project_lsp_servers_run(
+    ws: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    dump = _lsp_project(ws, tmp_path, monkeypatch)
+    provider = ScriptedProvider([call("write", path="a.py", content="x = 1\n"), say("ok")])
+
+    code = go(ws, provider, allow=("write",), trust_project=True)
+
+    assert code == EXIT_OK
+    assert "lsp servers are not trusted" not in capsys.readouterr().err
+    assert "[diagnostics from ty:" in tool_results(provider)[0]
+    assert len({json.loads(x)["pid"] for x in dump.read_text().splitlines()}) == 1
+
+
 def test_a_stdin_without_a_byte_buffer_is_no_input_not_a_crash(
     ws: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

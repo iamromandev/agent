@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from core.engine.configwatch import TrustRevoked
 from core.engine.hooks.config import read_hooks
+from core.engine.lsp.config import project_needs_trust
 from core.engine.mcp.trust import TrustStore
 from core.engine.permissions.config import RuleFile, add_allow, project_settings_path, read_rules, set_top_key
 from core.engine.permissions.rules import Rule, Source, parse_rule, resolve_key
@@ -55,10 +56,12 @@ class Rules:
         settings_path: Path | None = None,
         store_path: Path | None = None,
         own_write: OwnWrite | None = None,
+        project_lsp: bool = False,
     ) -> None:
         """`save(rule_text)` writes the rule to the project file and returns the new bytes when they may be trusted
         (None: written, but the file was changed since launch, so its content is not vouched for). `trust(bytes)`
-        remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust.
+        remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust;
+        `project_lsp`: so does an `lsp` value that starts language servers.
         `save_key(key, value)` is `save` for a top-level string key (the model choice). `own_write(paths)` wraps
         each of those writes (the config watch's `own_write`: it accepts only the paths named); none: no watch."""
         self._global = global_file
@@ -69,6 +72,7 @@ class Rules:
         self._save_key = save_key
         self._trust = trust
         self._project_hooks = project_hooks
+        self._project_lsp = project_lsp
         self._added: list[Rule] = []  # saved with "Always here" in this run: active at once
         self._run: list[Rule] = []  # given for this run only (`--allow`): never saved
         self._deny: tuple[tuple[Rule, Source], ...] = (*((r, "global") for r in global_file.deny), *((r, "project") for r in project_file.deny))
@@ -177,8 +181,8 @@ class Rules:
 
     @property
     def pending_trust(self) -> bool:
-        """Does the project file hold allow rules or hooks that wait for the user's trust?"""
-        return not self._trusted and (bool(self._project.allow) or self._project_hooks)
+        """Does the project file hold allow rules, hooks or language servers that wait for the user's trust?"""
+        return not self._trusted and (bool(self._project.allow) or self._project_hooks or self._project_lsp)
 
     def deny(self, tool: str, args: Mapping[str, Any], key: str | None) -> Verdict | None:
         """A deny rule that matches, from either file. Project deny rules need no trust: they only refuse."""
@@ -383,7 +387,8 @@ def prepare(
     project_file = read_rules(project_path)
     raw = project_file.raw
     project_hooks = bool(read_hooks(project_file.data, "project")[0])  # valid hooks run commands: they wait for the same trust
-    needs_trust = (bool(project_file.allow) or project_hooks) and raw is not None and not store.is_trusted(workspace, raw)
+    project_lsp = project_needs_trust(global_file.data, project_file.data, workspace)  # language servers are programs the file starts
+    needs_trust = (bool(project_file.allow) or project_hooks or project_lsp) and raw is not None and not store.is_trusted(workspace, raw)
     warnings = [
         escape(w)
         for w in (
@@ -425,6 +430,7 @@ def prepare(
         settings_path=project_path,
         store_path=store.path,
         own_write=own_write,
+        project_lsp=project_lsp,
     )
     if len(warnings) > MAX_WARNINGS:
         more = len(warnings) - MAX_WARNINGS

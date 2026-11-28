@@ -46,6 +46,7 @@ from core.engine.events import WorkflowLine, WorkflowProgress
 from core.engine.guardrails.setup import Guardrails
 from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import NOT_INSTALLED, ROLES, ImagePuller, Level, Role, format_status
+from core.engine.lsp.hub import LspHub
 from core.engine.mcp.hub import HubEvent, McpHub
 from core.engine.mentions_index import FileIndex
 from core.engine.mode import Mode
@@ -185,6 +186,7 @@ class AgentApp(App[None]):
         timings: TimingStore | None = None,
         config_guard: ConfigGuard | None = None,
         held: HeldGlobal | None = None,
+        lsp: LspHub | None = None,
         model: str | None = None,
     ) -> None:
         super().__init__()
@@ -194,6 +196,7 @@ class AgentApp(App[None]):
         # What the marker holds until the next launch besides the allow rules, hooks and servers (shown and asked about
         # with them): the global keepEnv and the global commands, skills, agents and workflows.
         self._held = held if held is not None else HeldGlobal()
+        self.lsp = lsp  # language servers: its project-sourced ones wait for the same trust as the rules and hooks
         # The config watch's reaction object: its warnings go to the transcript, `/guardrails` lists its changes, and
         # its marker (an earlier run's change to the global config) opens the global trust dialog at launch.
         self.config_guard = config_guard
@@ -517,6 +520,7 @@ class AgentApp(App[None]):
             or self.skills.warnings
             or self.permissions.untrusted_allow
             or self.hooks.untrusted()
+            or (self.lsp is not None and self.lsp.untrusted())
             or (self.mcp is not None and self.mcp.untrusted("project"))
             or self._global_waiting()
         ):
@@ -548,7 +552,13 @@ class AgentApp(App[None]):
             await transcript.add_notice("warn", line)
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
         screen = GlobalTrustScreen(
-            self.permissions.global_allow, hooks, servers, marker, deny=self.permissions.global_deny, held=self._held
+            self.permissions.global_allow,
+            hooks,
+            servers,
+            marker,
+            deny=self.permissions.global_deny,
+            held=self._held,
+            lsp=self.lsp.untrusted("global") if self.lsp is not None else (),
         )
         trusted = await self.push_screen_wait(screen)
         # the marker is removed (and the store written) off the event loop
@@ -567,10 +577,11 @@ class AgentApp(App[None]):
         yes turns them on."""
         rules = self.permissions.untrusted_allow
         hooks = self.hooks.untrusted()
-        if not rules and not hooks:
+        lsp = self.lsp.untrusted() if self.lsp is not None else []
+        if not rules and not hooks and not lsp:
             return
         self._keys_ignored_until = time.monotonic() + KEY_GUARD  # keys typed for the chat must not answer it
-        trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks))
+        trusted = await self.push_screen_wait(PermissionTrustScreen(rules, hooks, lsp=lsp))
         outcome = await asyncio.to_thread(  # writes the trust store: not on the event loop
             apply_trust,
             "permission_trust",
@@ -578,6 +589,7 @@ class AgentApp(App[None]):
             permissions=self.permissions,
             has_rules=bool(rules),
             has_hooks=bool(hooks),
+            has_lsp=bool(lsp),
         )
         await self._show_trust(outcome)
 

@@ -105,3 +105,22 @@ def test_every_agent_the_factory_makes_has_the_runtimes_hub(ws: Path) -> None:
     agent = rt.agent_factory(RecordingApprover([]))
     asyncio.run(rt.close())
     assert rt.lsp is not None and agent.lsp is rt.lsp
+
+
+async def test_a_held_global_marker_keeps_global_servers_off_until_trust(ws: Path, tmp_path: Path) -> None:
+    from core.engine.configguard import GlobalMarker, marker_path
+
+    GlobalMarker(marker_path()).write(["~/.config/agent/settings.json"])
+    settings(True)
+    rt = build(ws, ScriptedProvider(write_script("x = 2\n") + write_script("x = 3\n")))
+    assert rt.lsp is not None and rt.lsp.listing()[0][2:] == ("untrusted", "untrusted")
+    agent = rt.agent_factory(RecordingApprover([Decision(Choice.ONCE)] * 2))
+    await agent.run_turn("go", lambda e: None)
+    assert pids(tmp_path) == set()  # held: nothing started, no block
+
+    await asyncio.to_thread(rt.config_guard.trust_global)  # the launch dialog's Trust
+    agent = rt.agent_factory(RecordingApprover([Decision(Choice.ONCE)] * 2))
+    await agent.run_turn("go", lambda e: None)
+    assert len(pids(tmp_path)) == 1
+    await rt.close()
+

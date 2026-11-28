@@ -17,7 +17,7 @@ from src.headless.run import run_headless
 
 MARKER_WARNING = (
     "global config was changed by a command in an earlier run; until you trust it in the app, global allow rules, "
-    "hooks and MCP servers are off; global keepEnv is ignored (1 name); not loaded: 2 global commands, 1 global skill"
+    "hooks, MCP servers and language servers are off; global keepEnv is ignored (1 name); not loaded: 2 global commands, 1 global skill"
 )
 REWRITE = "echo '{}' > .agent/settings.json"
 

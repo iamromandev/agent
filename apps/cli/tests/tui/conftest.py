@@ -19,6 +19,7 @@ from core.engine.guardrails.setup import Guardrails
 from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import ImagePuller
 from core.engine.imagegen import MfluxGenerator
+from core.engine.lsp.hub import LspHub
 from core.engine.mcp.hub import McpHub
 from core.engine.mentions_index import FileIndex
 from core.engine.permissions.setup import Rules
@@ -132,6 +133,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         config_guard: ConfigGuard | None = None,
         watch: Watch | None = None,
         held: HeldGlobal | None = None,
+        lsp: LspHub | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -199,6 +201,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             timings=timings if timings is not None else TimingStore(None),  # never the real data folder
             config_guard=config_guard,
             held=held,
+            lsp=lsp,
         )
 
     return build

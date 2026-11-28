@@ -82,7 +82,7 @@ class HeldGlobal:
 
 def held_warning(held: HeldGlobal) -> str:
     """Headless mode's one warning when the marker is set at launch (it never asks): everything that is held."""
-    parts = ["global allow rules, hooks and MCP servers are off"]
+    parts = ["global allow rules, hooks, MCP servers and language servers are off"]
     if held.keep_env:
         parts.append(f"global keepEnv is ignored ({_count(len(held.keep_env), 'name')})")
     if kinds := held.kinds():
@@ -114,6 +114,14 @@ class McpControl(Protocol):
     def withdraw(self, names: Sequence[str], reason: str) -> Sequence[str]: ...
 
     async def stop(self, names: Sequence[str], reason: str) -> None: ...
+
+
+class LspControl(Protocol):
+    """The language-server hub's side of a reaction (`LspHub`): withdraw is synchronous and kills the process groups."""
+
+    def sources(self) -> Mapping[str, str]: ...
+
+    def withdraw(self, names: Sequence[str], reason: str) -> None: ...
 
 
 class GlobalMarker:
@@ -198,8 +206,10 @@ class ConfigGuard:
         marker: GlobalMarker,
         *,
         home: Path | None = None,
+        lsp: LspControl | None = None,
     ) -> None:
         self._workspace = workspace
+        self.lsp = lsp
         self._rules = rules
         self.mcp = mcp  # may be set later: the hub is built after the guard in some setups
         self._stores = tuple(stores)
@@ -356,6 +366,7 @@ class ConfigGuard:
                 self._stop(names)
             except Exception as exc:
                 problems.append(f"could not stop the MCP servers ({_problem(exc)})")
+        stopped_lsp = self._withdraw_lsp(change, project, changed_global, problems)
         reactions: list[str] = []
         if project:
             failed = self._forget(problems, nested)
@@ -381,9 +392,31 @@ class ConfigGuard:
             else:
                 reactions.append("the global marker file was changed by a command")
         reaction = "; ".join(reactions)
+        if stopped_lsp:
+            reaction += "; LSP servers stopped"
         if problems:
             reaction += " (" + "; ".join(problems) + ")"
         return f"config changed by {change.cause.text}: {self._files(change.paths)}; {reaction}"
+
+    def _withdraw_lsp(self, change: Change, project: bool, changed_global: bool, problems: list[str]) -> bool:
+        """Stop the language servers whose file changed: the project-sourced ones for a project change, the
+        global-sourced ones when the global settings file itself changed. True when any was withdrawn."""
+        if self.lsp is None:
+            return False
+        try:
+            sources = self.lsp.sources()
+            names: list[str] = []
+            if project:
+                names += [n for n, source in sources.items() if source == "project"]
+            global_settings = self._watch.watched.root("global", "settings.json") if self._watch is not None else None
+            if changed_global and global_settings is not None and global_settings in change.paths:
+                names += [n for n, source in sources.items() if source == "global"]
+            if names:
+                self.lsp.withdraw(names, STOP_REASON)
+            return bool(names)
+        except Exception as exc:
+            problems.append(f"could not stop the LSP servers ({_problem(exc)})")
+            return False
 
     @staticmethod
     def _safely(step: Callable[[], None], what: str, problems: list[str]) -> None:

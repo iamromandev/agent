@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import socket
 from pathlib import Path
 
+from core.engine.configguard import GlobalMarker, marker_path
 from core.engine.events import Notice, WorkflowLine
+from core.engine.lsp.config import BUILTINS
 from core.engine.provider.base import Done, Message, TextDelta, ToolCall, ToolCallEvent
 from core.engine.session import FileRecorder
 from core.engine.session.lock import SessionLock
@@ -231,6 +234,37 @@ async def test_a_trust_prompt_waits_for_a_client_and_the_first_answer_applies_on
     await wait_until(lambda: [name for name, _ in connector.connects] == ["tools"])
     await stream.until(lambda s: bool(s.of("ask_resolved")))
     assert served.daemon.pending_asks() == []
+
+
+MINE = {"command": "/bin/sh", "args": ["-c", "x"], "extensions": [".m"], "env": {"NODE_OPTIONS": "-r y"}}
+# the built-ins are switched off: which of them is on PATH is not this test's business
+LSP_SERVER = {"lsp": {"servers": {**{b.name: False for b in BUILTINS}, "mine": MINE}}}
+
+
+def _project_lsp(ws: Path) -> None:
+    (ws / ".agent").mkdir()
+    (ws / ".agent" / "settings.json").write_text(json.dumps(LSP_SERVER))
+
+
+def _held_global_lsp(ws: Path) -> None:
+    folder = Path(os.environ["XDG_CONFIG_HOME"]) / "agent"
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "settings.json").write_text(json.dumps(LSP_SERVER))
+    GlobalMarker(marker_path()).write(["~/.config/agent/settings.json"])
+
+
+async def test_the_daemons_project_trust_ask_lists_the_lsp_server(serve) -> None:
+    served = await serve(setup=_project_lsp)
+    (ask,) = (await served.open(served.client("A")))["snapshot"]["asks"]
+    assert ask["kind"] == "permission_trust"
+    assert ask["request"]["lines"] == ["lsp mine: /bin/sh -c x  (env: NODE_OPTIONS)"]
+
+
+async def test_the_daemons_global_trust_ask_lists_the_held_global_lsp_server(serve) -> None:
+    served = await serve(setup=_held_global_lsp)
+    asks = (await served.open(served.client("A")))["snapshot"]["asks"]
+    (ask,) = [a for a in asks if a["kind"] == "global_trust"]
+    assert "lsp mine: /bin/sh -c x  (env: NODE_OPTIONS)" in ask["request"]["lines"]
 
 
 async def test_a_gated_turn_is_interrupted_by_any_client(serve) -> None:

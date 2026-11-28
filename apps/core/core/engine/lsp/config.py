@@ -3,8 +3,10 @@ the lookup of executables (`.venv/bin` under a rule, then the absolute entries o
 
 from __future__ import annotations
 
+import hashlib
 import os
 import shutil
+import stat
 import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -12,11 +14,53 @@ from pathlib import Path
 from typing import Literal
 
 from core.engine.checkpoints.git import find_git
+from core.engine.mentions_index import git_env
 from core.engine.text import escape
 
 Source = Literal["builtin", "global", "project"]
 GIT_LIMIT = 5.0
-PROJECT_UNSUPPORTED = "project lsp servers are not supported yet; ignored: "
+MAX_PROGRAM_BYTES = 64 * 1024 * 1024  # a `.venv/bin` program is fingerprinted by reading it whole: at most this big
+
+
+@dataclass(frozen=True)
+class Fingerprint:
+    """A program as it was at launch: the real file behind the path (symlinks resolved), its sha256 and
+    `(st_dev, st_ino, st_size, st_mtime_ns)`."""
+
+    path: str
+    sha256: str
+    stat: tuple[int, int, int, int]
+
+
+def take_fingerprint(command: str) -> Fingerprint:
+    """Read the file `command` names (through symlinks) once, bounded by `MAX_PROGRAM_BYTES`. Raises OSError (also
+    for a file that is too big or not a regular file)."""
+    real = os.path.realpath(command)
+    fd = os.open(real, os.O_RDONLY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError("not a regular file")
+        if info.st_size > MAX_PROGRAM_BYTES:
+            raise OSError("too big")
+        digest = hashlib.sha256()
+        total = 0
+        while chunk := os.read(fd, 1 << 20):
+            total += len(chunk)
+            if total > MAX_PROGRAM_BYTES:
+                raise OSError("too big")
+            digest.update(chunk)
+    finally:
+        os.close(fd)
+    return Fingerprint(real, digest.hexdigest(), (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns))
+
+
+def changed_since_launch(command: str, expected: Fingerprint) -> bool:
+    """Is the program at `command` not the one that was fingerprinted? (blocking: reads the file)"""
+    try:
+        return take_fingerprint(command) != expected
+    except OSError:
+        return True
 
 
 @dataclass(frozen=True)
@@ -27,6 +71,7 @@ class ServerSpec:
     extensions: frozenset[str]
     env: Mapping[str, str]
     source: Source
+    fingerprint: Fingerprint | None = None  # a `.venv/bin` program: what it was at launch, checked again before it starts
 
 
 @dataclass(frozen=True)
@@ -70,29 +115,46 @@ def find_on_path(name: str) -> str | None:
 
 
 class _Venvs:
-    """`<workspace>/.venv/bin/<name>` programs: usable only when the workspace is a git repository in which nothing
-    under `.venv` is tracked (a cloned repo could commit its own `.venv/bin/ty`). Such a program counts as
-    project-sourced. Git is asked at most once, and only when some program exists there."""
+    """`<workspace>/.venv/bin/<name>` programs: usable only when the workspace is itself the top of a git repository
+    (not a folder inside a parent repo) in which nothing under `.venv` is tracked (a cloned repo could commit its
+    own `.venv/bin/ty`). An untracked one was made by the user's own tooling, so it takes the source of the file that
+    turned LSP on; its bytes are fingerprinted at launch and checked again before it starts. Git is asked once
+    (two calls), and only when some program exists there. Every git call ignores the repository's own `core.fsmonitor`."""
 
-    def __init__(self, workspace: Path) -> None:
+    def __init__(self, workspace: Path, warnings: list[str]) -> None:
         self._workspace = workspace
+        self._warnings = warnings
         self._clean: bool | None = None
+
+    def _git(self, git: str, *args: str) -> subprocess.CompletedProcess[bytes] | None:
+        try:
+            return subprocess.run(
+                [git, "-c", "core.fsmonitor=false", *args],
+                cwd=self._workspace,
+                env=git_env(),
+                capture_output=True,
+                timeout=GIT_LIMIT,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
 
     def _untracked(self) -> bool:
         git = find_git(os.environ, self._workspace)
         if git is None:
             return False
-        env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
-        env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
-        try:
-            done = subprocess.run(
-                [git, "ls-files", "--", ".venv"], cwd=self._workspace, env=env, capture_output=True, timeout=GIT_LIMIT, check=False
-            )
-        except (OSError, subprocess.SubprocessError):
+        top = self._git(git, "rev-parse", "--show-toplevel")
+        if top is None or top.returncode != 0:
             return False
-        return done.returncode == 0 and not done.stdout.strip()
+        try:
+            if Path(top.stdout.decode().strip()).resolve() != self._workspace.resolve():
+                return False  # a workspace inside a parent repository: that repo's `.venv` rules are not ours to read
+        except (OSError, RuntimeError, UnicodeDecodeError):
+            return False
+        done = self._git(git, "ls-files", "--", ".venv")
+        return done is not None and done.returncode == 0 and not done.stdout.strip()
 
-    def executable(self, name: str) -> str | None:
+    def executable(self, name: str) -> tuple[str, Fingerprint] | None:
         candidate = self._workspace / ".venv" / "bin" / name
         try:
             if not (candidate.is_file() and os.access(candidate, os.X_OK)):
@@ -101,7 +163,23 @@ class _Venvs:
             return None
         if self._clean is None:
             self._clean = self._untracked()
-        return str(candidate) if self._clean else None
+        if not self._clean:
+            return None
+        try:
+            return str(candidate), take_fingerprint(str(candidate))
+        except OSError as exc:
+            limit = MAX_PROGRAM_BYTES // (1024 * 1024)
+            why = f"is over {limit} MiB" if str(exc) == "too big" else "cannot be read"
+            self._warnings.append(escape(f"lsp: {candidate} {why}; not used"))
+            return None
+
+
+def _inside(path: Path, workspace: Path) -> bool:
+    """Does `path` lie in the workspace once symlinks are resolved on both sides?"""
+    try:
+        return path.resolve().is_relative_to(workspace.resolve())
+    except (OSError, RuntimeError):
+        return True  # cannot tell: treat it as the repository's
 
 
 def _on(value: object) -> bool:
@@ -136,6 +214,8 @@ def _entry(
         if not usable:
             return None, f"command {command} is not an executable file"
         resolved = str(target)
+        if _inside(target, workspace):  # a program the repository supplies is the repository's, whoever named it
+            source = "project"
     else:  # a bare name: only an absolute PATH entry may supply it, never the spawn's own lookup
         found = which(command)
         if found is None:
@@ -165,7 +245,6 @@ def read_lsp(
     warnings_flag = options.get("warnings") is True
     warnings: list[str] = []
     configured: dict[str, tuple[object, Source]] = {}
-    ignored: list[str] = []
     for data, source in ((g, "global"), (p, "project")):
         servers = data.get("servers") if isinstance(data, dict) else None
         if servers is None:
@@ -176,8 +255,6 @@ def read_lsp(
         for name, raw in servers.items():
             if raw is False:
                 configured[name] = (False, source)  # a switch-off only ever tightens
-            elif source == "project":
-                ignored.append(name)  # phase 1: no project servers (the entry is not even read)
             else:
                 configured[name] = (raw, source)
     table: list[tuple[str, Source, _Builtin | None, object]] = []
@@ -190,23 +267,21 @@ def read_lsp(
         if name not in seen:
             table.append((name, source, None, raw))
     specs: list[ServerSpec] = []
-    venvs = _Venvs(workspace)
+    venvs = _Venvs(workspace, warnings)
     checker_taken = False
     for name, source, base, raw in table:
         if raw is False:
             continue
         if raw is None:  # a built-in as it is: used only when its program is found
             assert base is not None
-            path = which(base.executable)
-            if builtin_source == "project":  # only the project file turned LSP on
-                if path is not None or venvs.executable(base.executable) is not None:
-                    ignored.append(name)
+            on_path = which(base.executable)
+            venv = None if on_path else venvs.executable(base.executable)
+            if on_path:
+                spec: ServerSpec | None = ServerSpec(name, on_path, base.args, base.extensions, {}, source)
+            elif venv:
+                spec = ServerSpec(name, venv[0], base.args, base.extensions, {}, source, venv[1])
+            else:
                 continue
-            if path is None:
-                if venvs.executable(base.executable) is not None:
-                    ignored.append(name)  # only a project-sourced `.venv` program exists: not supported yet
-                continue
-            spec: ServerSpec | None = ServerSpec(name, path, base.args, base.extensions, {}, source)
         else:
             spec, problem = _entry(name, raw, base, source, workspace, which)
             if spec is None:
@@ -217,6 +292,16 @@ def read_lsp(
                 continue
             checker_taken = True
         specs.append(spec)
-    if ignored:
-        warnings.append(escape(PROJECT_UNSUPPORTED + ", ".join(dict.fromkeys(ignored))))
     return LspSetup(True, warnings_flag, tuple(specs), tuple(warnings))
+
+
+def project_needs_trust(
+    global_data: Mapping[str, object] | None,
+    project_data: Mapping[str, object] | None,
+    workspace: Path,
+    *,
+    which: Callable[[str], str | None] = find_on_path,
+) -> bool:
+    """Does the project file start a language server that will actually run: a project-sourced spec in what
+    `read_lsp` builds from both files? Such a file waits for the same trust as project allow rules and hooks."""
+    return any(spec.source == "project" for spec in read_lsp(global_data, project_data, workspace, which=which).servers)

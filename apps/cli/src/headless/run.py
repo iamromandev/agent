@@ -254,6 +254,8 @@ def _untrusted_warnings(rt: Runtime) -> list[str]:
         lines.append(f"{len(entries)} project hook{'s' * (len(entries) != 1)} {hint}")
     if (servers := rt.mcp.untrusted("project")):  # the global ones held by the marker have their own warning
         lines.append(f"{len(servers)} project MCP server{'s' * (len(servers) != 1)} {hint}")
+    if rt.lsp is not None and (specs := rt.lsp.untrusted()):
+        lines.append(escape_display(f"project lsp servers are not trusted: {', '.join(spec.name for spec in specs)}"))
     return lines
 
 
