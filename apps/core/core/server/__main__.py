@@ -12,10 +12,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
     run = sub.add_parser("serve", help="run the agent daemon for a workspace in the foreground")
     run.add_argument("--workspace", type=Path, default=Path.cwd())
+    run.add_argument("--model", default=None, help="the model a newly started daemon runs")
     args = parser.parse_args(argv)
     from core.server.serve import serve
 
-    return serve(args.workspace)
+    return serve(args.workspace, model=args.model)
 
 
 if __name__ == "__main__":

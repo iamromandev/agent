@@ -193,7 +193,7 @@ async def test_ensure_daemon_uses_the_running_daemon_and_starts_one_when_none_ru
     served = await serve()
     started: list[Path] = []
 
-    def fake_start(workspace: Path) -> Path:
+    def fake_start(workspace: Path, model: str | None = None) -> Path:
         started.append(workspace)
         return workspace / "new.sock"
 
@@ -204,3 +204,57 @@ async def test_ensure_daemon_uses_the_running_daemon_and_starts_one_when_none_ru
     other.mkdir()
     assert await asyncio.to_thread(served_module.ensure_daemon, other) == other.resolve() / "new.sock"
     assert started == [other.resolve()]
+
+
+def test_a_model_reaches_the_daemon_command_as_its_own_argument(tmp_path: Path) -> None:
+    ws = tmp_path / "ws"
+    assert "--model" not in served.daemon_argv(ws)
+    assert served.daemon_argv(ws, model="qwen; rm -rf /")[-2:] == ["--model", "qwen; rm -rf /"]
+
+
+def test_the_daemon_entry_point_passes_the_model_to_serve(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from core.server import __main__ as entry
+
+    calls: list[tuple[Path, str | None]] = []
+    monkeypatch.setattr(served, "serve", lambda workspace, model=None: calls.append((workspace, model)) or 0)
+    assert entry.main(["serve", "--workspace", str(tmp_path), "--model", "m:1"]) == 0
+    assert entry.main(["serve", "--workspace", str(tmp_path)]) == 0
+    assert calls == [(tmp_path, "m:1"), (tmp_path, None)]
+
+
+def test_start_background_launches_the_daemon_with_the_model(
+    data_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    started: list[list[str]] = []
+
+    class FakeProcess:
+        def __init__(self, argv: list[str], **kwargs: object) -> None:
+            started.append(argv)
+
+        def wait(self) -> int:
+            return 0
+
+    monkeypatch.setattr(served.subprocess, "Popen", FakeProcess)
+    monkeypatch.setattr(served, "hello", lambda workspace, timeout=1.0: {"v": 1} if started else None)
+    served.start_background(ws, model="m:1")
+    assert started == [served.daemon_argv(ws.resolve(), model="m:1")]
+
+
+async def test_ensure_daemon_starts_a_new_daemon_with_the_model_and_leaves_a_running_one(
+    serve, tmp_path, monkeypatch
+) -> None:
+    served_daemon = await serve()
+    started: list[tuple[Path, str | None]] = []
+
+    def fake_start(workspace: Path, model: str | None = None) -> Path:
+        started.append((workspace, model))
+        return workspace / "new.sock"
+
+    monkeypatch.setattr(served_module, "start_background", fake_start)
+    await asyncio.to_thread(served_module.ensure_daemon, served_daemon.workspace, "m:1")
+    other = tmp_path / "other"
+    other.mkdir()
+    await asyncio.to_thread(served_module.ensure_daemon, other, "m:1")
+    assert started == [(other.resolve(), "m:1")]

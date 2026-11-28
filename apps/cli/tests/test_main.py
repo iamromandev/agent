@@ -257,12 +257,14 @@ def test_run_shared_opens_the_app_on_the_daemon_and_says_why_when_it_cannot(
 
     ran: list[AgentApp] = []
     monkeypatch.setattr(AgentApp, "run", lambda self: ran.append(self))
-    monkeypatch.setattr(served, "ensure_daemon", lambda ws: tmp_path / "d.sock")
+    models: list[str | None] = []
+    monkeypatch.setattr(served, "ensure_daemon", lambda ws, model=None: models.append(model) or tmp_path / "d.sock")
     assert run_shared(tmp_path, StartChoice("continue"), "m") == 0
+    assert models == ["m"]  # a daemon started now runs it
     (app,) = ran
     assert isinstance(app.port, RemotePort) and app.port.socket == tmp_path / "d.sock" and app.start.kind == "continue"
 
-    def down(ws: Path) -> Path:
+    def down(ws: Path, model: str | None = None) -> Path:
         raise TimeoutError("the agent daemon did not start within 10 s (see x.log)")
 
     monkeypatch.setattr(served, "ensure_daemon", down)

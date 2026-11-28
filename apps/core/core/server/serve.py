@@ -88,7 +88,7 @@ def _signals_ignored() -> Generator[None]:
             signal.signal(sig, handler)
 
 
-def serve(workspace: Path) -> int:
+def serve(workspace: Path, model: str | None = None) -> int:
     """`agent serve`: the daemon for `workspace` in the foreground, logging to stderr. 1 when another daemon runs."""
     from core.engine.commands.builtins import BUILTINS
     from core.runtime import build_runtime
@@ -112,7 +112,7 @@ def serve(workspace: Path) -> int:
             return 1
         logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", stream=sys.stderr)
         log.info("agent daemon for %s on %s (pid %d)", ws, path, os.getpid())
-        rt = build_runtime(ws, BUILTINS, terminals=False, images=False, checkpoints=True)  # ctrl+c still aborts here
+        rt = build_runtime(ws, BUILTINS, terminals=False, images=False, checkpoints=True, model=model)  # ctrl+c still aborts here
         with _signals_ignored():  # from here to the last file removed, a signal cannot skip the cleanup
             try:
                 asyncio.run(run_daemon(Daemon(rt), sock))
@@ -180,14 +180,15 @@ def hello(workspace: Path, timeout: float = 1.0) -> dict[str, object] | None:
     return data if isinstance(data, dict) else None
 
 
-def daemon_argv(workspace: Path) -> list[str]:
+def daemon_argv(workspace: Path, model: str | None = None) -> list[str]:
     """The daemon's command line. `-P`: the interpreter does not put its working folder (the workspace, untrusted) first
     on `sys.path`, so a `core/`, `uvicorn.py` or `argparse.py` there is never imported. (`-I` would also drop
     `PYTHONPATH` and the user's site folder, which a user's own setup may rely on; the workspace is the threat.)"""
-    return [sys.executable, "-P", "-m", "core.server", "serve", "--workspace", str(workspace)]
+    argv = [sys.executable, "-P", "-m", "core.server", "serve", "--workspace", str(workspace)]
+    return [*argv, "--model", model] if model else argv
 
 
-def start_background(workspace: Path) -> Path:
+def start_background(workspace: Path, model: str | None = None) -> Path:
     """Start the daemon for `workspace` as its own session (stdout and stderr to its log file) and wait until it
     answers; returns the socket path. `TimeoutError` when it did not come up in time. A thread waits for the process,
     so it never lingers as a zombie of this one once it exits."""
@@ -196,7 +197,7 @@ def start_background(workspace: Path) -> Path:
     fd = os.open(log_file, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
     try:
         proc = subprocess.Popen(
-            daemon_argv(ws),
+            daemon_argv(ws, model),
             start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=fd,
@@ -214,12 +215,13 @@ def start_background(workspace: Path) -> Path:
     raise TimeoutError(f"the agent daemon did not start within {START_WAIT:g} s (see {log_file})")
 
 
-def ensure_daemon(workspace: Path) -> Path:
-    """The socket of `workspace`'s daemon: the running one, else one started now (`start_background`)."""
+def ensure_daemon(workspace: Path, model: str | None = None) -> Path:
+    """The socket of `workspace`'s daemon: the running one (whatever its model), else one started now on `model`
+    (`start_background`)."""
     ws = workspace.resolve()
     if hello(ws) is not None:
         return socket_path(ws)
-    return start_background(ws)
+    return start_background(ws, model)
 
 
 def stop(workspace: Path) -> bool:
