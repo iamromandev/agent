@@ -6,6 +6,7 @@
 .claude
 .superpowers
 .worktrees
+.agent
 
 ### project ###
 docs/conf/*
