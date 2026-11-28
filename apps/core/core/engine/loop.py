@@ -7,6 +7,7 @@ import contextlib
 import dataclasses
 import os
 import platform
+import stat
 import time
 from collections.abc import AsyncGenerator, Awaitable, Callable, Mapping, Sequence
 from datetime import UTC, date, datetime
@@ -53,6 +54,7 @@ from core.engine.guardrails.setup import REDACTION_FAILED, guard_of
 from core.engine.hooks.setup import DEFAULT_REASON, STOP_CONTINUATIONS, HookDecision, Hooks, hook_failed, notice_text
 from core.engine.image_inputs import image_dimensions
 from core.engine.instructions import Instructions, load_instructions
+from core.engine.lsp.hub import LspHub
 from core.engine.mode import Mode
 from core.engine.permissions.config import agent_config_files
 from core.engine.permissions.rules import RuleError, exact_rule_text, resolve_key
@@ -149,6 +151,32 @@ def close_recorder(recorder: Recorder) -> None:
             close()
 
 
+SOURCE_LIMIT = 2 * 1024 * 1024
+
+
+def _read_source(path: Path) -> str | None:
+    """The text of a regular UTF-8 file of at most 2 MiB, opened without following a final symlink; None otherwise."""
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except OSError:
+        return None
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            return None
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            data = handle.read(SOURCE_LIMIT + 1)
+    except OSError:
+        return None
+    finally:
+        os.close(fd)
+    if len(data) > SOURCE_LIMIT:
+        return None
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
 def _window(result: ToolResult) -> tuple[ToolResult, int]:
     """`result` cut to what redaction reads (`REDACT_MARGIN`), and how many characters of the output were dropped."""
     room = TOOL_OUTPUT_LIMIT + REDACT_MARGIN
@@ -222,8 +250,10 @@ class Agent:
         vision: VisionCheck | None = None,
         preapproved: Callable[[ToolCall], bool] | None = None,
         watch: Watch | None = None,
+        lsp: LspHub | None = None,
     ) -> None:
         self.provider = provider
+        self.lsp = lsp if role == "main" and not subagent else None  # diagnostics after write/edit: the main agent only
         # The config watch: checked around every tool call and at the end of a turn; a child shares its parent's.
         self.watch: Watch = watch if watch is not None else NullWatch()
         # A child that runs the calls of an approved workflow plan: the approval dialog is skipped for a call this
@@ -1108,6 +1138,7 @@ class Agent:
         label = tool.label(call.arguments) if tool else call.name
         emit(ToolStarted(call.id, label, task=tool is not None and tool.name == "task", name=call.name, args=dict(call.arguments)))
         preview: Preview | None = None
+        target: Path | None = None  # write/edit: the file `prepare` resolved
         applied = False
         ran = False  # did the tool itself do its work? (not refused, denied or blocked first)
         cancel: asyncio.CancelledError | None = None
@@ -1141,6 +1172,7 @@ class Agent:
                 if isinstance(prepared, ToolResult):
                     result, ran = prepared, True  # the tool did its work (and failed, or finished) while preparing
                 else:
+                    target = prepared.target
                     preview = guard_of(self.ctx).redact_preview(prepared.preview)
                     result, applied, ran = await self._approve_and_run(tool, call, prepared, mode, emit)
         except _Landed as landed:
@@ -1148,6 +1180,13 @@ class Agent:
         except Exception as exc:  # NFR4: a failing tool is an error result, never a crashed turn
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
             applied = False
+        if self.lsp is not None and ran and target is not None and not result.is_error and call.name in ("write", "edit"):
+            try:
+                result = await self._diagnostics(target, result, emit)
+            except asyncio.CancelledError as exc:  # Esc while a server answers: the file was written, keep the result
+                cancel = cancel or exc
+            except Exception as exc:  # a broken server step never costs the result the tool produced
+                emit(Notice("warn", f"lsp failed: {escape(str(exc))[:200]}"))
         # Redaction first, the limit after it: a secret that straddles the cut must not leave its first characters.
         guard = guard_of(self.ctx)
         result, hidden = _window(result)
@@ -1175,6 +1214,19 @@ class Agent:
             emit(TodosChanged(self.todos))
         if cancel is not None:
             raise cancel
+
+    async def _diagnostics(self, target: Path, result: ToolResult, emit: EventSink) -> ToolResult:
+        """The language servers' errors for the file a write/edit just changed, appended to the result (which is then
+        redacted and cut like any output; the tool's own text is never cut for it)."""
+        assert self.lsp is not None
+        text = await asyncio.to_thread(_read_source, target)
+        if text is None:
+            return result
+        budget = TOOL_OUTPUT_LIMIT - len(result.output) - 2
+        block = await self.lsp.block(target, text, emit, budget)
+        if not block:
+            return result
+        return dataclasses.replace(result, output=f"{result.output}\n\n{block}", display=None)
 
     def _hook_payload(self, **fields: object) -> dict[str, object]:
         """What every hook gets besides the event's own fields: the session and the workspace."""

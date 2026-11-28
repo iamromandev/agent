@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from core.engine.hooks.setup import Hooks
     from core.engine.image_pull import ImagePuller
     from core.engine.imagegen import MfluxGenerator
+    from core.engine.lsp.hub import LspHub
     from core.engine.mcp.contract import McpConnector
     from core.engine.mcp.hub import McpHub
     from core.engine.mcp.setup import McpSetup
@@ -128,6 +129,7 @@ class Runtime:
     hooks: Hooks
     hook_runner: ProcessRunner
     guard: Guardrails
+    lsp: LspHub | None
     checkpoints: CheckpointStore | None
     terminals: TerminalManager | None
     commands: Commands
@@ -151,6 +153,8 @@ class Runtime:
         if self.images is not None:
             self.images.kill_all()  # a warm-up's mflux (a no-op once `close` ran)
         self.hook_runner.kill_all()  # nor a hook (a no-op once `close` ran)
+        if self.lsp is not None:
+            self.lsp.kill_all()  # a language server's process group (a no-op once `close` ran)
         self.paste.remove()  # pasted images (idempotent)
         if self.checkpoints is not None:
             self.checkpoints.close()  # idempotent: the shadow folder is gone after the first call
@@ -238,6 +242,8 @@ def build_runtime(
     from core.engine.hooks.setup import prepare as prepare_hooks
     from core.engine.image_pull import HF_COMMAND, ImagePuller
     from core.engine.imagegen import EDIT_COMMAND, UPSCALE_COMMAND, find_mflux
+    from core.engine.lsp.config import read_lsp
+    from core.engine.lsp.hub import LspHub
     from core.engine.mcp.config import global_config_path
     from core.engine.mcp.hub import McpHub
     from core.engine.mcp.setup import prepare
@@ -366,6 +372,22 @@ def build_runtime(
         # Hooks too: both files already parsed; project hooks stay off until the same trust as the allow rules.
         hook_runner = ProcessRunner(root, guard, config_watch)
         hooks = prepare_hooks(permissions, root, hook_runner)
+        # Language servers: off unless the settings turn them on; the hub only records what may run, nothing starts yet.
+        lsp_setup = read_lsp(permissions.global_data, permissions.project_data, root)
+        lsp = (
+            LspHub(
+                lsp_setup,
+                root,
+                guard.env.filter(os.environ),
+                project_active=lambda: permissions.rules.project_trusted,
+                global_active=lambda: permissions.rules.global_active,
+                wait=settings.lsp_wait,
+                start_wait=settings.lsp_start_wait,
+                max_lines=settings.lsp_max_diagnostics,
+            )
+            if lsp_setup.enabled
+            else None
+        )
         shadow, shadow_warnings = prepare_checkpoints(
             root, guard, guard.env.filter(os.environ), enabled=checkpoints
         )
@@ -431,6 +453,7 @@ def build_runtime(
                 checkpoints=shadow,
                 vision=vision,
                 watch=config_watch,
+                lsp=lsp,
             )
 
         prune_pastes(Path(tempfile.gettempdir()), Path.home() / ".cache" / "agent")  # folders of dead runs
@@ -447,6 +470,9 @@ def build_runtime(
                 await puller.cancel()  # first: it may be downloading, and its mflux must not outlive the run
             paste.remove()
             hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
+            if lsp is not None:
+                with contextlib.suppress(Exception):
+                    await lsp.close()  # language servers: shutdown, then their process groups are killed
             if shadow is not None:
                 shadow.close()  # the run's shadow repository is deleted
             try:
@@ -484,6 +510,7 @@ def build_runtime(
             hooks=hooks,
             hook_runner=hook_runner,
             guard=guard,
+            lsp=lsp,
             checkpoints=shadow,
             terminals=manager,
             commands=commands,
@@ -497,7 +524,7 @@ def build_runtime(
             global_held=global_held,
             held=held,
             model_notices=model_notices,
-            warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *shadow_warnings),
+            warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *lsp_setup.warnings_text, *shadow_warnings),
             close=close,
             paste=paste,
             images=puller,
