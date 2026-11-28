@@ -86,7 +86,7 @@ def run_shared(workspace: Path, start: StartChoice = NEW, model: str | None = No
 
     ws = workspace.resolve()
     try:
-        socket = ensure_daemon(ws)
+        socket = ensure_daemon(ws, model)
     except (RunDirError, OSError, TimeoutError) as exc:
         print(f"agent --shared: {exc}", file=sys.stderr)
         return 1
