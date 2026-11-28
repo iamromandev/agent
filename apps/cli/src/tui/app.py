@@ -134,10 +134,10 @@ HELP = (
     "ctrl+\\ back to chat · ctrl+pageup / ctrl+pagedown switch terminal tab (these four work inside a terminal too) · "
     "ctrl+w close an exited terminal's tab (or the clicked one) · / suggests commands · /new or /clear new session · "
     "/sessions switch session · /mcp MCP servers and their tools · /permissions saved permission rules · "
-    "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
+    "/guardrails protected paths, environment filter and redaction · /hooks configured hooks · /lsp language servers · /skills loaded skills · /agents loaded subagents · /compact shrink the context · /model switch model · /init write AGENTS.md · /undo undo the last turn · /diff show the last turn's changes · /usage session token totals · /images image models (status, pull, cancel) · /workflow run a workflow (list, run, resume, cancel) · /help this help · /quit exit"
 )
 
-SHARED_INFO = frozenset({"/mcp", "/permissions", "/guardrails", "/hooks", "/skills", "/agents"})  # the daemon's
+SHARED_INFO = frozenset({"/mcp", "/permissions", "/guardrails", "/hooks", "/lsp", "/skills", "/agents"})  # the daemon's
 WORKFLOW_USAGE = "usage: /workflow [list | run <name> [input] | resume [id] [--redo <step>] | cancel]"
 PLAN_ARG_SHOWN = 60  # characters of a call's key argument (prompt, text) in the plan dialog
 FAILED_SHOWN = 200
@@ -1263,6 +1263,8 @@ class AgentApp(App[None]):
                 await transcript.add_notice("info", info.guardrails_summary(self.guard, self.config_guard))
             case "/hooks":
                 await transcript.add_notice("info", info.hooks_summary(self.hooks))
+            case "/lsp":
+                await transcript.add_notice("info", info.lsp_summary(self.lsp))
             case "/skills":
                 await transcript.add_notice("info", info.skills_summary(self.skills))
             case "/agents":

@@ -12,6 +12,7 @@ BUILTINS: dict[str, str] = {
     "permissions": "saved permission rules",
     "guardrails": "protected paths, environment filter and redaction",
     "hooks": "configured hooks",
+    "lsp": "language servers",
     "skills": "loaded skills",
     "agents": "loaded subagents",
     "compact": "shrink the context",

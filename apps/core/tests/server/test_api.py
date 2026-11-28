@@ -414,11 +414,13 @@ async def test_the_info_texts_are_the_same_the_app_shows_and_help_is_still_the_c
         "permissions": info.permissions_summary(rt.permissions.rules),
         "hooks": info.hooks_summary(rt.hooks),
         "mcp": info.mcp_summary(rt.mcp),
+        "lsp": info.lsp_summary(rt.lsp),
         "guardrails": info.guardrails_summary(rt.guard, rt.config_guard),
     }
     for name, text in expected.items():
         got = await client.get(f"/v1/sessions/{session_id}/info/{name}")
         assert got.status_code == 200 and got.json() == {"lines": [{"level": "info", "text": text}]}, name
+    assert expected["lsp"].startswith("LSP is off")
     assert "commit (builtin)" in expected["skills"]
     assert (await client.get(f"/v1/sessions/{session_id}/info/help")).status_code == 501
 

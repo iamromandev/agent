@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import pytest
 from core.client.daemon import DaemonClient
@@ -51,6 +54,22 @@ async def test_a_dialog_answered_in_another_client_closes_with_a_notice(serve) -
             assert [e.text for e in app.query(UserEntry)] == ["run it"]
     finally:
         await other.aclose()
+
+
+def _global_lsp(ws: Path) -> None:
+    folder = Path(os.environ["XDG_CONFIG_HOME"]) / "agent"
+    folder.mkdir(parents=True, exist_ok=True)
+    servers = {"mine": {"command": "/bin/sh", "args": ["-c", "x"], "extensions": [".m"]}}
+    (folder / "settings.json").write_text(json.dumps({"lsp": {"servers": servers}}))
+
+
+async def test_lsp_in_shared_mode_shows_the_daemons_servers(serve) -> None:
+    served = await serve([REPLY], setup=_global_lsp)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        await _open(app, pilot)
+        await type_and_send(pilot, "/lsp")
+        await until(pilot, lambda: any("mine (global) idle" in t for t in notices(app)))
 
 
 async def test_esc_interrupts_the_daemons_turn(serve) -> None:
