@@ -24,7 +24,7 @@ from core.engine.turn_diff import TurnDiff
 from core.host.asks import Answer, AnswerResult, AskBroker, AskEvent
 from core.host.bus import Subscriber
 from core.host.events import ModelChanged
-from core.host.session import OTHER_SESSION, ModelSwitch, SessionHost
+from core.host.session import OTHER_SESSION, ModelSwitch, SessionHost, SessionSource
 from core.trust import TrustOutcome, apply_trust, trust_lines
 
 if TYPE_CHECKING:
@@ -359,7 +359,7 @@ class Daemon:
             host.bus.publish(notice)
         return host
 
-    async def open(self, resume: str | None) -> tuple[SessionHost, bool]:
+    async def open(self, resume: str | None, *, source: SessionSource | None = None) -> tuple[SessionHost, bool]:
         """The live session for a client, and whether it was made now: a new one (`resume` None), the latest
         (`"latest"`; a new one when there is none), or the saved one with that id or id prefix. A session already live
         in this daemon is shared. `UnknownSession`, or `SessionLockedElsewhere` when another process has it open."""
@@ -377,6 +377,7 @@ class Daemon:
             session_id = new_ulid()
             host = self._new_host(session_id)
             self.hosts[session_id] = host
+            self._start_hooks(host, source)
             return host, True
         # One opener per session at a time: a second one waits and then finds the first one's host (this process's
         # lock registry would let both resume, and the loser would be an orphan holding a count of the lock).
@@ -395,7 +396,25 @@ class Daemon:
                 text = opened.notices[0][1] if opened.notices else "the session could not be opened"
                 raise _open_error(opened.error, text)
             self.hosts[info.id] = host
+            self._start_hooks(host, source)
             return host, True
+
+    def _start_hooks(self, host: SessionHost, source: SessionSource | None) -> None:
+        """Run the SessionStart hooks of a session this daemon just made or loaded, in the background. The host's switch
+        claim is taken now (so no message is accepted meanwhile) and released when the hooks end; their notices go on
+        the host's bus, so every client of the session gets them, one attaching mid-hook too."""
+        if source is None or self._loop is None or not host.hooks.has("SessionStart") or not host.begin_switch("daemon"):
+            return
+
+        async def run() -> None:
+            try:
+                for event in await host.session_started(source):
+                    host.bus.publish(event)
+            finally:
+                host.end_switch("daemon")
+
+        self._tasks = [t for t in self._tasks if not t.done()]
+        self._tasks.append(self._loop.create_task(run()))
 
     async def switch_model(self, host: SessionHost, name: str, client: str) -> ModelSwitch:
         """`/model` in one session: the provider is the daemon's, so the switch is every session's. Each session is

@@ -103,14 +103,16 @@ class DaemonClient:
             raise ProtocolMismatch(f"daemon version {version} (protocol {given}), client protocol {PROTOCOL}: run agent stop")
         return data
 
-    async def open_session(self, resume: str | None, model: str | None = None) -> dict[str, Any]:
-        return await self._object("POST", "/v1/sessions", json={"resume": resume, "model": model})
+    async def open_session(self, resume: str | None, model: str | None = None, source: str | None = None) -> dict[str, Any]:
+        return await self._object("POST", "/v1/sessions", json={"resume": resume, "model": model, "source": source})
 
     async def list_sessions(self) -> list[dict[str, Any]]:
         return await self._objects("GET", "/v1/sessions")
 
-    async def send(self, session_id: str, text: str, *, label: str | None = None, init: bool = False) -> dict[str, Any]:
-        body = {"text": text, "label": label, "init": init}
+    async def send(
+        self, session_id: str, text: str, *, label: str | None = None, init: bool = False, command: bool = False
+    ) -> dict[str, Any]:
+        body = {"text": text, "label": label, "init": init, "command": command}
         return await self._object("POST", f"/v1/sessions/{session_id}/messages", json=body)
 
     async def interrupt(self, session_id: str) -> None:
@@ -130,6 +132,11 @@ class DaemonClient:
 
     async def info(self, session_id: str, name: str) -> dict[str, Any]:
         return await self._object("GET", f"/v1/sessions/{session_id}/info/{name}")
+
+    async def commands(self) -> list[dict[str, Any]]:
+        """The daemon's custom commands: `name`, `source`, `description`."""
+        data = await self._object("GET", "/v1/commands")
+        return [row for row in data.get("commands") or () if isinstance(row, dict)]
 
     async def diff(self, session_id: str) -> dict[str, Any]:
         return await self._object("GET", f"/v1/sessions/{session_id}/diff")

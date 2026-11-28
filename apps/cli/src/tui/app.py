@@ -38,7 +38,7 @@ from core.engine import (
 from core.engine.agents.loader import Agents
 from core.engine.approval import ApprovalRequest, Choice, Decision
 from core.engine.commands.builtins import BUILTINS
-from core.engine.commands.loader import Commands
+from core.engine.commands.loader import Command, Commands
 from core.engine.compaction import turn_starts
 from core.engine.configguard import ConfigGuard, HeldGlobal
 from core.engine.configwatch import Cause
@@ -395,6 +395,7 @@ class AgentApp(App[None]):
                 await transcript.add_notice(
                     "info", f"this session runs {escape_display(snapshot.model)}; /model switches it for every client"
                 )
+            await self._load_daemon_commands(port)
             port.subscribe(self._on_port_event, self._on_ask)
             for ask in port.pending_asks():  # asked while no client was attached: shown now
                 self._on_ask(ask)
@@ -403,6 +404,12 @@ class AgentApp(App[None]):
                 await transcript.add_notice("error", f"agent --shared: could not open the session: {escape(str(exc))[:200]}")
         finally:
             port.end_switch()
+
+    async def _load_daemon_commands(self, port: RemotePort) -> None:
+        """The daemon's custom commands, for the suggestions and `/help`; their bodies stay on the daemon, which expands
+        `/name args` itself."""
+        rows = await port.commands()
+        self.commands = Commands({n: Command(n, "", d or None, "global" if s == "global" else "project") for n, s, d in rows}, ())
 
     async def _open_remote_start(self, port: RemotePort) -> tuple[wm.Snapshot, str, int] | None:
         """The start session as `--continue`, `--resume` or the picker chose it (a new one otherwise, also when the
@@ -430,12 +437,12 @@ class AgentApp(App[None]):
                     resume, title, count = info.id, info.title, info.message_count
         try:
             try:
-                return await port.open(resume, self._wanted_model), title, count
+                return await port.open(resume, self._wanted_model, "resume" if resume else "startup"), title, count
             except DaemonError as exc:
                 if resume is None:
                     raise
                 await transcript.add_notice("error", escape(exc.text))
-                return await port.open(None, self._wanted_model), "", 0
+                return await port.open(None, self._wanted_model, "startup"), "", 0
         except (DaemonError, DaemonUnavailable) as exc:
             await transcript.add_notice("error", f"agent daemon: {escape(str(exc))}")
             return None
@@ -1363,8 +1370,14 @@ class AgentApp(App[None]):
                 self.run_worker(functools.partial(self._model_command, rest.strip()), group="model", exit_on_error=False)
             case _:
                 custom = self.commands.get(name[1:])
-                if custom is None and self.shared:
-                    await transcript.add_notice("warn", f"{name}: unknown, or a custom command (custom commands are {NOT_SHARED})")
+                if self.shared:  # the daemon looks the name up in its own commands, expands it and says if it is unknown
+                    queueing = self._queueing()
+                    if not queueing and await self._refuse_if_busy(original):
+                        return
+                    result = self._sent(await self._remote().send_message(original.strip(), command=True))
+                    if result.status == "refused":
+                        self._restore_draft(original)
+                        await transcript.add_notice("warn", result.reason)
                     return
                 if custom is None:
                     await transcript.add_notice("warn", f"Unknown command: {name} (try /help)")
