@@ -113,16 +113,44 @@ async def test_a_lost_daemon_keeps_the_typed_text(serve) -> None:
         assert app.query_one(ChatInput).text == "half typed"
 
 
-async def test_a_custom_command_and_an_image_paste_are_refused(serve) -> None:
+async def test_an_image_paste_is_refused(serve) -> None:
     served = await serve()
     app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
     async with app.run_test() as pilot:
         await _open(app, pilot)
-        await type_and_send(pilot, "/mycommand")
         app.query_one(ChatInput).post_message(ChatInput.PasteImage())
-        await until(pilot, lambda: sum(NOT_SHARED in t for t in notices(app)) == 2)
-        assert any("custom commands" in t for t in notices(app))
-        assert any("pasting images" in t for t in notices(app))
+        await until(pilot, lambda: any("pasting images" in t and NOT_SHARED in t for t in notices(app)))
+
+
+def _review(ws: Path) -> None:
+    folder = ws / ".agent" / "commands"
+    folder.mkdir(parents=True)
+    (folder / "review.md").write_text("---\ndescription: Look it over\n---\nReview $ARGUMENTS\n")
+
+
+async def test_the_daemons_commands_are_suggested_listed_in_help_and_run_with_their_label(serve) -> None:
+    served = await serve([REPLY], setup=_review)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        await _open(app, pilot)
+        assert "/review  Look it over (project)" in app._help()
+        await pilot.press(*"/rev")
+        await until(pilot, lambda: any(name == "review" for name, *_ in app._suggestion_entries()))
+        app.query_one(ChatInput).clear()
+        await type_and_send(pilot, "/review x")
+        await until(pilot, lambda: bool(served.provider.requests))
+        await until(pilot, lambda: any(e.text == "Review x" for e in app.query(UserEntry)))
+    assert served.provider.requests[0][0][-1].content == "Review x"
+
+
+async def test_an_unknown_command_warns_and_starts_no_turn(serve) -> None:
+    served = await serve([REPLY], setup=_review)
+    app = AgentApp(RemotePort(served.socket, served.workspace, client_id="A"))
+    async with app.run_test() as pilot:
+        await _open(app, pilot)
+        await type_and_send(pilot, "/nope")
+        await until(pilot, lambda: any("Unknown command: /nope" in t for t in notices(app)))
+    assert served.provider.requests == []
 
 
 async def test_a_message_queued_by_another_client_shows_as_queued_1(serve) -> None:

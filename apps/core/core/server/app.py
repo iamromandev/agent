@@ -11,7 +11,7 @@ import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, TypeAdapter, ValidationError
 from starlette.applications import Starlette
@@ -23,10 +23,12 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 from core.engine.compaction import turn_starts
 from core.engine.mode import Mode
 from core.engine.provider.models import CatalogError
+from core.engine.text import escape
 from core.engine.turn_diff import DiffItem
 from core.engine.usage import summary
 from core.host.asks import answer_from_wire
 from core.host.events import TurnOutcome
+from core.host.port import SendResult
 from core.host.session import SessionHost
 from core.host.wire import encode
 from core.server.daemon import Daemon, OpenFailed, SessionLockedElsewhere
@@ -49,12 +51,14 @@ class _Body(BaseModel):
 class OpenBody(_Body):
     resume: str | None = None
     model: str | None = None  # the daemon's session decides the model; the client is told when it differs
+    source: Literal["startup", "resume", "new", "switch"] | None = None  # why it opens: the SessionStart hooks' source
 
 
 class MessageBody(_Body):
     text: str
     label: str | None = None
     init: bool = False
+    command: bool = False  # `text` is a raw `/name args`: the daemon expands it from its own custom commands
 
 
 class ModeBody(_Body):
@@ -70,6 +74,23 @@ class ApiError(Exception):
         super().__init__(text)
         self.status = status
         self.text = text
+
+
+_COMMAND = re.compile(r"/(\S+)(\s.*)?\Z", re.DOTALL)
+
+
+def _send_command(daemon: Daemon, host: SessionHost, raw: str, client: str) -> SendResult:
+    """`/name args` from a client: expanded from the daemon's own commands (only loaded names exist, so a path-like
+    name is unknown) and sent like a message, with the typed text kept for a queue or a restore."""
+    found = _COMMAND.match(raw.strip())
+    name = found.group(1) if found else ""
+    command = daemon.rt.commands.get(name)
+    if command is None:
+        return SendResult("refused", f"Unknown command: /{name} (try /help)")
+    prompt = command.expand((found.group(2) or "") if found else "")
+    if not prompt.strip():
+        return SendResult("refused", f"/{name} is empty")
+    return host.send(prompt, label=f"/{name} ({command.source})", draft=raw.strip(), client=client)
 
 
 def _error(status: int, text: str) -> JSONResponse:
@@ -163,7 +184,7 @@ def build_app(daemon: Daemon) -> ASGIApp:
         client_of(request)
         opened: OpenBody = await body(request, OpenBody)
         try:
-            host, created = await daemon.open(opened.resume)
+            host, created = await daemon.open(opened.resume, source=opened.source)
         except SessionLockedElsewhere as exc:
             raise ApiError(409, f"locked by another process: {exc}") from None
         except OpenFailed as exc:
@@ -265,6 +286,8 @@ def build_app(daemon: Daemon) -> ASGIApp:
         message: MessageBody = await body(request, MessageBody)
         if message.init:
             result = host.send(await asyncio.to_thread(host.init_prompt), init=True, draft=message.text, client=client)
+        elif message.command:
+            result = _send_command(daemon, host, message.text, client)
         else:
             result = host.send(message.text, label=message.label, client=client)
         return JSONResponse({"status": result.status, "reason": result.reason or None})
@@ -325,6 +348,18 @@ def build_app(daemon: Daemon) -> ASGIApp:
             estimated=True,
         )
         return JSONResponse({"usage": redacted(asdict(data), daemon.redact)})
+
+    async def commands(request: Request) -> Response:
+        client_of(request)
+        rows = [
+            {
+                "name": escape(c.name),
+                "source": c.source,
+                "description": daemon.redact(escape(c.description)) if c.description else "",
+            }
+            for c in daemon.rt.commands.sorted()
+        ]
+        return JSONResponse({"commands": rows})
 
     diffs = daemon.diffs  # the last list each client asked for: its files are loaded from it
 
@@ -444,6 +479,7 @@ def build_app(daemon: Daemon) -> ASGIApp:
         Route("/v1/sessions/{id}/info/{name}", handler(info), methods=["GET"]),
         Route("/v1/sessions/{id}/diff", handler(diff_list), methods=["GET"]),
         Route("/v1/sessions/{id}/diff/file", handler(diff_file), methods=["GET"]),
+        Route("/v1/commands", handler(commands), methods=["GET"]),
         Route("/v1/models", handler(models), methods=["GET"]),
         Route("/v1/model-length", handler(model_length), methods=["GET"]),
         Route("/v1/files/suggest", handler(suggest), methods=["GET"]),

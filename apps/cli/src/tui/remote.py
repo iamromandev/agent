@@ -235,10 +235,10 @@ class RemotePort:
         self._daemon_pid = _instance(hello)
         return hello
 
-    async def open(self, resume: str | None, model: str | None = None) -> wm.Snapshot:
+    async def open(self, resume: str | None, model: str | None = None, source: SessionSource | None = None) -> wm.Snapshot:
         """Open (or attach to) a session and make it this port's: `DaemonError` when the daemon refuses (404 unknown,
         409 locked by another process). The stream (once subscribed) continues from the snapshot."""
-        data = await self._http().open_session(resume, model)
+        data = await self._http().open_session(resume, model, source)
         snapshot = self._snapshot_of(data.get("snapshot"))
         self._session_id = _shaped(lambda: str(data["session_id"]))
         self._apply_snapshot(snapshot)
@@ -458,12 +458,13 @@ class RemotePort:
         init: bool = False,
         draft: str | None = None,
         pasted: Sequence[Image] | None = None,
+        command: bool = False,
     ) -> SendResult:
-        """Send `text` (for `/init`, the daemon builds the prompt; `draft` is what goes back). Pasted images are never
-        sent in shared mode."""
+        """Send `text` (for `/init`, the daemon builds the prompt; `draft` is what goes back; with `command`, `text` is
+        a raw `/name args` the daemon expands). Pasted images are never sent in shared mode."""
         seen = self._outcomes
         try:
-            data = await self._http().send(self._session_id, draft if init and draft else text, label=label, init=init)
+            data = await self._http().send(self._session_id, draft if init and draft else text, label=label, init=init, command=command)
         except (DaemonError, DaemonUnavailable) as exc:
             return SendResult("refused", f"the agent daemon did not take it: {exc}")
         status = data.get("status")
@@ -529,7 +530,7 @@ class RemotePort:
         if self.turn_active or self._switching:
             return self.busy_text(command)
         try:
-            await self.open(None)
+            await self.open(None, source="new")
         except (DaemonError, DaemonUnavailable) as exc:
             return f"could not start a new session: {exc}"
         self._switching = True  # released by `end_switch`, as for the local port
@@ -539,7 +540,7 @@ class RemotePort:
     async def switch_to(self, session_id: str) -> wm.Snapshot:
         """Make the saved or live session `session_id` this port's and follow its stream; `DaemonError` or
         `DaemonUnavailable` when it cannot be opened (the current one stays)."""
-        snapshot = await self.open(session_id)
+        snapshot = await self.open(session_id, source="switch")
         self._restart_reader()
         return snapshot
 
@@ -630,6 +631,14 @@ class RemotePort:
             )
 
         return _shaped(build)
+
+    async def commands(self) -> list[tuple[str, str, str]]:
+        """The daemon's custom commands as `(name, source, description)`; empty when it cannot say."""
+        try:
+            rows = await self._http().commands()
+        except (DaemonError, DaemonUnavailable):
+            return []
+        return [(str(r.get("name", "")), str(r.get("source", "")), str(r.get("description", ""))) for r in rows if r.get("name")]
 
     async def info(self, name: str) -> list[tuple[Literal["info", "warn", "error"], str]]:
         """The lines of a listing command from the daemon (its runtime's rules, hooks, servers, ...)."""
