@@ -41,13 +41,22 @@ async def test_the_hook_runs_once_per_loaded_session_with_its_source_and_not_on_
     log = tmp_path / "log"
     served = await serve(setup=_global_hook(_logging_hook(log)))
     a, b = served.client("A"), served.client("B")
-    first = await _open(served, a, "startup")
-    await _open(served, b, "startup", resume=first["session_id"])  # a live session: nothing runs
+    lines = lambda: log.read_text().split() if log.exists() else []  # noqa: E731
+
+    async def opened(client, source: str, resume: str | None = None) -> str:
+        session_id = (await _open(served, client, source, resume=resume))["session_id"]
+        host = served.daemon.host(session_id)
+        # each hook is its own process: wait for it to end, so a loaded machine cannot reorder the log
+        await wait_until(lambda: not host.switching and not host.session_starting, timeout=30)
+        return session_id
+
+    first = await opened(a, "startup")
+    assert lines() == ["startup"]
+    await opened(b, "startup", resume=first)  # a live session: nothing runs
     for source in ("new", "switch", "resume"):
-        await _open(served, a, source)
-    await wait_until(lambda: len(log.read_text().split()) >= 4 if log.exists() else False)
+        await opened(a, source)
     await asyncio.sleep(0.3)
-    assert log.read_text().split() == ["startup", "new", "switch", "resume"]
+    assert lines() == ["startup", "new", "switch", "resume"]
 
 
 async def test_the_context_reaches_the_next_request_only_and_the_notice_every_client(serve, tmp_path) -> None:

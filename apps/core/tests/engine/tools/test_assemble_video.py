@@ -466,10 +466,12 @@ async def test_a_timeout_kills_the_group_and_leaves_the_target(
 ) -> None:
     monkeypatch.setenv("FAKE_FFMPEG_MODE", "sleep")
     monkeypatch.setenv("FAKE_FFMPEG_PIDS", str(tmp_path / "pids"))
-    slow = AssembleVideoTool(fake_ffmpeg(tmp_path / "bin"), 1, Guardrails.off(workspace))
+    # the deadline also covers the helper runs before ffmpeg: leave room for them and for the fake to record its
+    # pids on a loaded machine, or the kill can land before there is anything to check
+    slow = AssembleVideoTool(fake_ffmpeg(tmp_path / "bin"), 5, Guardrails.off(workspace))
     (workspace / "out.mp4").write_bytes(b"old")
     result = await (await _prepared(slow, ctx)).execute()
-    assert result.output == "timed out after 1 s" and result.summary == "timed out"
+    assert result.output == "timed out after 5 s" and result.summary == "timed out"
     assert (workspace / "out.mp4").read_bytes() == b"old"
     await wait_until(lambda: (tmp_path / "pids").exists() and len((tmp_path / "pids").read_text().split()) == 2)
     await assert_all_gone(*(int(v) for v in (tmp_path / "pids").read_text().split()))

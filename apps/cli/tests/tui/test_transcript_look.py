@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from core.engine.session import TranscriptItem
 from core.engine.tools.base import Preview, ToolResult
@@ -51,8 +53,19 @@ def style_at(widget: Widget, row: int, col: int) -> Style:
 
 
 async def settle(pilot: Pilot) -> None:
+    """Until the screen has drawn the same rows twice in a row: two fixed pauses are not enough on a loaded machine."""
     await pilot.pause()
-    await pilot.pause()
+    if not pilot.app.query(Transcript):
+        await pilot.pause()
+        return
+    last = None
+    for _ in range(100):
+        await pilot.pause()
+        now = shown(pilot.app)
+        if now == last and now:
+            return
+        last = now
+        await asyncio.sleep(0.02)
 
 
 def at(width: int = 80):

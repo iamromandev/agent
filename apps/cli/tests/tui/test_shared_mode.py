@@ -274,7 +274,12 @@ async def test_a_daemon_that_does_not_come_back_asks_keep_waiting_or_quit(serve,
         await pilot.press(*"kept")
         served.daemon.request_stop()
         await asyncio.wait_for(served.task, 10)
-        await until(pilot, lambda: isinstance(app.screen, DaemonGoneScreen), timeout=10)
+        # the screen is pushed before its options are mounted: wait for both
+        await until(pilot, lambda: isinstance(app.screen, DaemonGoneScreen) and bool(app.screen.query(OptionList)), timeout=10)
+        if choice == "wait":
+            # back before the answer: with the 0.3 s wait, a daemon started after it could miss the next wait on a
+            # loaded machine and the dialog would come up again, with nobody to answer it
+            await serve()
         options = app.screen.query_one(OptionList)
         options.highlighted = options.get_option_index(choice)
         await pilot.press("enter")
@@ -283,7 +288,6 @@ async def test_a_daemon_that_does_not_come_back_asks_keep_waiting_or_quit(serve,
             assert exits
         else:
             assert not exits
-            await serve()  # it comes back
             await until(pilot, lambda: any("reconnected to the agent daemon" in t for t in notices(app)), timeout=10)
         assert app.query_one(ChatInput).text == "kept"
 
