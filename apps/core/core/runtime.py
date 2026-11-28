@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from core.engine.commands.loader import Commands
     from core.engine.configguard import ConfigGuard, HeldGlobal
     from core.engine.configwatch import ConfigWatch
+    from core.engine.format.runner import FormatHub
     from core.engine.guardrails.setup import Guardrails
     from core.engine.hooks.runner import ProcessRunner
     from core.engine.hooks.setup import Hooks
@@ -147,6 +148,7 @@ class Runtime:
     close: Callable[[], Awaitable[None]]
     paste: PasteFolder
     images: ImagePuller | None = None  # the app only: `/images` and the tools' refusal while a warm-up runs
+    format: FormatHub | None = None  # formatters after write/edit; None unless the settings turn them on
 
     def kill_all(self) -> None:
         """Synchronous fallback once the loop is gone: whatever `close` did not stop is killed."""
@@ -155,6 +157,8 @@ class Runtime:
         self.hook_runner.kill_all()  # nor a hook (a no-op once `close` ran)
         if self.lsp is not None:
             self.lsp.kill_all()  # a language server's process group (a no-op once `close` ran)
+        if self.format is not None:
+            self.format.kill_all()  # a formatter still running
         self.paste.remove()  # pasted images (idempotent)
         if self.checkpoints is not None:
             self.checkpoints.close()  # idempotent: the shadow folder is gone after the first call
@@ -236,6 +240,8 @@ def build_runtime(
     from core.engine.commands.loader import load_commands
     from core.engine.configguard import ConfigGuard, GlobalMarker, HeldGlobal, marker_path
     from core.engine.configwatch import Cause, ConfigWatch, WatchedSet
+    from core.engine.format.config import read_format
+    from core.engine.format.runner import FormatHub
     from core.engine.guardrails.setup import Guardrails
     from core.engine.guardrails.setup import prepare as prepare_guardrails
     from core.engine.hooks.runner import ProcessRunner
@@ -388,6 +394,20 @@ def build_runtime(
             if lsp_setup.enabled
             else None
         )
+        # Formatters: off unless the settings turn them on; project entries wait for project trust.
+        format_setup = read_format(permissions.global_data, permissions.project_data, root)
+        format_hub = (
+            FormatHub(
+                format_setup,
+                root,
+                guard,
+                timeout=settings.format_timeout,
+                project_active=lambda: permissions.rules.project_trusted,
+                global_active=lambda: permissions.rules.global_active,
+            )
+            if format_setup.enabled
+            else None
+        )
         shadow, shadow_warnings = prepare_checkpoints(
             root, guard, guard.env.filter(os.environ), enabled=checkpoints
         )
@@ -408,7 +428,7 @@ def build_runtime(
             untrusted=(frozenset() if trust_project_mcp else setup.untrusted)
             | (frozenset(s.name for s in setup.servers if s.source == "global") if global_held else frozenset()),
         )
-        config_guard = ConfigGuard(root, permissions.rules, mcp, [permission_store, mcp_store], marker, lsp=lsp)
+        config_guard = ConfigGuard(root, permissions.rules, mcp, [permission_store, mcp_store], marker, lsp=lsp, format=format_hub)
         config_guard.bind(config_watch)  # from here a change is reacted to (one seen before is handed over)
 
         puller: ImagePuller | None = None
@@ -454,6 +474,7 @@ def build_runtime(
                 vision=vision,
                 watch=config_watch,
                 lsp=lsp,
+                format=format_hub,
             )
 
         prune_pastes(Path(tempfile.gettempdir()), Path.home() / ".cache" / "agent")  # folders of dead runs
@@ -470,6 +491,8 @@ def build_runtime(
                 await puller.cancel()  # first: it may be downloading, and its mflux must not outlive the run
             paste.remove()
             hook_runner.kill_all()  # a hook still running is killed with its process group, and no more start
+            if format_hub is not None:
+                format_hub.kill_all()  # a formatter still running
             if lsp is not None:
                 with contextlib.suppress(Exception):
                     await lsp.close()  # language servers: shutdown, then their process groups are killed
@@ -511,6 +534,7 @@ def build_runtime(
             hook_runner=hook_runner,
             guard=guard,
             lsp=lsp,
+            format=format_hub,
             checkpoints=shadow,
             terminals=manager,
             commands=commands,
@@ -524,7 +548,7 @@ def build_runtime(
             global_held=global_held,
             held=held,
             model_notices=model_notices,
-            warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *lsp_setup.warnings_text, *shadow_warnings),
+            warnings=(*permissions.warnings, *agents.warnings, *workflows.warnings, *model_warnings, *guard.warnings, *hooks.warnings, *lsp_setup.warnings_text, *format_setup.warnings, *shadow_warnings),
             close=close,
             paste=paste,
             images=puller,

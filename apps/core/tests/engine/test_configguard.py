@@ -13,6 +13,9 @@ from pathlib import Path
 import pytest
 from core.engine.configguard import ConfigGuard, GlobalMarker
 from core.engine.configwatch import Cause, ConfigWatch, TrustRevoked, WatchedSet
+from core.engine.format.config import FormatSetup, FormatterSpec
+from core.engine.format.runner import FormatHub
+from core.engine.guardrails.setup import Guardrails
 from core.engine.lsp.config import LspSetup, ServerSpec
 from core.engine.lsp.hub import LspHub
 from core.engine.mcp.trust import TrustStore
@@ -70,7 +73,7 @@ class Env:
         rules.trust_project()
         return rules
 
-    def guard(self, rules: Rules, lsp: LspHub | None = None) -> ConfigGuard:
+    def guard(self, rules: Rules, lsp: LspHub | None = None, format: FormatHub | None = None) -> ConfigGuard:
         guard = ConfigGuard(
             self.workspace,
             rules,
@@ -79,6 +82,7 @@ class Env:
             self.marker,
             home=self.tmp / "home",
             lsp=lsp,
+            format=format,
         )
         guard.listeners.append(self.warnings.append)
         return guard
@@ -741,3 +745,24 @@ async def test_a_failing_lsp_withdraw_does_not_break_the_reaction(env: Env) -> N
 
     assert not _allowed(rules)  # the revoke still happened
     assert "could not stop the LSP servers" in env.warnings[0]
+
+
+def _format_hub(env: Env) -> FormatHub:
+    specs = tuple(FormatterSpec(name, ("/bin/true", "{file}"), frozenset({".py"}), {}, source) for name, source in (("proj", "project"), ("glob", "global")))
+    return FormatHub(FormatSetup(True, specs, (), ()), env.workspace, Guardrails.off(env.workspace), timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("path", "withdrawn", "kept"),
+    [(lambda e: e.workspace / ".agent" / "settings.json", "proj", "glob"), (lambda e: e.config / "settings.json", "glob", "proj")],
+)
+async def test_a_config_change_withdraws_the_changed_sources_formatters_only(env: Env, path, withdrawn: str, kept: str) -> None:
+    hub = _format_hub(env)
+    guard = env.guard(env.rules(), format=hub)
+    watch = env.watch(guard)
+    path(env).write_text("{}")
+    watch.check(Cause.background())
+    await guard.settle()
+    states = {row.split(" ")[0]: row for row in hub.listing()}
+    assert "off: config changed" in states[withdrawn] and "found" in states[kept]
+    assert env.warnings[0].endswith("; formatters stopped")

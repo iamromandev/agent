@@ -106,6 +106,9 @@ class Settings(BaseSettings):
     lsp_max_diagnostics: Annotated[
         int, Field(default=20, gt=0, description="Diagnostics shown per file and language server")
     ]
+    format_timeout: Annotated[
+        float, Field(default=10.0, gt=0, description="Seconds a formatter may run on one file after a write/edit")
+    ]
     daemon_idle: Annotated[
         float,
         Field(default=600.0, gt=0, description="Seconds the shared-session daemon stays up with no client and no turn"),

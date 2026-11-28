@@ -13,6 +13,7 @@ BUILTINS: dict[str, str] = {
     "guardrails": "protected paths, environment filter and redaction",
     "hooks": "configured hooks",
     "lsp": "language servers",
+    "format": "formatters that run after write and edit",
     "skills": "loaded skills",
     "agents": "loaded subagents",
     "compact": "shrink the context",

@@ -165,6 +165,33 @@ async def test_ac9_the_prompt_lists_a_project_lsp_server_and_trust_lets_the_hub_
         assert hub.untrusted() == []
 
 
+async def test_the_prompt_lists_a_project_formatter_and_trust_lets_the_hub_run_it(launch: Launch) -> None:
+    from core.engine.format.config import read_format
+    from core.engine.format.runner import FormatHub
+    from core.engine.guardrails.setup import Guardrails
+
+    launch.project(format={"servers": {"mine": {"command": "/bin/sh", "args": ["-c", "x  y"], "extensions": [".m"]}}})
+    setup = prepare(launch.workspace, launch.global_path, launch.store)
+    hub = FormatHub(
+        read_format(setup.global_data, setup.project_data, launch.workspace, which=lambda name: None),
+        launch.workspace,
+        Guardrails.off(launch.workspace),
+        timeout=1,
+        project_active=lambda: launch.setup.rules.project_trusted,
+    )
+    app = launch.app(format=hub)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _is_prompt(app))
+        text = "\n".join(_labels(app))
+        assert "1 formatter" in text and "format mine: /bin/sh -c 'x\u2420\u00d72y'" in text
+        assert hub.untrusted() != []
+
+        await _answer(pilot, "trust")
+        await until(pilot, lambda: not isinstance(app.screen, PermissionTrustScreen))
+
+        assert hub.untrusted() == []
+
+
 async def test_ac4_the_mcp_prompt_and_the_settings_prompt_come_one_after_the_other(
     launch: Launch, tmp_path: Path
 ) -> None:
@@ -206,6 +233,14 @@ async def test_lsp_command_says_it_is_off_and_help_lists_it(launch: Launch) -> N
         await type_and_send(pilot, "/lsp")
         await until(pilot, lambda: any("LSP is off" in n for n in _notices(app)))
     assert "/lsp" in HELP
+
+
+async def test_format_command_says_it_is_off_and_help_lists_it(launch: Launch) -> None:
+    app = launch.app()
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/format")
+        await until(pilot, lambda: any("formatting is off" in n for n in _notices(app)))
+    assert "/format" in HELP
 
 
 async def test_ac12_hook_warnings_show_at_launch(launch: Launch) -> None:

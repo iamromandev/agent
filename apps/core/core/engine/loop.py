@@ -48,6 +48,7 @@ from core.engine.events import (
     TurnEnded,
     UsageUpdate,
 )
+from core.engine.format.runner import FormatHub
 from core.engine.guardrails.paths import strip_firmlink
 from core.engine.guardrails.redact import drop_partial_tail
 from core.engine.guardrails.setup import REDACTION_FAILED, guard_of
@@ -92,6 +93,7 @@ from core.engine.undo import (
     UndoResult,
     UndoTurn,
     checkpoint_notices,
+    read_nofollow,
     restore_turn,
     undo_notices,
 )
@@ -253,6 +255,7 @@ class Agent:
         preapproved: Callable[[ToolCall], bool] | None = None,
         watch: Watch | None = None,
         lsp: LspHub | None = None,
+        format: FormatHub | None = None,
         ledger: TurnLedger | None = None,
         owner: str = "",
     ) -> None:
@@ -263,6 +266,7 @@ class Agent:
         self.owner = owner
         self._ledger_entry: LedgerEntry | None = None
         self.lsp = lsp if role == "main" and not subagent else None  # diagnostics after write/edit: the main agent only
+        self.format = format if role == "main" and not subagent else None  # formatters after write/edit: the main agent only
         # The config watch: checked around every tool call and at the end of a turn; a child shares its parent's.
         self.watch: Watch = watch if watch is not None else NullWatch()
         # A child that runs the calls of an approved workflow plan: the approval dialog is skipped for a call this
@@ -1266,7 +1270,15 @@ class Agent:
         except Exception as exc:  # NFR4: a failing tool is an error result, never a crashed turn
             result = ToolResult(f"{call.name} failed: {exc}", True, "failed")
             applied = False
-        if self.lsp is not None and ran and target is not None and not result.is_error and call.name in ("write", "edit"):
+        edited = ran and target is not None and not result.is_error and call.name in ("write", "edit")
+        if self.format is not None and edited and target is not None:
+            try:
+                result = await self._format(target, result)
+            except asyncio.CancelledError as exc:  # Esc while a formatter runs: it was killed, the file is as written
+                cancel = cancel or exc
+            except Exception as exc:  # a broken formatter step never costs the result the tool produced
+                emit(Notice("warn", f"format failed: {escape(str(exc))[:200]}"))
+        if self.lsp is not None and edited and target is not None and cancel is None:
             try:
                 result = await self._diagnostics(target, result, emit)
             except asyncio.CancelledError as exc:  # Esc while a server answers: the file was written, keep the result
@@ -1300,6 +1312,31 @@ class Agent:
             emit(TodosChanged(self.todos))
         if cancel is not None:
             raise cancel
+
+    async def _format(self, target: Path, result: ToolResult) -> ToolResult:
+        """Run the matching formatters on the file a write/edit just changed. The undo log rehashes the file when one
+        changed it, so undo, the diff and the next call's checks see the formatted content. One note line per formatter
+        that changed the file or failed, appended to the result."""
+        assert self.format is not None
+        if self.watch.watches(target):  # the agent's own config: a formatter must not rewrite what the watch guards
+            return result
+        try:
+            written = await asyncio.to_thread(read_nofollow, target, SOURCE_LIMIT)
+        except OSError:
+            return result
+        outcomes = await self.format.format(target, written)
+        if not outcomes:
+            return result
+        if any(o.changed_lines for o in outcomes):
+            self._undo.after(target)
+        notes = [
+            f"[format {o.name} failed: {o.error}]" if o.error else f"[formatted by {o.name}: {o.changed_lines} lines changed]"
+            for o in outcomes
+            if o.error or o.changed_lines
+        ]
+        if not notes:
+            return result
+        return dataclasses.replace(result, output="\n".join([result.output, *notes]), display=None)
 
     async def _diagnostics(self, target: Path, result: ToolResult, emit: EventSink) -> ToolResult:
         """The language servers' errors for the file a write/edit just changed, appended to the result (which is then

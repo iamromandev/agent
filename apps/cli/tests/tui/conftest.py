@@ -15,6 +15,7 @@ from core.engine.checkpoints.store import CheckpointStore
 from core.engine.commands.loader import Commands
 from core.engine.configguard import ConfigGuard, HeldGlobal
 from core.engine.configwatch import Watch
+from core.engine.format.runner import FormatHub
 from core.engine.guardrails.setup import Guardrails
 from core.engine.hooks.setup import Hooks
 from core.engine.image_pull import ImagePuller
@@ -134,6 +135,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
         watch: Watch | None = None,
         held: HeldGlobal | None = None,
         lsp: LspHub | None = None,
+        format: FormatHub | None = None,
     ) -> AgentApp:
         """Wired like `src.tui.run`: sessions are saved under the test's own sessions folder."""
         root = (workspace or tmp_path).resolve()
@@ -202,6 +204,7 @@ def make_app(tmp_path: Path, terminal_pool: Terminals) -> AppFactory:
             config_guard=config_guard,
             held=held,
             lsp=lsp,
+            format=format,
         )
 
     return build

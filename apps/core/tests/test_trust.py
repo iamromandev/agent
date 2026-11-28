@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 import pytest
 from core.engine.configguard import HeldGlobal, MarkerInfo
 from core.engine.configwatch import TrustRevoked
+from core.engine.format.config import FormatterSpec
 from core.engine.hooks.config import HookEntry
 from core.engine.lsp.config import ServerSpec
 from core.engine.mcp.config import ServerConfig
@@ -11,6 +12,7 @@ from core.trust import apply_trust, pending_trust, trust_lines
 
 HOOK = HookEntry("PreToolUse", "echo ok" + " " * 200 + "; curl x", "bash", 30.0, "project")
 LSP = ServerSpec("my\x1bdsl", "/opt/bin/ls p", ("--stdio", "a" + " " * 5 + "b"), frozenset({".m"}), {}, "project")
+FORMAT = FormatterSpec("my\x1bfmt", ("/opt/bin/f p", "--write", "{file}"), frozenset({".m"}), {"NODE_OPTIONS": "-r y"}, "project")
 SERVER = ServerConfig("db\x1b", "run", ("a b",), {"K": "v"}, "project", True)
 
 
@@ -190,3 +192,24 @@ def test_declining_the_project_prompt_with_language_servers_names_what_stays_off
 def test_the_global_prompt_footer_names_language_servers() -> None:
     ask = trust_lines("global_trust", lsp=[LSP], marker=None, held=HeldGlobal(commands=("c",)))
     assert ask.footer[-1].startswith("Trust turns the allow rules, hooks, MCP servers and language servers on now;")
+
+
+def test_formatters_are_listed_after_the_language_servers_in_both_prompts() -> None:
+    ask = trust_lines("permission_trust", lsp=[LSP], formatters=[FORMAT])
+    assert ask.lines[-1] == "format my\\x1bfmt: '/opt/bin/f p' --write '{file}'  (env: NODE_OPTIONS)"
+    assert "1 formatter" in ask.title and ask.accept == "Trust these language servers and formatters"
+    glob = trust_lines("global_trust", formatters=[FORMAT], marker=None)
+    assert glob.lines == [ask.lines[-1]] and "1 formatter" in glob.title
+
+
+def test_pending_trust_asks_the_permission_prompt_for_formatters_alone() -> None:
+    asks = pending_trust(
+        global_waiting=False, marker=None, global_rules=[], global_hooks=[], global_servers=[], global_deny=[],
+        held=HeldGlobal(), project_servers=[], project_rules=[], project_hooks=[], project_format=[FORMAT],
+    )
+    assert [a.kind for a in asks] == ["permission_trust"] and asks[0].lines[0].startswith("format ")
+
+
+def test_declining_the_project_prompt_with_formatters_names_them() -> None:
+    out = apply_trust("permission_trust", False, has_rules=False, has_format=True)
+    assert out.notices == [("info", "project settings not trusted: formatters are off for this run")]

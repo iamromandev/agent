@@ -11,6 +11,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from core.engine.configwatch import TrustRevoked
+from core.engine.format.config import project_needs_trust as format_needs_trust
+from core.engine.format.config import read_format, trust_evidence
 from core.engine.hooks.config import read_hooks
 from core.engine.lsp.config import project_needs_trust
 from core.engine.mcp.trust import TrustStore
@@ -57,11 +59,14 @@ class Rules:
         store_path: Path | None = None,
         own_write: OwnWrite | None = None,
         project_lsp: bool = False,
+        project_format: bool = False,
+        trust_without_file: bool = False,
     ) -> None:
         """`save(rule_text)` writes the rule to the project file and returns the new bytes when they may be trusted
         (None: written, but the file was changed since launch, so its content is not vouched for). `trust(bytes)`
         remembers bytes as trusted. `project_hooks`: the project file holds hooks, which wait for the same trust;
-        `project_lsp`: so does an `lsp` value that starts language servers.
+        `project_lsp`: so does an `lsp` value that starts language servers, and `project_format` a `format` value
+        that starts formatters.
         `save_key(key, value)` is `save` for a top-level string key (the model choice). `own_write(paths)` wraps
         each of those writes (the config watch's `own_write`: it accepts only the paths named); none: no watch."""
         self._global = global_file
@@ -73,6 +78,8 @@ class Rules:
         self._trust = trust
         self._project_hooks = project_hooks
         self._project_lsp = project_lsp
+        self._project_format = project_format
+        self._trust_without_file = trust_without_file  # trust is also recorded when there is no project file
         self._added: list[Rule] = []  # saved with "Always here" in this run: active at once
         self._run: list[Rule] = []  # given for this run only (`--allow`): never saved
         self._deny: tuple[tuple[Rule, Source], ...] = (*((r, "global") for r in global_file.deny), *((r, "project") for r in project_file.deny))
@@ -182,7 +189,7 @@ class Rules:
     @property
     def pending_trust(self) -> bool:
         """Does the project file hold allow rules, hooks or language servers that wait for the user's trust?"""
-        return not self._trusted and (bool(self._project.allow) or self._project_hooks or self._project_lsp)
+        return not self._trusted and (bool(self._project.allow) or self._project_hooks or self._project_lsp or self._project_format)
 
     def deny(self, tool: str, args: Mapping[str, Any], key: str | None) -> Verdict | None:
         """A deny rule that matches, from either file. Project deny rules need no trust: they only refuse."""
@@ -223,11 +230,11 @@ class Rules:
         be remembered; the rules stay active for this run. Raises `TrustRevoked` (and trusts nothing) once project
         trust was revoked in this run, also when the check that opens the store write is what revoked it."""
         self._set_trusted()
-        if self._trust is not None and self._project.raw is not None:
+        if self._trust is not None and (self._project.raw is not None or self._trust_without_file):
             with self._own_write(self._paths(self.store_path)):
                 if self._revoked:
                     raise TrustRevoked("trusting the project")
-                self._trust(self._project.raw)
+                self._trust(self._project.raw or b"")
         if self._revoked:  # the check after the write saw a change: the guard already forgot the store entry
             raise TrustRevoked("trusting the project")
 
@@ -388,7 +395,16 @@ def prepare(
     raw = project_file.raw
     project_hooks = bool(read_hooks(project_file.data, "project")[0])  # valid hooks run commands: they wait for the same trust
     project_lsp = project_needs_trust(global_file.data, project_file.data, workspace)  # language servers are programs the file starts
-    needs_trust = (bool(project_file.allow) or project_hooks or project_lsp) and raw is not None and not store.is_trusted(workspace, raw)
+    format_setup = read_format(global_file.data, project_file.data, workspace)
+    project_format = format_needs_trust(format_setup)  # so are formatters
+    # What a workspace formatter runs (a node_modules program, a prettier config that loads code) is trusted together
+    # with the file's bytes, so it waits for trust with no settings file too and a changed program asks again.
+    evidence = trust_evidence(format_setup)
+    needs_trust = (
+        (bool(project_file.allow) or project_hooks or project_lsp or project_format)
+        and (raw is not None or bool(evidence))
+        and not store.is_trusted(workspace, (raw or b"") + evidence)
+    )
     warnings = [
         escape(w)
         for w in (
@@ -417,7 +433,7 @@ def prepare(
         return new if unchanged else None
 
     def trust(content: bytes) -> None:
-        store.trust(workspace, content)
+        store.trust(workspace, content + evidence)
 
     rules = Rules(
         global_file,
@@ -431,6 +447,8 @@ def prepare(
         store_path=store.path,
         own_write=own_write,
         project_lsp=project_lsp,
+        project_format=project_format,
+        trust_without_file=bool(evidence),
     )
     if len(warnings) > MAX_WARNINGS:
         more = len(warnings) - MAX_WARNINGS

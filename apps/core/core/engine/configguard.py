@@ -207,9 +207,11 @@ class ConfigGuard:
         *,
         home: Path | None = None,
         lsp: LspControl | None = None,
+        format: LspControl | None = None,
     ) -> None:
         self._workspace = workspace
         self.lsp = lsp
+        self.format = format  # the formatter hub: the same two calls as the LSP hub
         self._rules = rules
         self.mcp = mcp  # may be set later: the hub is built after the guard in some setups
         self._stores = tuple(stores)
@@ -367,6 +369,7 @@ class ConfigGuard:
             except Exception as exc:
                 problems.append(f"could not stop the MCP servers ({_problem(exc)})")
         stopped_lsp = self._withdraw_lsp(change, project, changed_global, problems)
+        stopped_format = self._withdraw_format(change, project, changed_global, problems)
         reactions: list[str] = []
         if project:
             failed = self._forget(problems, nested)
@@ -394,6 +397,8 @@ class ConfigGuard:
         reaction = "; ".join(reactions)
         if stopped_lsp:
             reaction += "; LSP servers stopped"
+        if stopped_format:
+            reaction += "; formatters stopped"
         if problems:
             reaction += " (" + "; ".join(problems) + ")"
         return f"config changed by {change.cause.text}: {self._files(change.paths)}; {reaction}"
@@ -401,10 +406,19 @@ class ConfigGuard:
     def _withdraw_lsp(self, change: Change, project: bool, changed_global: bool, problems: list[str]) -> bool:
         """Stop the language servers whose file changed: the project-sourced ones for a project change, the
         global-sourced ones when the global settings file itself changed. True when any was withdrawn."""
-        if self.lsp is None:
+        return self._withdraw(self.lsp, "LSP servers", change, project, changed_global, problems)
+
+    def _withdraw_format(self, change: Change, project: bool, changed_global: bool, problems: list[str]) -> bool:
+        """The same for the formatters: they never run again in this run."""
+        return self._withdraw(self.format, "formatters", change, project, changed_global, problems)
+
+    def _withdraw(
+        self, control: LspControl | None, what: str, change: Change, project: bool, changed_global: bool, problems: list[str]
+    ) -> bool:
+        if control is None:
             return False
         try:
-            sources = self.lsp.sources()
+            sources = control.sources()
             names: list[str] = []
             if project:
                 names += [n for n, source in sources.items() if source == "project"]
@@ -412,10 +426,10 @@ class ConfigGuard:
             if changed_global and global_settings is not None and global_settings in change.paths:
                 names += [n for n, source in sources.items() if source == "global"]
             if names:
-                self.lsp.withdraw(names, STOP_REASON)
+                control.withdraw(names, STOP_REASON)
             return bool(names)
         except Exception as exc:
-            problems.append(f"could not stop the LSP servers ({_problem(exc)})")
+            problems.append(f"could not stop the {what} ({_problem(exc)})")
             return False
 
     @staticmethod

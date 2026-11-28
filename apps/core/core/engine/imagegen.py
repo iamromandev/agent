@@ -447,6 +447,7 @@ async def run_helper(
     timeout: float | None,
     on_start: Callable[[int], None] | None = None,
     who: str = "the compositing helper",
+    env_extra: Mapping[str, str] | None = None,
 ) -> tuple[int, bytes]:
     """Run a helper process like mflux: filtered environment, its own process group, no stdin or
     stdout. Returns (exit code, the end of stderr); kills the group on timeout (`ImageGenError`) and on cancel."""
@@ -458,7 +459,7 @@ async def run_helper(
             stdout=DEVNULL,
             stderr=PIPE,
             start_new_session=True,
-            env=guard.env.filter(child_environment()),
+            env={**guard.env.filter(child_environment()), **(env_extra or {})},
         )
     except OSError as exc:
         raise ImageGenError(f"Could not start {who}: {escape(str(exc))}") from exc

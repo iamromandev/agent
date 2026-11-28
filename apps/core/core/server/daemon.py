@@ -269,6 +269,7 @@ class Daemon:
         if guard.marker_set and not rules.global_active and not rules.global_revoked:
             servers = mcp.untrusted("global")
             lsp_global = rt.lsp.untrusted("global") if rt.lsp is not None else []
+            format_global = rt.format.untrusted("global") if rt.format is not None else []
             for line in rt.held.notices():
                 self._notice("warn", line)
             marker = await asyncio.to_thread(guard.marker_info)
@@ -281,6 +282,7 @@ class Daemon:
                 deny=rules.global_deny,
                 held=rt.held,
                 lsp=lsp_global,
+                formatters=format_global,
             )
             yes = await self.asks.ask("global_trust", ask)
             self._show(
@@ -303,9 +305,10 @@ class Daemon:
             )
         allow, project_hooks = rules.untrusted_allow, hooks.untrusted()
         project_lsp = rt.lsp.untrusted() if rt.lsp is not None else []
-        if allow or project_hooks or project_lsp:
+        project_format = rt.format.untrusted() if rt.format is not None else []
+        if allow or project_hooks or project_lsp or project_format:
             yes = await self.asks.ask(
-                "permission_trust", trust_lines("permission_trust", rules=allow, hooks=project_hooks, lsp=project_lsp)
+                "permission_trust", trust_lines("permission_trust", rules=allow, hooks=project_hooks, lsp=project_lsp, formatters=project_format)
             )
             self._show(
                 await asyncio.to_thread(
@@ -316,6 +319,7 @@ class Daemon:
                     has_rules=bool(allow),
                     has_hooks=bool(project_hooks),
                     has_lsp=bool(project_lsp),
+                    has_format=bool(project_format),
                 )
             )
 
@@ -499,6 +503,8 @@ class Daemon:
                 return info.mcp_summary(rt.mcp)
             case "lsp":
                 return info.lsp_summary(rt.lsp)
+            case "format":
+                return info.format_summary(rt.format)
             case "guardrails":
                 return info.guardrails_summary(rt.guard, rt.config_guard)
         return None

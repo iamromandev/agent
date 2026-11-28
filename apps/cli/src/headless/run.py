@@ -256,6 +256,8 @@ def _untrusted_warnings(rt: Runtime) -> list[str]:
         lines.append(f"{len(servers)} project MCP server{'s' * (len(servers) != 1)} {hint}")
     if rt.lsp is not None and (specs := rt.lsp.untrusted()):
         lines.append(escape_display(f"project lsp servers are not trusted: {', '.join(spec.name for spec in specs)}"))
+    if rt.format is not None and (formatters := rt.format.untrusted()):
+        lines.append(escape_display(f"project formatters are not trusted: {', '.join(f.name for f in formatters)}"))
     return lines
 
 

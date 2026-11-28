@@ -37,7 +37,7 @@ def test_stdin_that_is_not_utf8_is_a_usage_error() -> None:
         build(None, b"\xff\xfe\x00bad")
 
 
-@pytest.mark.parametrize("prompt", ["/new\nmore", "/lsp"])
+@pytest.mark.parametrize("prompt", ["/new\nmore", "/lsp", "/format"])
 def test_a_built_in_name_is_a_usage_error_that_names_it(prompt: str) -> None:
     name = prompt.split()[0].lstrip("/")
     with pytest.raises(UsageError, match=name):
