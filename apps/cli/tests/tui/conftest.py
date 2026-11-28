@@ -290,6 +290,13 @@ async def choose(pilot: Pilot, option_id: str) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _colour(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Textual turns every colour grey when `NO_COLOR` is set at app start, and `uv run` sets `NO_COLOR=1` for the
+    processes it starts, so the look tests would depend on how pytest was launched."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _test_time_limit():
     """Net for anything not covered by a bounded wait (a shutdown that never ends, a stuck key press).
 
