@@ -97,6 +97,15 @@ class Settings(BaseSettings):
         float,
         Field(default=120.0, gt=0, description="Seconds an MCP server may take to start and list its tools"),
     ]
+    lsp_wait: Annotated[
+        float, Field(default=3.0, gt=0, description="Seconds a write/edit waits for a language server's diagnostics")
+    ]
+    lsp_start_wait: Annotated[
+        float, Field(default=10.0, gt=0, description="Seconds the first write/edit waits for a language server to start")
+    ]
+    lsp_max_diagnostics: Annotated[
+        int, Field(default=20, gt=0, description="Diagnostics shown per file and language server")
+    ]
     daemon_idle: Annotated[
         float,
         Field(default=600.0, gt=0, description="Seconds the shared-session daemon stays up with no client and no turn"),

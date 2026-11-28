@@ -501,3 +501,42 @@ def test_headless_never_offers_generate_image_even_when_mflux_is_found(
     assert go(ws, provider) == EXIT_OK
 
     assert "generate_image" not in provider.requests[0][1]
+
+
+def test_a_sigterm_during_a_turn_leaves_no_language_server_alive(
+    ws: Path, env: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+    import os
+    import signal
+    import threading
+    import time
+
+    from core.testing.fakes import Gate
+    from core.testing.helpers import assert_all_gone
+    from core.testing.lsp_fakes import fake_lsp
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake_lsp(bin_dir, "ty")
+    dump = tmp_path / "dump.jsonl"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.setenv("FAKE_LSP_DUMP", str(dump))
+    settings(env, lsp=True)
+    gate = Gate()
+    provider = ScriptedProvider([call("write", path="a.py", content="x = 2\n"), [gate]])
+
+    def terminate() -> None:  # once the server has the file and the model's next request waits
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline and not (dump.exists() and "didOpen" in dump.read_text() and gate.reached.is_set()):
+            time.sleep(0.02)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    thread = threading.Thread(target=terminate)
+    thread.start()
+    code = go(ws, provider, allow=("write",))
+    thread.join()
+
+    pids = {json.loads(x)["pid"] for x in dump.read_text().splitlines()}
+    assert code == 143 and pids
+    asyncio.run(assert_all_gone(*pids))

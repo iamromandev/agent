@@ -171,3 +171,17 @@ def test_invalid_media_settings_are_rejected(monkeypatch: pytest.MonkeyPatch, na
     monkeypatch.setenv(name, value)
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
+
+
+def test_lsp_settings_defaults_env_and_validation(monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = get_settings()
+    assert (settings.lsp_wait, settings.lsp_start_wait, settings.lsp_max_diagnostics) == (3.0, 10.0, 20)
+    get_settings.cache_clear()
+    monkeypatch.setenv("AGENT_LSP_WAIT", "1.5")
+    monkeypatch.setenv("AGENT_LSP_START_WAIT", "4")
+    monkeypatch.setenv("AGENT_LSP_MAX_DIAGNOSTICS", "5")
+    settings = get_settings()
+    assert (settings.lsp_wait, settings.lsp_start_wait, settings.lsp_max_diagnostics) == (1.5, 4.0, 5)
+    monkeypatch.setenv("AGENT_LSP_MAX_DIAGNOSTICS", "0")
+    with pytest.raises(ValidationError):
+        Settings()
