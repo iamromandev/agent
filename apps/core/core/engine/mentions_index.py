@@ -40,7 +40,7 @@ class Suggestion:
     folder: bool
 
 
-def _git_env() -> dict[str, str]:
+def git_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
     env.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_TERMINAL_PROMPT="0", GIT_OPTIONAL_LOCKS="0")
     return env
@@ -214,7 +214,7 @@ class FileIndex:
         return (starts + contains)[:limit]
 
     def _git_files(self) -> list[str] | None:
-        env = _git_env()
+        env = git_env()
         git = find_git(env, self.workspace)
         if git is None:
             return None

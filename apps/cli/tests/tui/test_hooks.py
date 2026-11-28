@@ -130,6 +130,41 @@ async def test_ac3_the_prompt_lists_each_hook_and_nothing_is_spawned_until_trust
         assert any("hooks not trusted" in n and "off for this run" in n for n in _notices(app))
 
 
+async def test_ac9_the_prompt_lists_a_project_lsp_server_and_trust_lets_the_hub_start_it(launch: Launch) -> None:
+    import os
+
+    from core.engine.lsp.config import read_lsp
+    from core.engine.lsp.hub import LspHub
+
+    launch.project(lsp={"servers": {"mine": {"command": "/bin/sh", "args": ["-c", "x  y"], "extensions": [".m"]}}})
+    hub: LspHub | None = None
+
+    def build() -> LspHub:
+        setup = prepare(launch.workspace, launch.global_path, launch.store)
+        return LspHub(
+            read_lsp(setup.global_data, setup.project_data, launch.workspace, which=lambda name: None),
+            launch.workspace,
+            dict(os.environ),
+            project_active=lambda: launch.setup.rules.project_trusted,
+            wait=1,
+            start_wait=1,
+            max_lines=20,
+        )
+
+    hub = build()
+    app = launch.app(lsp=hub)
+    async with app.run_test() as pilot:
+        await until(pilot, lambda: _is_prompt(app))
+        text = "\n".join(_labels(app))
+        assert "1 language server" in text and "lsp mine: /bin/sh -c 'x\u2420\u00d72y'" in text
+        assert hub.untrusted() != []
+
+        await _answer(pilot, "trust")
+        await until(pilot, lambda: not isinstance(app.screen, PermissionTrustScreen))
+
+        assert hub.untrusted() == []
+
+
 async def test_ac4_the_mcp_prompt_and_the_settings_prompt_come_one_after_the_other(
     launch: Launch, tmp_path: Path
 ) -> None:

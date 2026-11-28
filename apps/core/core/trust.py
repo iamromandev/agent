@@ -12,6 +12,7 @@ from typing import Literal, Protocol
 from core.engine.configguard import MAX_SHOWN, NEXT_LAUNCH, HeldGlobal, MarkerInfo
 from core.engine.configwatch import TrustRevoked
 from core.engine.hooks.config import HookEntry
+from core.engine.lsp.config import ServerSpec
 from core.engine.mcp.config import ServerConfig
 from core.engine.permissions.rules import Rule
 from core.engine.text import escape
@@ -62,7 +63,7 @@ def command_line(server: ServerConfig) -> str:
     return shlex.join([escape(server.command), *(escape(arg) for arg in server.args)])
 
 
-def env_note(server: ServerConfig) -> str:
+def env_note(server: ServerConfig | ServerSpec) -> str:
     return f"(env: {', '.join(escape(key) for key in server.env)})" if server.env else ""
 
 
@@ -73,6 +74,13 @@ def sort_rules(rules: Sequence[Rule]) -> list[Rule]:
 
 def hook_line(hook: HookEntry) -> str:
     return f"hook {escape(hook.label)} (timeout {hook.timeout:g}s) {visible(hook.command)}"
+
+
+def lsp_line(server: ServerSpec) -> str:
+    """`lsp <name>: <command line>  (env: KEYS)` as the shell would see it, odd characters escaped, space runs
+    written out; the env keys as the MCP prompt shows them (the server gets the env unfiltered: `PATH`, `LD_PRELOAD`)."""
+    env = f"  {env_note(server)}" if server.env else ""
+    return f"lsp {visible(server.name)}: {visible(shlex.join([server.command, *server.args]))}{env}"
 
 
 def marker_text(marker: MarkerInfo | None) -> str:
@@ -104,6 +112,7 @@ def trust_lines(
     marker: MarkerInfo | None = None,
     deny: Sequence[Rule] = (),
     held: HeldGlobal | None = None,
+    lsp: Sequence[ServerSpec] = (),
 ) -> TrustAsk:
     """What the prompt of `kind` lists, in the order the screens show it, with its title, texts and choices."""
     if kind == "mcp_trust":
@@ -118,7 +127,8 @@ def trust_lines(
     lines = [f"allow {visible(rule.text)}" for rule in sort_rules(rules)]
     lines += [hook_line(hook) for hook in hooks]
     if kind == "permission_trust":
-        parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook")) if items]
+        lines += [lsp_line(server) for server in lsp]
+        parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook"), (lsp, "language server")) if items]
         header, footer = [], []
         if rules:
             header.append(".agent/settings.json in this folder wants to allow these calls without asking:")
@@ -126,7 +136,10 @@ def trust_lines(
         if hooks:
             header.append(".agent/settings.json in this folder wants to run these commands at these events:")
             footer.append("Hooks run in this folder like bash, and can refuse your tool calls. Tab scrolls the list.")
-        what = " and ".join(name for name, items in (("rules", rules), ("hooks", hooks)) if items)
+        if lsp:
+            header.append(".agent/settings.json in this folder wants to start these language servers on your machine:")
+            footer.append("Language servers run in this folder like bash; their messages are added to write and edit results.")
+        what = " and ".join(name for name, items in (("rules", rules), ("hooks", hooks), ("language servers", lsp)) if items)
         return TrustAsk(
             kind,
             lines,
@@ -137,7 +150,11 @@ def trust_lines(
             accept=f"Trust these {what}",
         )
     held = held if held is not None else HeldGlobal()
-    parts = [_count(len(items), what) for items, what in ((rules, "allow rule"), (hooks, "hook"), (servers, "MCP server")) if items]
+    parts = [
+        _count(len(items), what)
+        for items, what in ((rules, "allow rule"), (hooks, "hook"), (servers, "MCP server"), (lsp, "language server"))
+        if items
+    ]
     parts += [_count(len(names), f"global {label}") for label, names in held.kinds()]
     if held.keep_env:
         parts.append(_count(len(held.keep_env), "keepEnv name"))
@@ -150,10 +167,11 @@ def trust_lines(
     ]
     footer = ["Deny rules and protected paths apply either way. Tab scrolls the list."]
     if held.any:
-        footer.append(f"Trust turns the allow rules, hooks and MCP servers on now; {NEXT_LAUNCH}.")
+        footer.append(f"Trust turns the allow rules, hooks, MCP servers and language servers on now; {NEXT_LAUNCH}.")
     for server in servers:
         env = f" {env_note(server)}" if server.env else ""
         lines.append(f"mcp {visible(server.name)}  {visible(command_line(server))}{env}")
+    lines += [lsp_line(server) for server in lsp]
     lines += [f"keepEnv {visible(name)}" for name in held.keep_env]
     for label, names in held.kinds():
         lines += [f"{label} {visible(name)}" for name in names]
@@ -186,6 +204,8 @@ def pending_trust(
     project_servers: Sequence[ServerConfig],
     project_rules: Sequence[Rule],
     project_hooks: Sequence[HookEntry],
+    project_lsp: Sequence[ServerSpec] = (),
+    global_lsp: Sequence[ServerSpec] = (),
 ) -> list[TrustAsk]:
     """The prompts to show at launch, in the order they are asked: global, MCP, permissions."""
     asks: list[TrustAsk] = []
@@ -199,12 +219,13 @@ def pending_trust(
                 marker=marker,
                 deny=global_deny,
                 held=held,
+                lsp=global_lsp,
             )
         )
     if project_servers:
         asks.append(trust_lines("mcp_trust", servers=project_servers))
-    if project_rules or project_hooks:
-        asks.append(trust_lines("permission_trust", rules=project_rules, hooks=project_hooks))
+    if project_rules or project_hooks or project_lsp:
+        asks.append(trust_lines("permission_trust", rules=project_rules, hooks=project_hooks, lsp=project_lsp))
     return asks
 
 
@@ -219,6 +240,7 @@ def apply_trust(
     held_any: bool = False,
     has_rules: bool = True,
     has_hooks: bool = False,
+    has_lsp: bool = False,
 ) -> TrustOutcome:
     """What a yes or a no does. Blocking (writes the trust stores): call it off the event loop. The caller shows the
     notices and starts `start` (MCP servers) itself."""
@@ -226,7 +248,7 @@ def apply_trust(
     if kind == "global_trust":
         if not yes:
             out.notices.append(
-                ("info", "global config not trusted: global allow rules, hooks and MCP servers are off for this run")
+                ("info", "global config not trusted: global allow rules, hooks, MCP servers and language servers are off for this run")
             )
             return out
         if guard is None:
@@ -239,7 +261,7 @@ def apply_trust(
         out.start = list(servers)
         later = f"; {NEXT_LAUNCH}" if held_any else ""
         out.notices.append(
-            ("info", f"global config trusted: global allow rules, hooks and MCP servers are on{later}")
+            ("info", f"global config trusted: global allow rules, hooks, MCP servers and language servers are on{later}")
         )
     elif kind == "mcp_trust":
         if not yes:
@@ -256,7 +278,10 @@ def apply_trust(
         out.start = list(servers)
     else:
         if not yes:
-            if has_rules and has_hooks:
+            if has_lsp:
+                off = [name for name, on in (("allow rules", has_rules), ("hooks", has_hooks)) if on] + ["language servers"]
+                text = f"project settings not trusted: {', '.join(off)} are off for this run"
+            elif has_rules and has_hooks:
                 text = "project permission rules and hooks not trusted: allow rules and hooks are off for this run"
             elif has_hooks:
                 text = "project hooks not trusted: hooks are off for this run"

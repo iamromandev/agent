@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Literal
 from urllib.parse import unquote, urlparse
 
-from core.engine.lsp.config import ServerSpec
+from core.engine.lsp.config import ServerSpec, changed_since_launch
 from core.engine.lsp.protocol import encode, read_message
 from core.engine.text import escape
 
@@ -94,6 +94,7 @@ class LspServer:
         self.state: State = "idle"
         self.reason: str | None = None
         self.pgid: int | None = None
+        self._withdrawn = False
         self._proc: asyncio.subprocess.Process | None = None
         self._reader: asyncio.Task[None] | None = None
         self._start_lock = asyncio.Lock()
@@ -110,7 +111,7 @@ class LspServer:
     # -- process ----------------------------------------------------------------------------------------------
 
     def _dead(self) -> bool:
-        return self.state in ("exited", "off", "untrusted")
+        return self._withdrawn or self.state in ("exited", "off", "untrusted")
 
     def _fail(self, reason: str) -> None:
         """The server is not usable and is not tried again: exited with `reason`, its process group killed."""
@@ -119,7 +120,15 @@ class LspServer:
         self.kill()
 
     async def _start(self) -> None:
+        if self._dead():
+            return
         self.state = "starting"
+        if self.spec.fingerprint is not None:  # a program from `.venv/bin`: it must still be the one seen at launch
+            if await asyncio.to_thread(changed_since_launch, self.spec.command, self.spec.fingerprint):
+                self._fail(f"{escape(self.spec.command)} changed since launch")
+                return
+            if self._dead():
+                return
         if os.sep not in self.spec.command:  # the spawn would look a bare name up through the inherited PATH
             self._fail(f"could not start: {escape(self.spec.command)} is not a path")
             return
@@ -137,8 +146,11 @@ class LspServer:
         except (OSError, ValueError) as exc:
             self._fail(f"could not start: {escape(str(exc))}")
             return
-        self.pgid = self._proc.pid
-        self._reader = asyncio.ensure_future(self._read_loop(self._proc))
+        self.pgid = self._proc.pid  # set before the flag is read: a `withdraw` from another thread either sees the
+        self._reader = asyncio.ensure_future(self._read_loop(self._proc))  # group id or is seen here
+        if self._withdrawn:  # withdrawn while the process was being spawned: `kill` found no group then
+            self.kill()
+            return
         root = self.workspace.as_uri()
         try:
             result = await self._request(
@@ -163,8 +175,11 @@ class LspServer:
             return
         caps = result.get("capabilities") if isinstance(result, dict) else None
         self._pull = isinstance(caps, dict) and bool(caps.get("diagnosticProvider"))
+        if self._dead():
+            return
         self._notify("initialized", {})
-        self.state = "running"
+        if not self._dead():
+            self.state = "running"
 
     def _write(self, obj: dict[str, object]) -> None:
         if self._proc is None or self._proc.stdin is None or self._dead():
@@ -292,7 +307,10 @@ class LspServer:
             try:
                 found = await asyncio.wait_for(self._collect(path, text), limit)
             except TimeoutError:
-                self.state, self.reason = "timed out", f"did not answer within {shown:g} s"
+                if not self._dead():
+                    self.state, self.reason = "timed out", f"did not answer within {shown:g} s"
+                return None
+            if self._dead():  # withdrawn (or ended) while it answered: nothing from it is shown
                 return None
             if self.state == "timed out":
                 self.state, self.reason = "running", None
@@ -394,3 +412,12 @@ class LspServer:
     def kill(self) -> None:
         """Synchronous SIGKILL of the whole process group."""
         self._signal(signal.SIGKILL)
+
+    def withdraw(self, reason: str) -> None:
+        """Stop now and for the rest of the run: state `off` with `reason` (so no `exited` notice follows), then the
+        group is killed. Safe from any thread (the config guard calls it from a worker): it only sets the flag and
+        the state, which a running call reads at its next check, and `os.killpg`, which needs no loop. A process
+        still being spawned has no group yet; `_start` reads the flag right after the spawn returns and kills it."""
+        self._withdrawn = True
+        self.state, self.reason = "off", reason
+        self.kill()

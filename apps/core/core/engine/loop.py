@@ -1432,7 +1432,8 @@ class Agent:
 
     def _accepts_edit(self, tool: Tool, prepared: Prepared, mode: Mode) -> bool:
         """Accept-edits mode approves a write or edit without the dialog when the path the tool resolved and checked
-        (`Prepared.target`; none: ask) is in the workspace and is not under a `.git` segment, the agent config files,
+        (`Prepared.target`; none: ask) is in the workspace and is not under a `.git` or `.venv` segment (a language
+        server may run a program from `.venv/bin`), the agent config files,
         `.agent/commands`, `.agent/skills`, `.agent/agents`, `.agent/workflows` or the agent's own config, data and
         sessions folders (a workspace that holds the home folder). Names are compared case-insensitively (APFS) and
         without a macOS `/System/Volumes/Data` prefix; an existing file with more than one hard link (or one that cannot be checked) always asks. Never asked
@@ -1442,7 +1443,7 @@ class Agent:
             return False
         workspace = self.ctx.workspace.resolve()
         relative = _relative_parts(target, workspace)
-        if relative is None or ".git" in relative or relative[:2] in AGENT_ASKING_PARTS:
+        if relative is None or ".git" in relative or ".venv" in relative or relative[:2] in AGENT_ASKING_PARTS:
             return False
         folders = (
             workspace / ".agent" / "agents",

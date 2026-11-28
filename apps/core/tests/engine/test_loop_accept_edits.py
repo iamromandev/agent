@@ -142,6 +142,17 @@ async def test_the_agent_files_folder_asks_without_always_in_edits_mode(
     assert not (workspace / path).exists()
 
 
+@pytest.mark.parametrize("path", [".venv/bin/ty", ".VENV/lib/x.py", "sub/.venv/bin/ruff"])
+async def test_a_venv_folder_asks_in_edits_mode_at_any_depth(ctx: ToolContext, workspace: Path, path: str) -> None:
+    """A language server may be started from `.venv/bin`: an agent write there would be code that runs later."""
+    agent, _, approver = _agent(ctx, [_call("c1", "write", path=path, content="x\n"), _done()], [DENY])
+
+    await _run(agent)
+
+    assert len(approver.requests) == 1
+    assert not (workspace / path).exists()
+
+
 @pytest.mark.parametrize("path", [".agent/settings.json"])
 async def test_the_agent_config_files_ask_without_always(ctx: ToolContext, workspace: Path, path: str) -> None:
     agent, _, approver = _agent(ctx, [_call("c1", "write", path=path, content="{}\n"), _done()], [DENY])

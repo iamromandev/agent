@@ -8,6 +8,7 @@ from typing import ClassVar
 
 from core.engine.configguard import HeldGlobal, MarkerInfo
 from core.engine.hooks.config import HookEntry
+from core.engine.lsp.config import ServerSpec
 from core.engine.mcp.config import ServerConfig
 from core.engine.permissions.rules import Rule
 from core.trust import sort_rules, trust_lines
@@ -49,12 +50,14 @@ class GlobalTrustScreen(ModalScreen[bool]):
         *,
         deny: Sequence[Rule] = (),
         held: HeldGlobal | None = None,
+        lsp: Sequence[ServerSpec] = (),
     ) -> None:
         super().__init__()
         # What allows the most comes first, as in the project prompt.
         self.rules = sort_rules(rules)
         self.hooks = list(hooks)
         self.servers = list(servers)
+        self.lsp = list(lsp)
         self.marker = marker
         self.deny = list(deny)  # shown for the full picture: deny rules apply either way
         self.held = held if held is not None else HeldGlobal()
@@ -68,6 +71,7 @@ class GlobalTrustScreen(ModalScreen[bool]):
             marker=self.marker,
             deny=self.deny,
             held=self.held,
+            lsp=self.lsp,
         )
         with Vertical():
             yield Label(Text(ask.title, "bold"), id="title")
