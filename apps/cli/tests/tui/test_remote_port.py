@@ -202,3 +202,18 @@ async def test_another_daemon_that_already_has_the_session_live_is_followed_from
         assert not any(t.startswith("new daemon") for t in seen.notices())  # no events of another numbering
     finally:
         await port.close()
+
+
+async def test_model_length_comes_from_the_daemon_and_a_failure_is_a_catalog_error(serve) -> None:
+    served = await serve([REPLY])
+    catalog = served.daemon.rt.catalog
+    catalog.lengths["other:7b"] = 32768
+    catalog.fail_length.add("fake")
+    port = await _port(served, Seen())
+    try:
+        assert await port.model_length("other:7b") == 32768
+        assert await port.model_length("missing") is None  # unknown length, not an error
+        with pytest.raises(remote.CatalogError, match="Could not read fake"):
+            await port.model_length("fake")
+    finally:
+        await port.close()

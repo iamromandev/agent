@@ -387,6 +387,18 @@ def build_app(daemon: Daemon) -> ASGIApp:
             raise ApiError(502, str(exc)) from None
         return JSONResponse([asdict(i) for i in infos])
 
+    async def model_length(request: Request) -> Response:
+        """`{"context_length": int | null}` for `?name=` (null: Ollama reports none); 502 when it cannot be read."""
+        client_of(request)
+        name = request.query_params.get("name", "")
+        if not name:
+            raise ApiError(400, "name is required")
+        try:
+            length = await daemon.rt.catalog.context_length(name)
+        except CatalogError as exc:
+            raise ApiError(502, str(exc)) from None
+        return JSONResponse({"context_length": length})
+
     async def suggest(request: Request) -> Response:
         client_of(request)
         token = request.query_params.get("token", "")
@@ -432,6 +444,7 @@ def build_app(daemon: Daemon) -> ASGIApp:
         Route("/v1/sessions/{id}/diff", handler(diff_list), methods=["GET"]),
         Route("/v1/sessions/{id}/diff/file", handler(diff_file), methods=["GET"]),
         Route("/v1/models", handler(models), methods=["GET"]),
+        Route("/v1/model-length", handler(model_length), methods=["GET"]),
         Route("/v1/files/suggest", handler(suggest), methods=["GET"]),
         Route("/v1/asks/{ask_id}", handler(answer), methods=["POST"]),
         Route("/v1/stop", handler(stop), methods=["POST"]),
