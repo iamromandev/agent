@@ -79,6 +79,11 @@ class LspHub:
             self._told.add((name, server.reason))
             emit(Notice("warn", f"lsp {escape_display(name)}: {server.reason}"))
 
+    @property
+    def warnings(self) -> tuple[str, ...]:
+        """The launch warnings of the setup (already escaped)."""
+        return self._setup.warnings_text
+
     def listing(self) -> list[tuple[str, str, str, str | None]]:
         rows: list[tuple[str, str, str, str | None]] = []
         for spec in self._setup.servers:

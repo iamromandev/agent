@@ -117,6 +117,9 @@ cp apps/cli/.env.example apps/cli/.env
 | `AGENT_SESSIONS_DIR` | `~/.local/share/agent/sessions` | Where sessions are saved |
 | `AGENT_MCP_TIMEOUT` | `60` | Seconds before an MCP tool call gives up |
 | `AGENT_MCP_START_TIMEOUT` | `120` | Seconds an MCP server may take to start |
+| `AGENT_LSP_WAIT` | `3` | Seconds a `write`/`edit` waits for language-server diagnostics (needs `"lsp": true`) |
+| `AGENT_LSP_START_WAIT` | `10` | Seconds the first call waits for a language server to start |
+| `AGENT_LSP_MAX_DIAGNOSTICS` | `20` | Diagnostics shown per file and server |
 | `AGENT_SEARCH_URL` | unset | SearXNG URL; turns on `web_search` (step 9) |
 | `AGENT_API_URL` | `http://localhost:8000` | API for `agent health check` |
 

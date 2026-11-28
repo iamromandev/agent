@@ -14,6 +14,7 @@ from core.engine.guardrails.paths import (
 )
 from core.engine.guardrails.setup import Guardrails
 from core.engine.hooks.setup import Hooks
+from core.engine.lsp.hub import LspHub
 from core.engine.mcp.hub import McpHub
 from core.engine.mcp.names import tool_name
 from core.engine.permissions.setup import Rules
@@ -24,6 +25,7 @@ __all__ = [
     "agents_summary",
     "guardrails_summary",
     "hooks_summary",
+    "lsp_summary",
     "mcp_summary",
     "permissions_summary",
     "skills_summary",
@@ -103,3 +105,15 @@ def mcp_summary(mcp: McpHub | None) -> str:
         if state.status == "ready":
             lines.extend(f"  {name}" for name in dict.fromkeys(tool_name(config.name, i.name) for i in state.tools))
     return "\n".join(lines)
+
+
+def lsp_summary(lsp: LspHub | None) -> str:
+    """`<name> (<source>) <state>[: reason]` per language server in table order, then the setup warnings."""
+    if lsp is None:
+        return 'LSP is off (set "lsp": true in settings)'
+    lines = []
+    for name, source, state, reason in lsp.listing():
+        line = f"{escape_display(name)} ({source}) {state}"
+        lines.append(f"{line}: {escape_display(reason)}" if reason else line)
+    lines.extend(lsp.warnings)
+    return "\n".join(lines) if lines else "No language servers found."

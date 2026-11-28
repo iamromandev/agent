@@ -470,6 +470,8 @@ class Daemon:
                 return info.hooks_summary(rt.hooks)
             case "mcp":
                 return info.mcp_summary(rt.mcp)
+            case "lsp":
+                return info.lsp_summary(rt.lsp)
             case "guardrails":
                 return info.guardrails_summary(rt.guard, rt.config_guard)
         return None

@@ -206,3 +206,52 @@ async def test_stream_latency_with_two_clients_stays_low(clients) -> None:
     assert len(latencies) == 400
     assert statistics.median(latencies) < 0.05
     assert latencies[int(len(latencies) * 0.95)] < 0.2
+
+
+def _lsp_setup(tmp_path, monkeypatch):
+    import json
+    import os
+    from pathlib import Path
+
+    from core.engine.lsp import server as server_module
+    from core.testing.lsp_fakes import fake_lsp
+
+    monkeypatch.setattr(server_module, "QUIET", 0.1)
+    monkeypatch.setenv("FAKE_LSP_DUMP", str(tmp_path / "dump.jsonl"))
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = fake_lsp(bin_dir, "ty")
+
+    def setup(_ws: Path) -> None:
+        folder = Path(os.environ["XDG_CONFIG_HOME"]) / "agent"
+        folder.mkdir(parents=True, exist_ok=True)
+        servers = {"ty": {"command": str(fake), "extensions": [".py"]}}
+        body = {"lsp": {"servers": servers}, "permissions": {"allow": ["write"]}}
+        (folder / "settings.json").write_text(json.dumps(body))
+
+    return setup
+
+
+async def test_ac11_two_sessions_share_one_language_server_and_both_results_carry_the_block(
+    clients, tmp_path, monkeypatch
+) -> None:
+    import json
+
+    def write(call_id: str) -> list[Any]:
+        return [ToolCallEvent(ToolCall(call_id, "write", {"path": "a.py", "content": "x = 2\n"})), Done(1, 1)]
+
+    _served, client, watch = await clients([write("w1"), REPLY, write("w2"), REPLY], setup=_lsp_setup(tmp_path, monkeypatch))
+    a, b = client("A"), client("B")
+    sid_a = (await a.open_session(None))["session_id"]
+    sid_b = (await b.open_session(None))["session_id"]
+    seen_a, seen_b = watch(a, sid_a), watch(b, sid_b)
+    await a.send(sid_a, "edit")
+    await seen_a.until("turn_outcome")
+    await b.send(sid_b, "edit")
+    await seen_b.until("turn_outcome")
+
+    for seen in (seen_a, seen_b):
+        (finished,) = seen.of("tool_finished")
+        assert "[diagnostics from ty:" in str(finished)
+    dump = tmp_path / "dump.jsonl"
+    assert len({json.loads(x)["pid"] for x in dump.read_text().splitlines()}) == 1

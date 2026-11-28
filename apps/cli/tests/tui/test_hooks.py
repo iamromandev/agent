@@ -200,6 +200,14 @@ async def test_ac12_without_hooks_the_command_says_so_and_help_lists_it(launch: 
     assert "/hooks" in HELP
 
 
+async def test_lsp_command_says_it_is_off_and_help_lists_it(launch: Launch) -> None:
+    app = launch.app()
+    async with app.run_test() as pilot:
+        await type_and_send(pilot, "/lsp")
+        await until(pilot, lambda: any("LSP is off" in n for n in _notices(app)))
+    assert "/lsp" in HELP
+
+
 async def test_ac12_hook_warnings_show_at_launch(launch: Launch) -> None:
     launch.write(launch.global_path, hooks={"Stop": [{"command": ""}]})
     app = launch.app()
